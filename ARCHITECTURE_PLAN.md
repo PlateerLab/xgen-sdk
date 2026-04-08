@@ -101,7 +101,7 @@ xgen-sdk/
 │       │   ├── config_serializer.py # 직렬화 유틸
 │       │   └── retry.py             # with_retry 데코레이터 + 복구 로직
 │       │
-│       ├── config/                  # 설정 관리 모듈 
+│       ├── config/                  # 설정 관리 모듈
 │       │   ├── __init__.py
 │       │   ├── redis_config.py      # RedisConfigManager (현 redis_config_manager.py)
 │       │   ├── local_config.py      # LocalConfigManager (현 local_config_manager.py)

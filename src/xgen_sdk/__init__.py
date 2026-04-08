@@ -10,6 +10,19 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.storage: MinIO 오브젝트 스토리지
     - xgen_sdk.auth: 인증/인가 (ABAC 권한, 게이트웨이 헤더)
     - xgen_sdk.redis: 범용 Redis 클라이언트
+
+Quick Start:
+    from xgen_sdk import XgenApp
+
+    xgen = XgenApp()
+    xgen.boot()
+
+    db = xgen.db           # XgenDB 인스턴스
+    config = xgen.config   # RedisConfigManager 또는 LocalConfigManager
 """
 
 __version__ = "1.0.0"
+
+from xgen_sdk.app import XgenApp
+
+__all__ = ["XgenApp", "__version__"]

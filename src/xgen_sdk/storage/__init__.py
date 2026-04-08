@@ -18,6 +18,10 @@ from xgen_sdk.storage.minio_client import (
     get_presigned_url,
     parse_minio_path,
     download_file_from_minio,
+    DEFAULT_BUCKET_NAME,
+    FILE_STORAGE_BUCKET,
+    CACHE_DIR,
+    IMAGE_EXTENSIONS,
 )
 
 __all__ = [
@@ -34,4 +38,8 @@ __all__ = [
     "get_presigned_url",
     "parse_minio_path",
     "download_file_from_minio",
+    "DEFAULT_BUCKET_NAME",
+    "FILE_STORAGE_BUCKET",
+    "CACHE_DIR",
+    "IMAGE_EXTENSIONS",
 ]
