@@ -23,13 +23,12 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         X-User-Superuser: "true" | "false"
         X-User-Roles: 쉼표 구분 역할 이름 (예: "developer,designer")
         X-User-Permissions: 쉼표 구분 권한 문자열 (예: "workflow:create,document:read")
-        X-User-Groups: 쉼표 구분 그룹 이름
         X-User-Supervision-Full: 쉼표 구분 대상 역할 이름
         X-User-Supervision-Monitor: 쉼표 구분 대상 역할 이름
         X-User-Supervision-Audit: 쉼표 구분 대상 역할 이름
 
     Returns:
-        Dict with: user_id, user_name, is_superuser, roles, permissions, groups, supervision
+        Dict with: user_id, user_name, is_superuser, roles, permissions, supervision
     """
     user_id = request.headers.get("X-User-ID")
     user_name_encoded = request.headers.get("X-User-Name")
@@ -52,10 +51,9 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
             detail="유효하지 않은 사용자 ID 형식입니다"
         )
 
-    # 역할/권한/그룹 파싱
+    # 역할/권한 파싱
     roles = _parse_comma_list(request.headers.get("X-User-Roles", ""))
     permissions = set(_parse_comma_list(request.headers.get("X-User-Permissions", "")))
-    groups = _parse_comma_list(request.headers.get("X-User-Groups", ""))
 
     if is_superuser:
         permissions = {"*:*"}
@@ -77,7 +75,6 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         "is_superuser": is_superuser,
         "roles": roles,
         "permissions": permissions,
-        "groups": groups,
         "supervision": supervision,
         # 하위 호환: flat key로도 접근 가능
         "supervision_full": supervision_full,
