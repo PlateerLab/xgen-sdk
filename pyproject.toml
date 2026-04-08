@@ -1,0 +1,30 @@
+[project]
+name = "xgen-sdk"
+version = "1.0.0"
+description = "XGen Platform Shared SDK - DB, Config, Storage, Auth"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.1.0",
+    "psycopg-pool>=3.1.0",
+    "redis>=5.0.0",
+    "minio>=7.2.0",
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.100.0",
+]
+
+[project.optional-dependencies]
+db = ["psycopg[binary]>=3.1.0", "psycopg-pool>=3.1.0"]
+config = ["redis>=5.0.0"]
+storage = ["minio>=7.2.0"]
+auth = ["fastapi>=0.100.0"]
+all = ["xgen-sdk[db,config,storage,auth]"]
+
+[build-system]
+requires = ["setuptools>=69.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["xgen_sdk*"]
