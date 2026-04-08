@@ -1270,7 +1270,7 @@ class XgenDB:
                                    limit: int = 500, offset: int = 0,
                                    orderby: str = "id", orderby_asc: bool = False,
                                    select_columns: List[str] = None, ignore_columns: List[str] = None,
-                                   join_user: bool = False) -> Dict[str, Any]:
+                                   join_user: bool = False) -> List[Dict[str, Any]]:
         """
         테이블 이름 기반 조건부 레코드 조회 - 자동 복구 포함
         find_by_condition 메서드와 동일한 로직 사용
@@ -1298,7 +1298,7 @@ class XgenDB:
             join_user: users 테이블을 JOIN하여 username, full_name 조회 여부
 
         Returns:
-            Dict: {"success": bool, "data": list, "row_count": int, "error": str|None}
+            List[Dict]: 조회된 레코드 리스트 (빈 리스트 = 결과 없음, 에러 시 예외 발생)
         """
         def _do_find():
             db_type = self.config_db_manager.db_type
@@ -1366,13 +1366,13 @@ class XgenDB:
 
             results = self.config_db_manager.execute_query(query, tuple(values))
             data = [dict(row) for row in results] if results else []
-            return {"success": True, "data": data, "row_count": len(data)}
+            return data
 
         try:
             return self._with_auto_recovery(_do_find, "find_records_by_condition")
         except Exception as e:
             self.logger.error("Failed to find records in %s: %s", table_name, e)
-            return {"success": False, "data": [], "row_count": 0, "error": str(e)}
+            raise
 
     # ========== Legacy async query helpers (named params 지원) ==========
     def _convert_named_params(self, query: str, params: Optional[Dict[str, Any]] = None) -> tuple[str, tuple]:
