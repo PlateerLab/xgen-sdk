@@ -10,6 +10,7 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.storage: MinIO 오브젝트 스토리지
     - xgen_sdk.auth: 인증/인가 (ABAC 권한, 게이트웨이 헤더)
     - xgen_sdk.redis: 범용 Redis 클라이언트
+    - xgen_sdk.logging: 백엔드 DB 로깅 (BackendLogger)
 
 Quick Start:
     from xgen_sdk import XgenApp

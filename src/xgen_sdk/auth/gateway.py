@@ -61,10 +61,14 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         permissions = {"*:*"}
 
     # 감독 범위 파싱
+    supervision_full = _parse_comma_list(request.headers.get("X-User-Supervision-Full", ""))
+    supervision_monitor = _parse_comma_list(request.headers.get("X-User-Supervision-Monitor", ""))
+    supervision_audit = _parse_comma_list(request.headers.get("X-User-Supervision-Audit", ""))
+
     supervision = {
-        "full": _parse_comma_list(request.headers.get("X-User-Supervision-Full", "")),
-        "monitor": _parse_comma_list(request.headers.get("X-User-Supervision-Monitor", "")),
-        "audit": _parse_comma_list(request.headers.get("X-User-Supervision-Audit", "")),
+        "full": supervision_full,
+        "monitor": supervision_monitor,
+        "audit": supervision_audit,
     }
 
     return {
@@ -75,6 +79,10 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         "permissions": permissions,
         "groups": groups,
         "supervision": supervision,
+        # 하위 호환: flat key로도 접근 가능
+        "supervision_full": supervision_full,
+        "supervision_monitor": supervision_monitor,
+        "supervision_audit": supervision_audit,
     }
 
 
@@ -99,3 +107,83 @@ def _parse_comma_list(value: str) -> List[str]:
     if not value or not value.strip():
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+# ─────────────────────────────────────────────────────────
+# 권한 검증 헬퍼 (개별 컨테이너에서 공통 사용)
+# ─────────────────────────────────────────────────────────
+
+def require_permission(request: Request, required: str) -> Dict[str, Any]:
+    """Gateway 헤더 기반 권한을 확인한다. superuser는 자동 통과.
+
+    Args:
+        request: FastAPI Request
+        required: 필요한 권한 문자열 (예: "workflow:create")
+
+    Returns:
+        Dict: 사용자 세션 정보
+
+    Raises:
+        HTTPException 403: 권한 없음
+    """
+    from xgen_sdk.auth.permission_resolver import has_permission
+
+    user_session = get_user_info_by_gateway(request)
+    if not has_permission(user_session["permissions"], required):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission denied: {required}"
+        )
+    return user_session
+
+
+def require_any_permission(request: Request, required_list: List[str]) -> Dict[str, Any]:
+    """여러 권한 중 하나라도 있으면 통과.
+
+    Args:
+        request: FastAPI Request
+        required_list: 필요한 권한 문자열 목록
+
+    Returns:
+        Dict: 사용자 세션 정보
+
+    Raises:
+        HTTPException 403: 권한 없음
+    """
+    from xgen_sdk.auth.permission_resolver import has_permission
+
+    user_session = get_user_info_by_gateway(request)
+    if not any(has_permission(user_session["permissions"], r) for r in required_list):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission denied: one of {required_list} required"
+        )
+    return user_session
+
+
+def require_superuser(request: Request) -> Dict[str, Any]:
+    """superuser 여부를 헤더에서 확인한다.
+
+    Returns:
+        Dict: 사용자 세션 정보
+
+    Raises:
+        HTTPException 403: superuser가 아님
+    """
+    user_session = get_user_info_by_gateway(request)
+    if not user_session.get("is_superuser", False):
+        raise HTTPException(
+            status_code=403,
+            detail="관리자 권한이 필요합니다"
+        )
+    return user_session
+
+
+def extract_user_id(request: Request) -> int:
+    """Gateway 헤더에서 user_id만 추출한다.
+
+    Returns:
+        int: 사용자 ID
+    """
+    user_session = get_user_info_by_gateway(request)
+    return user_session["user_id"]

@@ -1,22 +1,19 @@
 """
-Permission Registry — 단일 진실 소스 (Single Source of Truth)
+Permission Registry — 데코레이터 기반 권한 자동 수집 + DB 동기화
 
-모든 권한은 이 레지스트리를 통해 등록/조회/검증된다.
-
-사용 패턴:
-    1) permission_constants.py 에서 ALL_PERMISSIONS 정의 (정적)
-    2) 컨트롤러에서 @require_perm("admin.user:read") 데코레이터 사용 → 자동 등록
-    3) 서버 시작 시 validate_and_sync() 로 불일치 검출 + DB 동기화
+엔드포인트에서 require_perm() 데코레이터를 적용하면:
+    1) import 시점에 레지스트리에 자동 등록
+    2) 요청 시점에 권한 체크
+    3) 서버 시작 시 validate_and_sync()로 DB 동기화
 
 이렇게 하면:
-    - 새 기능 추가: 컨트롤러에 @require_perm 데코레이터만 달면 자동 등록 + DB 동기화
-    - 기능 제거: 데코레이터 제거 → 시작 시 "orphaned" 경고 로그
-    - 이원화 불가: 컨트롤러가 곧 권한 정의
+    - 새 기능 추가: 엔드포인트에 require_perm("xxx:yyy", description="...") 만 달면 끝
+    - 기능 제거: 데코레이터 제거 → 시작 시 orphan 감지
+    - 별도 상수 관리 불필요: 엔드포인트가 곧 권한 정의
 """
 import logging
-from typing import Set, Dict, List, Tuple, Optional
-from functools import wraps
-from fastapi import Request, HTTPException, Depends
+from typing import Set, Dict, List, Optional
+from fastapi import Request, HTTPException
 
 logger = logging.getLogger("permission-registry")
 
@@ -26,29 +23,34 @@ logger = logging.getLogger("permission-registry")
 # ─────────────────────────────────────────────────────────
 
 class _PermissionRegistry:
-    """싱글톤 권한 레지스트리."""
+    """싱글톤 권한 레지스트리.
+
+    require_perm() 호출 시점(import 시점)에 자동으로 권한이 등록된다.
+    """
 
     def __init__(self):
-        # { "admin.user:read": {"description": "...", "sources": {"constant", "decorator"}} }
+        # { "admin.user:read": {"resource": "admin.user", "action": "read", "description": "사용자 조회"} }
         self._permissions: Dict[str, Dict] = {}
-        self._route_map: Dict[str, List[str]] = {}  # "GET /api/admin/user/all-users" → ["admin.user:read"]
 
-    def register(self, resource: str, action: str, description: str = "", source: str = "constant"):
-        """권한을 레지스트리에 등록."""
-        key = f"{resource}:{action}"
-        if key not in self._permissions:
-            self._permissions[key] = {"resource": resource, "action": action, "description": description, "sources": set()}
-        self._permissions[key]["sources"].add(source)
-        if description and not self._permissions[key]["description"]:
-            self._permissions[key]["description"] = description
+    def register(self, perm_key: str, description: str = ""):
+        """권한을 레지스트리에 등록.
 
-    def register_route(self, method: str, path: str, permission: str):
-        """라우트 → 권한 매핑 기록."""
-        route_key = f"{method.upper()} {path}"
-        if route_key not in self._route_map:
-            self._route_map[route_key] = []
-        if permission not in self._route_map[route_key]:
-            self._route_map[route_key].append(permission)
+        동일 권한이 여러 엔드포인트에서 등록되면 첫 번째 description을 유지.
+        """
+        parts = perm_key.split(":")
+        if len(parts) != 2:
+            logger.warning(f"Invalid permission format (expected 'resource:action'): {perm_key}")
+            return
+
+        resource, action = parts
+        if perm_key not in self._permissions:
+            self._permissions[perm_key] = {
+                "resource": resource,
+                "action": action,
+                "description": description,
+            }
+        elif description and not self._permissions[perm_key]["description"]:
+            self._permissions[perm_key]["description"] = description
 
     def all_permissions(self) -> Dict[str, Dict]:
         """등록된 전체 권한 사전."""
@@ -58,17 +60,12 @@ class _PermissionRegistry:
         """등록된 전체 권한 문자열 집합."""
         return set(self._permissions.keys())
 
-    def all_route_map(self) -> Dict[str, List[str]]:
-        """라우트 → 권한 매핑."""
-        return dict(self._route_map)
-
     def has(self, permission_key: str) -> bool:
         return permission_key in self._permissions
 
     def clear(self):
         """테스트용 초기화."""
         self._permissions.clear()
-        self._route_map.clear()
 
 
 # 전역 싱글톤
@@ -76,39 +73,32 @@ registry = _PermissionRegistry()
 
 
 # ─────────────────────────────────────────────────────────
-# 상수에서 자동 등록
-# ─────────────────────────────────────────────────────────
-
-def load_constants():
-    """permission_constants.py의 ALL_PERMISSIONS를 레지스트리에 등록."""
-    from xgen_sdk.auth.permission_constants import ALL_PERMISSIONS
-    for resource, action, description in ALL_PERMISSIONS:
-        registry.register(resource, action, description, source="constant")
-    logger.info(f"Loaded {len(ALL_PERMISSIONS)} permissions from constants")
-
-
-# ─────────────────────────────────────────────────────────
 # 데코레이터 (FastAPI Dependency)
 # ─────────────────────────────────────────────────────────
 
 def require_perm(*permissions: str, description: str = ""):
-    """FastAPI 라우트 데코레이터: 권한 체크 + 레지스트리 자동 등록.
+    """FastAPI Depends 팩토리: 권한 체크 + 레지스트리 자동 등록.
+
+    엔드포인트에 이 데코레이터를 적용하면:
+      - import 시점에 permission이 레지스트리에 등록됨
+      - 요청 시점에 Gateway 헤더 기반 권한 체크
+      - superuser는 자동 통과
 
     Usage:
-        @router.get("/all-users")
-        async def get_all_users(request: Request, _=Depends(require_perm("admin.user:read"))):
+        @router.get("/roles")
+        async def get_roles(request: Request,
+                            session=Depends(require_perm("admin.role:read",
+                                                         description="역할 조회"))):
+            user_id = session["user_id"]
             ...
 
-    Or multiple:
-        @router.post("/delete")
-        async def delete_user(request: Request, _=Depends(require_perm("admin.user:delete", "admin.user:read"))):
-            ...
+    Multiple (AND logic):
+        session=Depends(require_perm("admin.user:delete", "admin.user:read",
+                                     description="사용자 삭제"))
     """
-    # 데코레이터 시점에 레지스트리에 등록 (import 시점)
+    # import 시점에 레지스트리 등록 (서버 시작 시 자동 수집)
     for perm in permissions:
-        parts = perm.split(":")
-        if len(parts) == 2:
-            registry.register(parts[0], parts[1], description, source="decorator")
+        registry.register(perm, description)
 
     async def _dependency(request: Request):
         from xgen_sdk.auth.gateway import get_user_info_by_gateway
@@ -130,80 +120,108 @@ def require_perm(*permissions: str, description: str = ""):
     return _dependency
 
 
+def require_any_perm(*permissions: str, description: str = ""):
+    """FastAPI Depends 팩토리: OR 로직 권한 체크 + 레지스트리 자동 등록.
+
+    주어진 권한 중 **하나라도** 충족하면 통과.
+
+    Usage:
+        session=Depends(require_any_perm("admin.user:read", "admin.role:read",
+                                         description="관리 대시보드"))
+    """
+    for perm in permissions:
+        registry.register(perm, description)
+
+    async def _dependency(request: Request):
+        from xgen_sdk.auth.gateway import get_user_info_by_gateway
+        from xgen_sdk.auth.permission_resolver import has_permission
+
+        user_session = get_user_info_by_gateway(request)
+        user_perms = user_session.get("permissions", set())
+
+        if user_session.get("is_superuser"):
+            return user_session
+
+        if not any(has_permission(user_perms, perm) for perm in permissions):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Permission denied: one of {list(permissions)} required"
+            )
+
+        return user_session
+
+    return _dependency
+
+
 # ─────────────────────────────────────────────────────────
-# 시작 시 검증 + DB 동기화
+# 시작 시 DB 동기화
 # ─────────────────────────────────────────────────────────
 
-def validate_and_sync(app_db, permission_model_class=None) -> Dict:
-    """서버 시작 시 호출: 검증 + DB 동기화.
+def validate_and_sync(app_db, permission_model_class) -> dict:
+    """서버 시작 시 호출: 데코레이터로 수집된 권한을 DB와 동기화.
 
-    1) constants와 decorator에서 수집된 권한 비교 → 불일치 경고
-    2) DB permissions 테이블과 레지스트리 비교 → 누락분 INSERT
-    3) DB에만 있고 레지스트리에 없는 orphan 경고
+    1) 레지스트리(엔드포인트 데코레이터에서 수집)의 권한 → DB에 누락분 INSERT
+    2) DB에 있지만 레지스트리에 없는 orphan 감지 (경고만 — 자동 삭제 안 함)
+    3) DB에 description이 비어있으면 레지스트리 값으로 업데이트
 
     Args:
         app_db: XgenDB 인스턴스
-        permission_model_class: Permission ORM 모델 클래스 (xgen-core에서 전달)
+        permission_model_class: Permission ORM 모델 클래스
 
     Returns:
-        {
-            "registered": int,
-            "inserted": int,
-            "orphaned": list,
-            "decorator_only": list,
-            "warnings": list
-        }
+        {"registered": int, "synced": int, "orphaned": list, "warnings": list}
     """
     Permission = permission_model_class
 
     result = {
         "registered": len(registry.all_permissions()),
-        "inserted": 0,
+        "synced": 0,
         "orphaned": [],
-        "decorator_only": [],
-        "warnings": []
+        "warnings": [],
     }
 
-    # 1) decorator에만 있고 constants에 없는 권한 감지
-    for key, info in registry.all_permissions().items():
-        sources = info["sources"]
-        if "decorator" in sources and "constant" not in sources:
-            result["decorator_only"].append(key)
-            result["warnings"].append(
-                f"⚠️  '{key}' is used in code (@require_perm) but NOT in permission_constants.py"
-            )
-
-    # 2) DB 동기화
+    # DB에서 기존 권한 조회
     existing_db = app_db.find_all(Permission, limit=10000)
-    existing_set = set()
+    existing_map: Dict[str, object] = {}
     if existing_db:
         for p in existing_db:
-            existing_set.add(f"{p.resource}:{p.action}")
+            existing_map[f"{p.resource}:{p.action}"] = p
 
-    # 레지스트리 → DB 삽입
+    # 레지스트리 → DB 동기화
     for key, info in registry.all_permissions().items():
-        if key not in existing_set:
+        if key not in existing_map:
+            # 새 권한 INSERT
             perm = Permission(
                 resource=info["resource"],
                 action=info["action"],
-                description=info["description"]
+                description=info.get("description", ""),
             )
             try:
-                insert_result = app_db.insert(perm)
-                if insert_result is not None:
-                    result["inserted"] += 1
-                else:
-                    result["warnings"].append(f"Failed to insert: {key}")
+                app_db.insert(perm)
+                result["synced"] += 1
+                logger.info(f"Permission synced to DB: {key}")
             except Exception as e:
                 result["warnings"].append(f"Insert error for {key}: {e}")
+        else:
+            # description 업데이트 (DB가 비어있고 레지스트리에 있으면)
+            db_perm = existing_map[key]
+            new_desc = info.get("description", "")
+            if new_desc and not getattr(db_perm, "description", ""):
+                db_perm.description = new_desc
+                try:
+                    app_db.update(db_perm)
+                except Exception:
+                    pass
 
-    # 3) DB에 있지만 레지스트리에 없는 orphan 감지
+    # orphan 감지 (DB에 있지만 어떤 엔드포인트도 요구하지 않는 권한)
     registry_keys = registry.all_permission_keys()
-    for db_key in existing_set:
+    for db_key in existing_map:
         if db_key not in registry_keys:
             result["orphaned"].append(db_key)
-            result["warnings"].append(
-                f"🗑️  '{db_key}' exists in DB but not in code — consider removing"
-            )
+            logger.warning(f"Orphaned permission in DB (no endpoint uses it): {db_key}")
 
+    logger.info(
+        f"Permission sync complete: {result['registered']} registered, "
+        f"{result['synced']} synced, {len(result['orphaned'])} orphaned"
+    )
     return result
