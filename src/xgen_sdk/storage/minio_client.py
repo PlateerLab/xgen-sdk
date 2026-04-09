@@ -13,6 +13,7 @@ from minio.error import S3Error
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUCKET_NAME = os.getenv("MINIO_DOCUMENT_BUCKET", "documents")
+GOVERNANCE_BUCKET = os.getenv("MINIO_GOVERNANCE_BUCKET", "governance")
 
 def _parse_minio_endpoint(endpoint: str) -> tuple[str, bool]:
     """
@@ -42,7 +43,7 @@ def _parse_minio_endpoint(endpoint: str) -> tuple[str, bool]:
 
 @lru_cache(maxsize=1)
 def get_minio_client() -> Minio:
-    endpoint = os.getenv("MINIO_ENDPOINT")
+    endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
     access_key = os.getenv("MINIO_ROOT_USER") or os.getenv("MINIO_DATA_ACCESS_KEY") or "minioadmin"
     secret_key = os.getenv("MINIO_ROOT_PASSWORD") or os.getenv("MINIO_DATA_SECRET_KEY") or "minioadmin"
 

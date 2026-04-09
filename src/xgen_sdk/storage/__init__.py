@@ -20,6 +20,7 @@ from xgen_sdk.storage.minio_client import (
     download_file_from_minio,
     DEFAULT_BUCKET_NAME,
     FILE_STORAGE_BUCKET,
+    GOVERNANCE_BUCKET,
     CACHE_DIR,
     IMAGE_EXTENSIONS,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "download_file_from_minio",
     "DEFAULT_BUCKET_NAME",
     "FILE_STORAGE_BUCKET",
+    "GOVERNANCE_BUCKET",
     "CACHE_DIR",
     "IMAGE_EXTENSIONS",
 ]
