@@ -199,22 +199,25 @@ def validate_and_sync(app_db, permission_model_class=None) -> dict:
     """서버 시작 시 호출: 데코레이터로 수집된 권한을 DB와 동기화.
 
     1) 레지스트리(엔드포인트 데코레이터에서 수집)의 권한 → DB에 누락분 INSERT
-    2) DB에 있지만 레지스트리에 없는 orphan 감지 (경고만 — 자동 삭제 안 함)
-    3) DB에 description이 비어있으면 레지스트리 값으로 업데이트
+    2) DB에 description이 비어있으면 레지스트리 값으로 업데이트
+
+    주의: 다중 서비스(xgen-core, xgen-workflow, xgen-documents)가 각각 독립적으로
+    validate_and_sync() 를 호출하므로, orphan 감지는 수행하지 않는다.
+    (각 서비스의 레지스트리는 자신의 권한만 포함하므로 다른 서비스의 권한을
+     orphan으로 오판하는 문제가 있다.)
 
     Args:
         app_db: XgenDB 인스턴스
         permission_model_class: Permission ORM 모델 클래스 (생략 시 SDK 내장 모델 사용)
 
     Returns:
-        {"registered": int, "synced": int, "orphaned": list, "warnings": list}
+        {"registered": int, "synced": int, "warnings": list}
     """
     Permission = permission_model_class or _PermissionModel
 
     result = {
         "registered": len(registry.all_permissions()),
         "synced": 0,
-        "orphaned": [],
         "warnings": [],
     }
 
@@ -251,15 +254,8 @@ def validate_and_sync(app_db, permission_model_class=None) -> dict:
                 except Exception:
                     pass
 
-    # orphan 감지 (DB에 있지만 어떤 엔드포인트도 요구하지 않는 권한)
-    registry_keys = registry.all_permission_keys()
-    for db_key in existing_map:
-        if db_key not in registry_keys:
-            result["orphaned"].append(db_key)
-            logger.warning(f"Orphaned permission in DB (no endpoint uses it): {db_key}")
-
     logger.info(
         f"Permission sync complete: {result['registered']} registered, "
-        f"{result['synced']} synced, {len(result['orphaned'])} orphaned"
+        f"{result['synced']} synced"
     )
     return result
