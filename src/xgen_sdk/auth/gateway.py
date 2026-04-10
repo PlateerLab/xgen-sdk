@@ -100,10 +100,10 @@ def normalize_user_id(user_id: Union[int, str, None]) -> Optional[int]:
 
 
 def _parse_comma_list(value: str) -> List[str]:
-    """쉼표 구분 문자열을 리스트로 파싱. 빈 값 필터링."""
+    """쉼표 구분 문자열을 리스트로 파싱. URL 디코딩 + 빈 값 필터링."""
     if not value or not value.strip():
         return []
-    return [item.strip() for item in value.split(",") if item.strip()]
+    return [unquote(item.strip()) for item in value.split(",") if item.strip()]
 
 
 # ─────────────────────────────────────────────────────────
