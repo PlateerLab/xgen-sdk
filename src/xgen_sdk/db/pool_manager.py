@@ -967,8 +967,196 @@ class DatabaseManagerPsycopg3:
             self.logger.error(f"Migration failed: {e}")
             return False
 
+    # ────────────────────────────────────────────────────────
+    # 모델 스키마 정의 → PostgreSQL information_schema.data_type 정규화 매핑
+    # ────────────────────────────────────────────────────────
+    _MODEL_TO_PG_TYPE = {
+        "integer":                  "integer",
+        "int":                      "integer",
+        "serial":                   "integer",
+        "bigint":                   "bigint",
+        "bigserial":                "bigint",
+        "smallint":                 "smallint",
+        "float":                    "double precision",
+        "double precision":         "double precision",
+        "real":                     "real",
+        "numeric":                  "numeric",
+        "boolean":                  "boolean",
+        "bool":                     "boolean",
+        "text":                     "text",
+        "varchar":                  "character varying",
+        "character varying":        "character varying",
+        "char":                     "character",
+        "character":                "character",
+        "json":                     "json",
+        "jsonb":                    "jsonb",
+        "text[]":                   "ARRAY",
+        "integer[]":                "ARRAY",
+        "timestamp":                "timestamp without time zone",
+        "timestamp with time zone": "timestamp with time zone",
+        "timestamp without time zone": "timestamp without time zone",
+        "date":                     "date",
+        "time":                     "time without time zone",
+        "bytea":                    "bytea",
+        "uuid":                     "uuid",
+    }
+
+    @classmethod
+    def _normalize_pg_type(cls, model_column_def: str) -> str | None:
+        """
+        모델 스키마 정의 문자열에서 기본 PostgreSQL 타입을 추출하고
+        information_schema.data_type과 비교 가능한 정규화된 타입 문자열을 반환합니다.
+
+        예:
+            "JSONB DEFAULT '{}'::jsonb"  →  "jsonb"
+            "VARCHAR(200) NOT NULL"       →  "character varying"
+            "INTEGER REFERENCES users(id) ON DELETE SET NULL" → "integer"
+            "TEXT[]"                       →  "ARRAY"
+            "BOOLEAN DEFAULT FALSE"       →  "boolean"
+        """
+        raw = model_column_def.strip()
+        if not raw:
+            return None
+
+        # 1차: 토큰 분리 전에 TEXT[] 같은 배열 타입 먼저 매칭
+        lower = raw.lower()
+        if "[]" in lower:
+            return "ARRAY"
+
+        # "TIMESTAMP WITH TIME ZONE" 같은 multi-word 타입을 먼저 매칭
+        for model_type, pg_type in cls._MODEL_TO_PG_TYPE.items():
+            if lower.startswith(model_type):
+                # 정확히 그 타입 뒤에 공백, 괄호, 또는 문자열 끝이 오는지 확인
+                rest = lower[len(model_type):]
+                if not rest or rest[0] in (' ', '(', '\t', '\n'):
+                    return pg_type
+
+        # 첫 토큰 기반 fallback
+        first_token = raw.split('(')[0].split()[0].lower()
+        return cls._MODEL_TO_PG_TYPE.get(first_token)
+
+    def _alter_column_type(self, table_name: str, column_name: str, column_def: str, current_pg_type: str) -> bool:
+        """기존 컬럼의 타입을 모델 정의에 맞게 변경합니다."""
+        try:
+            expected_pg_type = self._normalize_pg_type(column_def)
+            if not expected_pg_type:
+                self.logger.warning(
+                    f"Cannot determine target type for {table_name}.{column_name} "
+                    f"from definition '{column_def}', skipping type migration"
+                )
+                return True  # 알 수 없는 타입이면 skip (실패 아님)
+
+            self.logger.info(
+                f"Altering column {table_name}.{column_name}: "
+                f"'{current_pg_type}' → '{expected_pg_type}' (def: {column_def})"
+            )
+
+            # 타입 변환에 사용할 순수 SQL 타입 (DEFAULT/NOT NULL 등 제거)
+            # column_def에서 타입 부분만 추출: 첫 토큰(+괄호+배열) ~ DEFAULT/NOT NULL/REFERENCES 직전까지
+            type_sql = self._extract_type_sql(column_def)
+
+            # USING 절: 기존 데이터 캐스팅
+            using_clause = self._build_using_clause(column_name, current_pg_type, expected_pg_type, type_sql)
+
+            alter_query = (
+                f"ALTER TABLE {table_name} "
+                f"ALTER COLUMN {column_name} TYPE {type_sql}{using_clause}"
+            )
+
+            self.execute_query(alter_query)
+            self.logger.info(f"Successfully altered column {table_name}.{column_name} to {type_sql}")
+
+            # DEFAULT 값이 column_def에 있으면 별도로 설정
+            default_val = self._extract_default(column_def)
+            if default_val is not None:
+                default_query = (
+                    f"ALTER TABLE {table_name} "
+                    f"ALTER COLUMN {column_name} SET DEFAULT {default_val}"
+                )
+                try:
+                    self.execute_query(default_query)
+                except Exception as de:
+                    self.logger.warning(f"Failed to set default for {table_name}.{column_name}: {de}")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to alter column {table_name}.{column_name}: {e}")
+            return False
+
+    @staticmethod
+    def _extract_type_sql(column_def: str) -> str:
+        """
+        컬럼 정의에서 순수 SQL 타입 부분만 추출합니다.
+        예: "JSONB DEFAULT '{}'::jsonb"   → "JSONB"
+            "VARCHAR(200) NOT NULL"        → "VARCHAR(200)"
+            "INTEGER REFERENCES users(id)" → "INTEGER"
+            "TEXT[]"                        → "TEXT[]"
+            "FLOAT DEFAULT 1.0"            → "FLOAT"
+        """
+        raw = column_def.strip()
+        # 종료 키워드들
+        stop_keywords = {'DEFAULT', 'NOT', 'NULL', 'REFERENCES', 'CHECK', 'UNIQUE',
+                         'PRIMARY', 'CONSTRAINT', 'ON', 'GENERATED'}
+        tokens = raw.split()
+        type_parts = []
+        i = 0
+        while i < len(tokens):
+            token_upper = tokens[i].upper()
+            if token_upper in stop_keywords:
+                break
+            type_parts.append(tokens[i])
+            i += 1
+        return ' '.join(type_parts) if type_parts else raw.split()[0]
+
+    @staticmethod
+    def _extract_default(column_def: str) -> str | None:
+        """컬럼 정의에서 DEFAULT 값을 추출합니다."""
+        upper = column_def.upper()
+        idx = upper.find('DEFAULT')
+        if idx == -1:
+            return None
+        rest = column_def[idx + len('DEFAULT'):].strip()
+        # DEFAULT 값: 다음 키워드(NOT, NULL, REFERENCES, CHECK 등) 전까지
+        stop_keywords = {'NOT', 'NULL', 'REFERENCES', 'CHECK', 'UNIQUE', 'PRIMARY', 'CONSTRAINT', 'ON'}
+        tokens = rest.split()
+        val_parts = []
+        for t in tokens:
+            if t.upper() in stop_keywords:
+                break
+            val_parts.append(t)
+        return ' '.join(val_parts) if val_parts else None
+
+    @staticmethod
+    def _build_using_clause(column_name: str, from_type: str, to_type: str, type_sql: str) -> str:
+        """ALTER COLUMN TYPE 시 USING 절을 생성합니다."""
+        # 동일 계열이면 USING 불필요
+        if from_type == to_type:
+            return ""
+
+        # character varying / text → jsonb: 데이터를 jsonb로 캐스팅
+        if to_type == "jsonb" and from_type in ("character varying", "text"):
+            return (
+                f" USING CASE"
+                f" WHEN {column_name} IS NULL OR {column_name} = '' THEN '{{}}'::jsonb"
+                f" WHEN {column_name}::text ~ '^\\{{' THEN {column_name}::jsonb"
+                f" ELSE jsonb_build_object('_default', {column_name}::text)"
+                f" END"
+            )
+
+        # character varying → integer
+        if to_type == "integer" and from_type == "character varying":
+            return f" USING {column_name}::INTEGER"
+
+        # character varying → boolean
+        if to_type == "boolean" and from_type == "character varying":
+            return f" USING ({column_name}::text = 'true')"
+
+        # 일반적인 캐스팅
+        return f" USING {column_name}::{type_sql}"
+
     def _run_schema_migrations(self, models_registry) -> bool:
-        """스키마 변경 감지 및 마이그레이션 실행"""
+        """스키마 변경 감지 및 마이그레이션 실행 (컬럼 추가/삭제/타입 변경)"""
         try:
             self.logger.info("Running schema migrations...")
 
@@ -985,17 +1173,37 @@ class DatabaseManagerPsycopg3:
                     continue
 
                 missing_columns = []
+                type_mismatch_columns = []
+
                 for column_name, column_def in expected_schema.items():
                     # 제약조건(UNIQUE_, CHECK_)은 컬럼이 아니므로 스킵
                     if column_name not in column_names:
                         continue
+
                     if column_name not in current_columns:
                         missing_columns.append((column_name, column_def))
                         self.logger.info(f"Found missing column: {column_name} ({column_def})")
+                    elif self.db_type == "postgresql":
+                        # 기존 컬럼의 타입 불일치 감지
+                        current_pg_type = current_columns[column_name]
+                        expected_pg_type = self._normalize_pg_type(column_def)
+                        if expected_pg_type and current_pg_type != expected_pg_type:
+                            type_mismatch_columns.append((column_name, column_def, current_pg_type))
+                            self.logger.info(
+                                f"Type mismatch: {table_name}.{column_name} "
+                                f"DB='{current_pg_type}' vs Model='{expected_pg_type}'"
+                            )
 
                 for column_name, column_def in missing_columns:
                     if not self._add_column_to_table(table_name, column_name, column_def):
                         return False
+
+                # 컬럼 타입 변경
+                for column_name, column_def, current_pg_type in type_mismatch_columns:
+                    if not self._alter_column_type(table_name, column_name, column_def, current_pg_type):
+                        self.logger.warning(
+                            f"Failed to alter column type {table_name}.{column_name}, continuing..."
+                        )
 
                 # 모델 스키마에 없는 불필요 컬럼 감지 및 제거
                 base_columns = {'id', 'created_at', 'updated_at'}
@@ -1009,7 +1217,7 @@ class DatabaseManagerPsycopg3:
                     if not self._drop_column_from_table(table_name, column_name):
                         self.logger.warning(f"Failed to drop stale column {column_name} from {table_name}, continuing...")
 
-                if not missing_columns and not stale_columns:
+                if not missing_columns and not stale_columns and not type_mismatch_columns:
                     self.logger.info(f"Table {table_name} schema is up to date")
 
             return True
