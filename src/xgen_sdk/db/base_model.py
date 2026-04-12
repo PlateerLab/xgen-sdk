@@ -50,6 +50,21 @@ class BaseModel(ABC):
     # 테이블 제약조건 접두사 (UNIQUE_, CHECK_)를 제외한 실제 컬럼명만 반환
     _CONSTRAINT_PREFIXES = ('UNIQUE_', 'CHECK_')
 
+    # from_dict()에서 JSON 역직렬화 대상 TEXT 컬럼 캐시
+    _text_columns_cache: Optional[frozenset] = None
+
+    @classmethod
+    def _get_text_columns(cls) -> frozenset:
+        """스키마에서 TEXT로 시작하는 컬럼명을 반환 (클래스별 캐시)"""
+        if cls._text_columns_cache is None:
+            instance = cls()
+            schema = instance.get_schema()
+            cls._text_columns_cache = frozenset(
+                k for k, v in schema.items()
+                if isinstance(v, str) and v.strip().upper().startswith('TEXT')
+            )
+        return cls._text_columns_cache
+
     def get_column_names(self) -> List[str]:
         """get_schema()에서 제약조건 키를 제외한 실제 컬럼명 목록 반환"""
         return [k for k in self.get_schema().keys()
@@ -67,7 +82,17 @@ class BaseModel(ABC):
         return datetime.now(TIMEZONE)
 
     def to_dict(self) -> Dict[str, Any]:
-        """객체를 딕셔너리로 변환"""
+        """객체를 딕셔너리로 변환 (API 응답 등 범용 — dict/list를 그대로 유지)"""
+        result = {}
+        for key, value in self.__dict__.items():
+            if isinstance(value, datetime):
+                result[key] = value.isoformat()
+            else:
+                result[key] = value
+        return result
+
+    def _to_db_dict(self) -> Dict[str, Any]:
+        """DB 저장용 딕셔너리 변환 (dict/list → JSON 문자열 직렬화)"""
         result = {}
         for key, value in self.__dict__.items():
             if isinstance(value, datetime):
@@ -77,6 +102,10 @@ class BaseModel(ABC):
             else:
                 result[key] = value
         return result
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        """객체를 딕셔너리로 변환 (API 응답용 — to_dict()와 동일, 호환성용 alias)"""
+        return self.to_dict()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
@@ -95,11 +124,27 @@ class BaseModel(ABC):
                     dt = dt.astimezone(tz)
                 data[field] = dt
 
+        # TEXT 컬럼에 저장된 JSON 문자열을 dict/list로 자동 역직렬화
+        # to_dict()에서 json.dumps()로 직렬화한 값을 복원
+        try:
+            schema = cls._get_text_columns()
+            for key in schema:
+                val = data.get(key)
+                if isinstance(val, str) and val:
+                    first = val.lstrip()[0:1]
+                    if first in ('{', '['):
+                        try:
+                            data[key] = json.loads(val)
+                        except (json.JSONDecodeError, ValueError):
+                            pass  # 순수 텍스트인 경우 그대로 유지
+        except Exception:
+            pass  # 스키마 파싱 실패 시 기존 동작 유지
+
         return cls(**data)
 
     def get_insert_query(self, db_type: str = "sqlite") -> tuple:
         """INSERT 쿼리 생성"""
-        data = self.to_dict()
+        data = self._to_db_dict()
         # id와 타임스탬프 제외 (자동 생성)
         data.pop('id', None)
         data.pop('created_at', None)
@@ -125,7 +170,7 @@ class BaseModel(ABC):
         if not self.id:
             raise ValueError("Cannot update record without ID")
 
-        data = self.to_dict()
+        data = self._to_db_dict()
         # id와 created_at 제외
         data.pop('id', None)
         data.pop('created_at', None)
