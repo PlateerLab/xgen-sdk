@@ -1217,6 +1217,9 @@ class DatabaseManagerPsycopg3:
                     if not self._drop_column_from_table(table_name, column_name):
                         self.logger.warning(f"Failed to drop stale column {column_name} from {table_name}, continuing...")
 
+                # 제약조건(NOT NULL, UNIQUE, DEFAULT) 동기화
+                self._run_constraint_migrations(table_name, expected_schema, column_names)
+
                 if not missing_columns and not stale_columns and not type_mismatch_columns:
                     self.logger.info(f"Table {table_name} schema is up to date")
 
@@ -1253,6 +1256,294 @@ class DatabaseManagerPsycopg3:
         except Exception as e:
             self.logger.error(f"Failed to get table columns for {table_name}: {e}")
             return {}
+
+    def _get_table_columns_full(self, table_name: str) -> dict:
+        """테이블의 현재 컬럼 구조를 제약조건 포함하여 조회 (PostgreSQL 전용)
+
+        Returns:
+            {column_name: {'data_type': str, 'is_nullable': 'YES'|'NO', 'column_default': str|None}}
+        """
+        try:
+            if self.db_type != "postgresql":
+                return {}
+
+            query = """
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+            """
+            result = self.execute_query(query, (table_name,))
+
+            if result:
+                return {
+                    row['column_name']: {
+                        'data_type': row['data_type'],
+                        'is_nullable': row['is_nullable'],
+                        'column_default': row.get('column_default'),
+                    }
+                    for row in result
+                }
+            return {}
+
+        except Exception as e:
+            self.logger.error(f"Failed to get full table columns for {table_name}: {e}")
+            return {}
+
+    def _get_unique_columns(self, table_name: str) -> set:
+        """테이블에서 UNIQUE 제약조건이 걸린 단일 컬럼 목록 조회 (PostgreSQL 전용)
+
+        Returns:
+            set of column names that have a single-column UNIQUE constraint or index
+        """
+        try:
+            if self.db_type != "postgresql":
+                return set()
+
+            query = """
+            SELECT a.attname AS column_name
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            JOIN pg_class c ON c.oid = i.indrelid
+            WHERE c.relname = %s
+              AND i.indisunique = true
+              AND i.indisprimary = false
+              AND array_length(i.indkey, 1) = 1
+            """
+            result = self.execute_query(query, (table_name,))
+
+            if result:
+                return {row['column_name'] for row in result}
+            return set()
+
+        except Exception as e:
+            self.logger.error(f"Failed to get unique columns for {table_name}: {e}")
+            return set()
+
+    @staticmethod
+    def _parse_column_constraints(column_def: str) -> dict:
+        """모델 스키마 정의 문자열에서 제약조건을 파싱합니다.
+
+        Args:
+            column_def: 예: "VARCHAR(100) UNIQUE NOT NULL", "BOOLEAN DEFAULT TRUE"
+
+        Returns:
+            {'not_null': bool, 'unique': bool, 'default': str|None}
+        """
+        upper = column_def.upper()
+        tokens = upper.split()
+
+        has_not_null = False
+        has_unique = False
+        default_val = None
+
+        # NOT NULL 감지
+        for i, token in enumerate(tokens):
+            if token == 'NOT' and i + 1 < len(tokens) and tokens[i + 1] == 'NULL':
+                has_not_null = True
+                break
+
+        # UNIQUE 감지 (컬럼-레벨)
+        if 'UNIQUE' in tokens:
+            has_unique = True
+
+        # DEFAULT 값 추출
+        default_idx = upper.find('DEFAULT')
+        if default_idx != -1:
+            rest = column_def[default_idx + len('DEFAULT'):].strip()
+            stop_keywords = {'NOT', 'NULL', 'REFERENCES', 'CHECK', 'UNIQUE', 'PRIMARY', 'CONSTRAINT', 'ON'}
+            val_tokens = rest.split()
+            val_parts = []
+            for t in val_tokens:
+                if t.upper() in stop_keywords:
+                    break
+                val_parts.append(t)
+            default_val = ' '.join(val_parts) if val_parts else None
+
+        return {
+            'not_null': has_not_null,
+            'unique': has_unique,
+            'default': default_val,
+        }
+
+    def _run_constraint_migrations(self, table_name: str, expected_schema: dict,
+                                    column_names: set) -> bool:
+        """기존 컬럼의 제약조건(NOT NULL, UNIQUE, DEFAULT)을 모델 정의에 맞게 동기화합니다."""
+        if self.db_type != "postgresql":
+            return True
+
+        try:
+            full_columns = self._get_table_columns_full(table_name)
+            if not full_columns:
+                return True
+
+            current_unique = self._get_unique_columns(table_name)
+            base_columns = {'id', 'created_at', 'updated_at'}
+            changes_made = False
+
+            for column_name, column_def in expected_schema.items():
+                if column_name not in column_names:
+                    continue  # UNIQUE_/CHECK_ 제약조건 키 스킵
+                if column_name not in full_columns:
+                    continue  # 새 컬럼은 _add_column에서 처리
+                if column_name in base_columns:
+                    continue  # 기본 컬럼은 건드리지 않음
+
+                expected = self._parse_column_constraints(column_def)
+                current = full_columns[column_name]
+                current_nullable = current['is_nullable'] == 'YES'
+                current_default = current.get('column_default')
+                current_is_unique = column_name in current_unique
+
+                # ── NOT NULL 동기화 ──
+                if expected['not_null'] and current_nullable:
+                    # 모델은 NOT NULL이지만 DB는 nullable → SET NOT NULL
+                    # NULL 데이터가 있으면 먼저 처리
+                    try:
+                        self.logger.info(
+                            f"Setting NOT NULL on {table_name}.{column_name}"
+                        )
+                        self.execute_query(
+                            f"ALTER TABLE {table_name} "
+                            f"ALTER COLUMN {column_name} SET NOT NULL"
+                        )
+                        changes_made = True
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to SET NOT NULL on {table_name}.{column_name}: {e}"
+                        )
+
+                elif not expected['not_null'] and not current_nullable:
+                    # 모델은 nullable이지만 DB는 NOT NULL → DROP NOT NULL
+                    try:
+                        self.logger.info(
+                            f"Dropping NOT NULL on {table_name}.{column_name}"
+                        )
+                        self.execute_query(
+                            f"ALTER TABLE {table_name} "
+                            f"ALTER COLUMN {column_name} DROP NOT NULL"
+                        )
+                        changes_made = True
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to DROP NOT NULL on {table_name}.{column_name}: {e}"
+                        )
+
+                # ── UNIQUE 동기화 ──
+                if expected['unique'] and not current_is_unique:
+                    # 모델은 UNIQUE이지만 DB에 없음 → ADD UNIQUE
+                    constraint_name = f"uq_{table_name}_{column_name}"
+                    try:
+                        self.logger.info(
+                            f"Adding UNIQUE constraint on {table_name}.{column_name}"
+                        )
+                        self.execute_query(
+                            f"ALTER TABLE {table_name} "
+                            f"ADD CONSTRAINT {constraint_name} UNIQUE ({column_name})"
+                        )
+                        changes_made = True
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to add UNIQUE on {table_name}.{column_name}: {e}"
+                        )
+
+                elif not expected['unique'] and current_is_unique:
+                    # 모델은 UNIQUE 아닌데 DB에 있음 → DROP UNIQUE
+                    try:
+                        self.logger.info(
+                            f"Dropping UNIQUE constraint on {table_name}.{column_name}"
+                        )
+                        # 제약조건 이름을 조회하여 삭제
+                        name_query = """
+                        SELECT conname FROM pg_constraint
+                        JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = ANY(conkey)
+                        JOIN pg_class c ON c.oid = conrelid
+                        WHERE c.relname = %s AND a.attname = %s AND contype = 'u'
+                        """
+                        result = self.execute_query(name_query, (table_name, column_name))
+                        if result:
+                            for row in result:
+                                self.execute_query(
+                                    f"ALTER TABLE {table_name} "
+                                    f"DROP CONSTRAINT IF EXISTS {row['conname']}"
+                                )
+                            changes_made = True
+                        else:
+                            # pg_constraint에 없으면 인덱스 기반 UNIQUE일 수 있음
+                            idx_query = """
+                            SELECT indexname FROM pg_indexes
+                            WHERE tablename = %s AND indexdef LIKE %s
+                            """
+                            idx_result = self.execute_query(
+                                idx_query, (table_name, f'%UNIQUE%{column_name}%')
+                            )
+                            if idx_result:
+                                for row in idx_result:
+                                    self.execute_query(
+                                        f"DROP INDEX IF EXISTS {row['indexname']}"
+                                    )
+                                changes_made = True
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to drop UNIQUE on {table_name}.{column_name}: {e}"
+                        )
+
+                # ── DEFAULT 동기화 ──
+                if expected['default'] is not None:
+                    # 모델에 DEFAULT가 정의됨
+                    expected_default_upper = expected['default'].upper()
+                    # DB의 current_default는 PostgreSQL이 정규화한 형태
+                    # (예: 'true' → 'true', 'FALSE' → 'false', "'text'" → "'text'::...")
+                    needs_set = False
+                    if current_default is None:
+                        needs_set = True
+                    else:
+                        # 간단한 비교: 정규화된 값끼리 비교
+                        norm_current = current_default.split('::')[0].strip().strip("'").upper()
+                        if norm_current != expected_default_upper:
+                            needs_set = True
+
+                    if needs_set:
+                        try:
+                            self.logger.info(
+                                f"Setting DEFAULT {expected['default']} on "
+                                f"{table_name}.{column_name}"
+                            )
+                            self.execute_query(
+                                f"ALTER TABLE {table_name} "
+                                f"ALTER COLUMN {column_name} SET DEFAULT {expected['default']}"
+                            )
+                            changes_made = True
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to SET DEFAULT on {table_name}.{column_name}: {e}"
+                            )
+
+                elif expected['default'] is None and current_default is not None:
+                    # 모델에 DEFAULT가 없지만 DB에 있음 → DROP DEFAULT
+                    # 단, serial/nextval 자동 DEFAULT는 건드리지 않음
+                    if current_default and 'nextval' not in current_default:
+                        try:
+                            self.logger.info(
+                                f"Dropping DEFAULT on {table_name}.{column_name}"
+                            )
+                            self.execute_query(
+                                f"ALTER TABLE {table_name} "
+                                f"ALTER COLUMN {column_name} DROP DEFAULT"
+                            )
+                            changes_made = True
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to DROP DEFAULT on {table_name}.{column_name}: {e}"
+                            )
+
+            if changes_made:
+                self.logger.info(f"Constraint migrations completed for {table_name}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Constraint migration failed for {table_name}: {e}")
+            return False
 
     def _add_column_to_table(self, table_name: str, column_name: str, column_def: str) -> bool:
         """테이블에 컬럼 추가"""
