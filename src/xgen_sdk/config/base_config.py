@@ -287,3 +287,17 @@ def convert_to_int_list(value: Union[str, List[int]], separator: str = ',') -> L
                 pass
         return result
     return []
+
+def convert_to_dict(value: Union[str, dict]) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if value:
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+    return {}

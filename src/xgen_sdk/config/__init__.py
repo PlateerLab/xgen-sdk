@@ -19,6 +19,7 @@ from xgen_sdk.config.base_config import (
     convert_to_bool,
     convert_to_list,
     convert_to_int_list,
+    convert_to_dict,
 )
 from xgen_sdk.config.config_composer import ConfigComposer, get_config_composer
 from xgen_sdk.config.config_utils import (
@@ -54,6 +55,7 @@ __all__ = [
     "convert_to_bool",
     "convert_to_list",
     "convert_to_int_list",
+    "convert_to_dict",
     # 사용 (workflow/documents)
     "ConfigClient",
     "DynamicCategoryConfig",
