@@ -50,6 +50,12 @@ from xgen_sdk.auth.supervision_resolver import (
     resolve_supervised_user_ids,
     can_supervise_user,
 )
+from xgen_sdk.auth.object_guard import (
+    assert_owns_execution_io,
+    assert_owns_feedback,
+    assert_owns_test_run,
+    assert_owns_workflow,
+)
 
 __all__ = [
     # gateway
@@ -77,4 +83,9 @@ __all__ = [
     "resolve_supervision_scope",
     "resolve_supervised_user_ids",
     "can_supervise_user",
+    # object guard
+    "assert_owns_execution_io",
+    "assert_owns_feedback",
+    "assert_owns_test_run",
+    "assert_owns_workflow",
 ]
