@@ -568,7 +568,9 @@ def judge_with_preset(
     1 프리셋 = 1 평가 척도 채점.
 
     `preset` dict 키 (모두 필수는 아님):
-        - name                : 평가 기준 (LLM 프롬프트의 척도 이름)
+        - name                : 프리셋 이름 (레이블, 채점 결과 스냅샷의 criteria_name fallback)
+        - criteria            : 평가 기준 (LLM 프롬프트의 척도 이름으로 삽입).
+                                없으면 name 으로 fallback.
         - description         : 평가 방법 (LLM 프롬프트에 그대로 삽입)
         - scoring_method      : '100' | 'ox' | '5' | 'custom'
         - scoring_description : 채점 방식 설명 (custom 일 때 규칙으로 사용,
@@ -577,9 +579,12 @@ def judge_with_preset(
     `preset` 미제공 시 `DEFAULT_CRITERION` 사용 (정확도 / 0~100점).
     """
     p_dict: Dict[str, Any] = dict(preset) if preset else dict(DEFAULT_CRITERION)
-    preset_name = str(
+    preset_label = str(
         p_dict.get("name") or p_dict.get("criteria_name") or "정확도"
     ).strip() or "정확도"
+    preset_criteria = str(
+        p_dict.get("criteria") or preset_label
+    ).strip() or preset_label
     preset_description = str(p_dict.get("description") or "").strip()
     scoring_method = str(p_dict.get("scoring_method") or "100").lower()
     if scoring_method not in ("100", "ox", "5", "custom"):
@@ -596,7 +601,7 @@ def judge_with_preset(
                 question=question,
                 expected_answer=expected_answer,
                 actual_answer=actual_answer,
-                preset_name=preset_name,
+                preset_name=preset_criteria,
                 preset_description=preset_description,
                 scoring_method=scoring_method,
                 scoring_description=scoring_description,
@@ -605,11 +610,11 @@ def judge_with_preset(
             if p == "anthropic":
                 return _preset_call_anthropic(
                     model or "", base_url, api_key, prompt,
-                    preset_name, scoring_method, actual_answer,
+                    preset_label, scoring_method, actual_answer,
                 )
             return _preset_call_openai_compatible(
                 p, model or "", base_url, api_key, prompt,
-                preset_name, scoring_method, actual_answer,
+                preset_label, scoring_method, actual_answer,
             )
         except Exception as e:  # pragma: no cover - network failures
             logger.warning("LLM preset-judge fallback to heuristic: %s", e)
@@ -619,6 +624,6 @@ def judge_with_preset(
     return _preset_via_heuristic(
         expected_answer=expected_answer,
         actual_answer=actual_answer,
-        preset_name=preset_name,
+        preset_name=preset_label,
         scoring_method=scoring_method,
     )
