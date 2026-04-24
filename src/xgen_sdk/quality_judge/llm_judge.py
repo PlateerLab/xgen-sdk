@@ -46,6 +46,7 @@ SUPPORTED_PROVIDERS = ("openai", "vllm", "sgl", "gemini", "anthropic", "heuristi
 # 프리셋 미선택 시 사용되는 기본 단일 척도.
 DEFAULT_CRITERION: Dict[str, Any] = {
     "name": "정확도",
+    "criteria": "정확도",
     "description": "모범답변과의 의미적 일치도",
     "scoring_method": "100",
     "scoring_description": None,
