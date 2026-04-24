@@ -12,17 +12,25 @@ Public API:
     SCORING_METHOD_MAX, SCORING_METHOD_LABEL, SUPPORTED_PROVIDERS
 """
 from xgen_sdk.quality_judge.llm_judge import (
+    CriterionScore,
+    DEFAULT_CRITERION,
     JudgeResult,
+    MultiJudgeResult,
     SCORING_METHOD_LABEL,
     SCORING_METHOD_MAX,
     SUPPORTED_PROVIDERS,
     judge_question,
+    judge_with_criteria,
 )
 
 __all__ = [
+    "CriterionScore",
+    "DEFAULT_CRITERION",
     "JudgeResult",
+    "MultiJudgeResult",
     "SCORING_METHOD_LABEL",
     "SCORING_METHOD_MAX",
     "SUPPORTED_PROVIDERS",
     "judge_question",
+    "judge_with_criteria",
 ]
