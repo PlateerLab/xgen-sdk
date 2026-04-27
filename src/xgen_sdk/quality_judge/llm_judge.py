@@ -564,6 +564,7 @@ def judge_with_preset(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     note: Optional[str] = None,
+    strict: bool = False,
 ) -> PresetJudgeResult:
     """
     1 프리셋 = 1 평가 척도 채점.
@@ -578,6 +579,11 @@ def judge_with_preset(
                                 나머지는 추가 채점 가이드로 활용)
 
     `preset` 미제공 시 `DEFAULT_CRITERION` 사용 (정확도 / 0~100점).
+
+    Args:
+        strict: True 인 경우 LLM 호출 실패/설정 누락을 휴리스틱으로 묵묵히 fallback
+                하지 않고 예외로 전파. 호출자가 평가 실패를 명확히 인지/중단해야 할 때 사용.
+                False (기본) 는 기존 동작 (실패 시 휴리스틱 fallback).
     """
     p_dict: Dict[str, Any] = dict(preset) if preset else dict(DEFAULT_CRITERION)
     preset_label = str(
@@ -618,8 +624,21 @@ def judge_with_preset(
                 preset_label, scoring_method, actual_answer,
             )
         except Exception as e:  # pragma: no cover - network failures
+            if strict:
+                # strict=True: 호출자가 실패를 인지하고 중단해야 한다
+                raise
             logger.warning("LLM preset-judge fallback to heuristic: %s", e)
     elif p != "heuristic":
+        if strict:
+            missing = []
+            if not base_url:
+                missing.append("base_url")
+            if not api_key:
+                missing.append("api_key")
+            raise ValueError(
+                f"LLM judge provider '{p}' 설정 누락: {', '.join(missing) or 'unknown'}. "
+                f"strict 모드에서는 휴리스틱 fallback 비활성화."
+            )
         logger.info("LLM judge: provider=%s 설정 미완 → 휴리스틱 fallback", p)
 
     return _preset_via_heuristic(
