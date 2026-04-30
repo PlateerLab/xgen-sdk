@@ -25,14 +25,22 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         X-User-Permissions: 쉼표 구분 권한 문자열 (예: "workflow:create,document:read")
         X-User-Supervision-Full: 쉼표 구분 감독 대상 역할 이름
 
-    NOTE (2026-04-30 단순화):
-        이전 버전은 Supervision-Monitor / Supervision-Audit 헤더도 파싱했으나, 어떤 비즈니스
-        로직에서도 소비되지 않는 dead infrastructure 였다. 단일 'full' 슬롯으로 통일.
-        하위 호환을 위해 dict 형태의 supervision 키는 유지하되 'monitor', 'audit' 슬롯에는
-        full 과 동일한 값을 채워준다 (기존 어떤 컨슈머가 있을 경우를 대비한 안전 장치).
-
     Returns:
-        Dict with: user_id, user_name, is_superuser, roles, permissions, supervision
+        Dict with keys:
+            - user_id, user_name, is_superuser, roles, permissions
+            - supervision_full: List[str]  ← 새 코드는 이 키를 사용
+            - supervision: Dict ← DEPRECATED, 아래 노트 참조
+
+    .. deprecated:: 2026-04-30
+        ``supervision`` dict 의 ``"monitor"`` / ``"audit"`` 슬롯은 backward-compat
+        shim 이다. 이전 버전이 ``Supervision-Monitor`` / ``Supervision-Audit`` 헤더를
+        별도 파싱했으나, 비즈니스 로직 어디에도 소비되지 않는 dead infrastructure
+        였으므로 단일 'full' 로 통일됨. 옛 코드가 ``session["supervision"]["monitor"]``
+        를 읽을 가능성을 대비해 두 슬롯 모두 ``full`` 과 동일한 값으로 채워준다.
+
+        새 코드는 반드시 ``supervision_full`` 키만 사용할 것. 옛 ``supervision``
+        dict 은 모든 환경의 코드가 ``supervision_full`` 로 마이그레이션된 후 제거 예정
+        (≥ 2026-05-30 권장).
     """
     user_id = request.headers.get("X-User-ID")
     user_name_encoded = request.headers.get("X-User-Name")
@@ -71,11 +79,12 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         "is_superuser": is_superuser,
         "roles": roles,
         "permissions": permissions,
-        # 하위 호환: 일부 코드가 dict 슬롯 접근 가능성 → full 값으로 통일
+        # DEPRECATED 2026-04-30 — backward-compat shim. 자세한 사항은 함수 docstring 참조.
+        # 새 코드는 아래 supervision_full 키만 사용할 것.
         "supervision": {
             "full": supervision_full,
-            "monitor": supervision_full,
-            "audit": supervision_full,
+            "monitor": supervision_full,  # DEPRECATED
+            "audit": supervision_full,    # DEPRECATED
         },
         "supervision_full": supervision_full,
     }
