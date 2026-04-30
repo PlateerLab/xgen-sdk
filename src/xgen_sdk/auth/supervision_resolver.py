@@ -3,17 +3,23 @@ Supervision Resolver
 
 역할 간 감독(Supervision) 관계를 해석하는 로직.
 
-감독 유형:
-    - full: 전체 감독 (사용자 조회/관리, 역할 변경, 비활성화, 권한 수정)
-    - monitor: 모니터링만 (사용자 조회, 활동 로그 읽기)
-    - audit: 감사만 (활동 이력, 권한 변경 로그 조회)
+2026-04-30 단순화 (Option A):
+    이전 버전은 full / monitor / audit 3단계 유형을 노출했으나, 코드베이스 전수 조사 결과
+    실질적 차별 처리는 'full'(사용자 편집 + 워크플로우 가시성) 단 하나의 슬롯에서만 발생했고
+    monitor / audit 헤더와 dict slot 은 어떤 비즈니스 로직에서도 소비되지 않는 dead infrastructure
+    였다. 현실에 정합하도록 supervision 을 단일 'full' 권한으로 통일.
 
-Supervision은 Permission과 독립적인 별도 레이어.
+    호환을 위해 DB 의 supervision_type 컬럼은 그대로 유지하되, 신규 row 는 항상 'full' 로 저장
+    하며, 조회 시점에는 type 을 무시하고 모든 매핑을 동등하게 취급한다.
+
+    포함관계 / required_level 비교 로직(can_supervise_user)은 호출자가 0 이었으므로 함수 자체를 제거.
+
+Permission 과 Supervision 구분은 그대로:
     - Permission = 어떤 작업(action)을 수행할 수 있는가
     - Supervision = 어떤 사용자/역할을 감독할 수 있는가
 """
 import logging
-from typing import Dict, List, Set
+from typing import List, Set
 
 logger = logging.getLogger("supervision-resolver")
 
@@ -22,8 +28,11 @@ def resolve_supervision_scope(
     app_db,
     user_id: int,
     is_superuser: bool
-) -> Dict[str, List[str]]:
-    """사용자의 감독 범위를 역할 이름 목록으로 해석한다.
+) -> List[str]:
+    """사용자가 감독하는 대상 역할 이름 목록을 반환한다.
+
+    이전 버전은 Dict[str, List[str]] (유형별) 을 반환했으나, 모든 호출자는 결과를 합쳐
+    한 덩어리로 사용했으므로 단순 List 로 평탄화.
 
     Args:
         app_db: AppDatabaseManager 인스턴스
@@ -31,55 +40,38 @@ def resolve_supervision_scope(
         is_superuser: superuser 여부
 
     Returns:
-        Dict[str, List[str]]: 감독 유형별 대상 역할 이름 목록
-        예: {
-            "full": ["developer", "designer"],
-            "monitor": ["operator"],
-            "audit": ["viewer"]
-        }
+        List[str]: 감독 대상 역할 이름 목록 (정렬됨, 중복 제거)
     """
     if is_superuser:
-        # superuser는 모든 역할을 full 감독
-        all_roles = _get_all_role_names(app_db)
-        return {
-            "full": all_roles,
-            "monitor": [],
-            "audit": []
-        }
+        return _get_all_role_names(app_db)
 
     query = """
-        SELECT DISTINCT
-            rs.supervision_type,
-            r_target.name AS target_role_name
+        SELECT DISTINCT r_target.name AS target_role_name
         FROM role_supervision rs
         JOIN roles r_target ON r_target.id = rs.target_role_id
         JOIN user_roles ur ON ur.role_id = rs.supervisor_role_id
         WHERE ur.user_id = %s
-        ORDER BY rs.supervision_type, r_target.name
+        ORDER BY r_target.name
     """
     try:
         result = app_db.execute_raw_query(query, (user_id,))
-        scope = {"full": [], "monitor": [], "audit": []}
-
         if result.get("success") and result.get("data"):
-            for row in result["data"]:
-                sup_type = row["supervision_type"]
-                role_name = row["target_role_name"]
-                if sup_type in scope:
-                    scope[sup_type].append(role_name)
-
-        return scope
+            return [row["target_role_name"] for row in result["data"]]
+        return []
     except Exception as e:
         logger.error(f"Failed to resolve supervision scope for user {user_id}: {e}")
-        return {"full": [], "monitor": [], "audit": []}
+        return []
 
 
 def resolve_supervised_user_ids(
     app_db,
     user_id: int,
     is_superuser: bool
-) -> Dict[str, Set[int]]:
-    """사용자의 감독 범위를 대상 사용자 ID 집합으로 해석한다.
+) -> Set[int]:
+    """사용자가 감독하는 대상 사용자 ID 집합을 반환한다.
+
+    이전 버전은 Dict[str, Set[int]] (유형별) 을 반환했으나, full 슬롯만 의미 있게
+    사용되고 나머지는 합집합으로만 사용되었으므로 단순 Set 로 평탄화.
 
     Args:
         app_db: AppDatabaseManager 인스턴스
@@ -87,103 +79,31 @@ def resolve_supervised_user_ids(
         is_superuser: superuser 여부
 
     Returns:
-        Dict[str, Set[int]]: 감독 유형별 대상 사용자 ID 집합
-        예: {
-            "full": {1, 2, 5},
-            "monitor": {3},
-            "audit": {4, 6}
-        }
+        Set[int]: 감독 가능한 사용자 ID 집합
     """
     if is_superuser:
-        # superuser는 모든 사용자를 full 감독
-        all_user_ids = _get_all_user_ids(app_db)
-        return {
-            "full": all_user_ids,
-            "monitor": set(),
-            "audit": set()
-        }
+        return _get_all_user_ids(app_db)
 
     query = """
-        SELECT DISTINCT
-            rs.supervision_type,
-            target_ur.user_id AS target_user_id
+        SELECT DISTINCT target_ur.user_id AS target_user_id
         FROM role_supervision rs
         JOIN user_roles ur ON ur.role_id = rs.supervisor_role_id
         JOIN user_roles target_ur ON target_ur.role_id = rs.target_role_id
         WHERE ur.user_id = %s
-        ORDER BY rs.supervision_type
     """
     try:
         result = app_db.execute_raw_query(query, (user_id,))
-        scope = {"full": set(), "monitor": set(), "audit": set()}
-
         if result.get("success") and result.get("data"):
-            for row in result["data"]:
-                sup_type = row["supervision_type"]
-                target_uid = row["target_user_id"]
-                if sup_type in scope:
-                    scope[sup_type].add(target_uid)
-
-        return scope
+            return {row["target_user_id"] for row in result["data"]}
+        return set()
     except Exception as e:
         logger.error(f"Failed to resolve supervised users for user {user_id}: {e}")
-        return {"full": set(), "monitor": set(), "audit": set()}
-
-
-def can_supervise_user(
-    app_db,
-    supervisor_user_id: int,
-    target_user_id: int,
-    is_superuser: bool,
-    required_level: str = "monitor"
-) -> bool:
-    """특정 사용자를 감독할 수 있는지 확인한다.
-
-    감독 수준 포함 관계: full > monitor > audit
-        - full 권한이 있으면 monitor, audit 도 가능
-        - monitor 권한이 있으면 audit 도 가능
-
-    Args:
-        app_db: AppDatabaseManager 인스턴스
-        supervisor_user_id: 감독자 사용자 ID
-        target_user_id: 대상 사용자 ID
-        is_superuser: 감독자의 superuser 여부
-        required_level: 필요한 감독 수준 ("full" | "monitor" | "audit")
-
-    Returns:
-        bool: 감독 가능 여부
-    """
-    if is_superuser:
-        return True
-
-    # 감독 수준별 허용 유형 (포함 관계)
-    allowed_types = _get_allowed_supervision_types(required_level)
-
-    scope = resolve_supervised_user_ids(app_db, supervisor_user_id, False)
-
-    for sup_type in allowed_types:
-        if target_user_id in scope.get(sup_type, set()):
-            return True
-
-    return False
+        return set()
 
 
 # ─────────────────────────────────────────────────────────
 # 내부 헬퍼 함수
 # ─────────────────────────────────────────────────────────
-
-def _get_allowed_supervision_types(required_level: str) -> List[str]:
-    """감독 수준에 따라 허용되는 유형 목록 반환.
-
-    full > monitor > audit (포함 관계)
-    """
-    hierarchy = {
-        "full": ["full"],
-        "monitor": ["full", "monitor"],
-        "audit": ["full", "monitor", "audit"]
-    }
-    return hierarchy.get(required_level, ["full", "monitor", "audit"])
-
 
 def _get_all_role_names(app_db) -> List[str]:
     """모든 역할 이름을 조회한다."""

@@ -48,7 +48,6 @@ from xgen_sdk.auth.permission_resolver import (
 from xgen_sdk.auth.supervision_resolver import (
     resolve_supervision_scope,
     resolve_supervised_user_ids,
-    can_supervise_user,
 )
 from xgen_sdk.auth.object_guard import (
     assert_owns_execution_io,
@@ -82,7 +81,6 @@ __all__ = [
     # supervision
     "resolve_supervision_scope",
     "resolve_supervised_user_ids",
-    "can_supervise_user",
     # object guard
     "assert_owns_execution_io",
     "assert_owns_feedback",

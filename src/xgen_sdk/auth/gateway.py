@@ -23,9 +23,13 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         X-User-Superuser: "true" | "false"
         X-User-Roles: 쉼표 구분 역할 이름 (예: "developer,designer")
         X-User-Permissions: 쉼표 구분 권한 문자열 (예: "workflow:create,document:read")
-        X-User-Supervision-Full: 쉼표 구분 대상 역할 이름
-        X-User-Supervision-Monitor: 쉼표 구분 대상 역할 이름
-        X-User-Supervision-Audit: 쉼표 구분 대상 역할 이름
+        X-User-Supervision-Full: 쉼표 구분 감독 대상 역할 이름
+
+    NOTE (2026-04-30 단순화):
+        이전 버전은 Supervision-Monitor / Supervision-Audit 헤더도 파싱했으나, 어떤 비즈니스
+        로직에서도 소비되지 않는 dead infrastructure 였다. 단일 'full' 슬롯으로 통일.
+        하위 호환을 위해 dict 형태의 supervision 키는 유지하되 'monitor', 'audit' 슬롯에는
+        full 과 동일한 값을 채워준다 (기존 어떤 컨슈머가 있을 경우를 대비한 안전 장치).
 
     Returns:
         Dict with: user_id, user_name, is_superuser, roles, permissions, supervision
@@ -58,16 +62,8 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
     if is_superuser:
         permissions = {"*:*"}
 
-    # 감독 범위 파싱
+    # 감독 범위 파싱 — 단일 'full' 헤더만 사용
     supervision_full = _parse_comma_list(request.headers.get("X-User-Supervision-Full", ""))
-    supervision_monitor = _parse_comma_list(request.headers.get("X-User-Supervision-Monitor", ""))
-    supervision_audit = _parse_comma_list(request.headers.get("X-User-Supervision-Audit", ""))
-
-    supervision = {
-        "full": supervision_full,
-        "monitor": supervision_monitor,
-        "audit": supervision_audit,
-    }
 
     return {
         "user_id": normalized_user_id,
@@ -75,11 +71,13 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         "is_superuser": is_superuser,
         "roles": roles,
         "permissions": permissions,
-        "supervision": supervision,
-        # 하위 호환: flat key로도 접근 가능
+        # 하위 호환: 일부 코드가 dict 슬롯 접근 가능성 → full 값으로 통일
+        "supervision": {
+            "full": supervision_full,
+            "monitor": supervision_full,
+            "audit": supervision_full,
+        },
         "supervision_full": supervision_full,
-        "supervision_monitor": supervision_monitor,
-        "supervision_audit": supervision_audit,
     }
 
 
