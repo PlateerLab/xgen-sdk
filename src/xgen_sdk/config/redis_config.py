@@ -149,6 +149,32 @@ class RedisConfigManager:
             logger.debug(f"get_config_version failed: {e}")
             return 0
 
+    def bump_meta_version(self) -> int:
+        """글로벌 version sentinel 을 명시적으로 INCR.
+
+        Config 값 자체는 바꾸지 않으면서, 각 Pod 의 캐시된 클라이언트
+        인스턴스(GuarderClient · EmbeddingClient 등) 를 강제로 재구성하도록
+        유도할 때 사용한다. 예: 사용자가 UI 에서 "설정 초기화" 를 눌렀을 때.
+
+        반환값은 INCR 직후의 새 버전이며, 호출자가 자기 Pod 의 캐시 버전을
+        이 값으로 정렬할 때 사용할 수 있다.
+
+        Returns:
+            새 버전(int). Redis 미사용 / 장애 시 0.
+        """
+        if not self._connection_available:
+            return 0
+        try:
+            new_version = self.redis_client.incr(self.version_key)
+            if new_version is not None:
+                self._last_write_version = int(new_version)
+                logger.info(f"Meta version bumped (explicit) to {new_version}")
+                return int(new_version)
+            return 0
+        except Exception as e:
+            logger.warning(f"bump_meta_version failed: {e}")
+            return 0
+
     def set_config(self, config_path: str, config_value: Any,
                    data_type: str = "string", category: Optional[str] = None,
                    env_name: Optional[str] = None) -> bool:

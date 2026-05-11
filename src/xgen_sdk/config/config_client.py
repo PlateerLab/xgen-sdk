@@ -222,6 +222,25 @@ class ConfigClient:
     def refresh_all(self) -> None:
         self._manager.refresh_all()
 
+    def get_config_version(self) -> int:
+        """글로벌 config version sentinel 값. Manager 호환 메서드 위임."""
+        try:
+            return self._manager.get_config_version()
+        except Exception:
+            return 0
+
+    def bump_meta_version(self) -> int:
+        """글로벌 version sentinel 을 명시적으로 INCR — 클라이언트 인스턴스 재구성용.
+
+        Config 값 자체를 바꾸지 않고 각 Pod 의 캐시된 인스턴스(GuarderClient 등)
+        를 강제로 재빌드하도록 유도한다. Multi-pod 환경에서 'reset' 동작에 사용.
+        """
+        try:
+            return self._manager.bump_meta_version()
+        except Exception as e:
+            logger.warning("bump_meta_version delegation failed: %s", e)
+            return 0
+
     def export_config_summary(self) -> Dict[str, Any]:
         return self._manager.export_config_summary()
 

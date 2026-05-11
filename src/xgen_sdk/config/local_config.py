@@ -123,6 +123,17 @@ class LocalConfigManager:
         """
         return self._version
 
+    def bump_meta_version(self) -> int:
+        """RedisConfigManager.bump_meta_version 과 동일 시맨틱의 명시적 카운터 증가.
+
+        단일 프로세스 환경이라 multi-pod 인밸리데이션 효과는 없으나, 인터페이스
+        일관성을 위해 제공. 호출 측은 Redis/Local 매니저 구분 없이 동일하게
+        사용할 수 있다.
+        """
+        self._version += 1
+        self._last_write_version = self._version
+        return self._version
+
     def set_config(self, config_path: str, config_value: Any,
                    data_type: str = "string", category: Optional[str] = None,
                    env_name: Optional[str] = None) -> bool:
