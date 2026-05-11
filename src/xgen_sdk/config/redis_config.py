@@ -99,6 +99,19 @@ class RedisConfigManager:
         # Config 키 Prefix
         self.config_prefix = "config"
 
+        # Multi-Pod 캐시 인밸리데이션용 글로벌 version sentinel 키.
+        # 모든 config write 시점에 INCR 되어, 각 Pod 의 PersistentConfig 가
+        # in-memory 캐시의 stale 여부를 lazy 하게 판단하는 용도로 사용된다.
+        # 별도의 _meta: 네임스페이스를 두어 일반 config 키와 절대 충돌하지 않게 한다.
+        self.version_key = f"{self.config_prefix}:_meta:version"
+
+        # 이 매니저 인스턴스가 마지막으로 수행한 write 의 INCR 반환값.
+        # composer.update_config 이 "다른 Pod 의 동시 쓰기에 영향받지 않고 본 write
+        # 시점의 정확한 version" 을 확보하기 위해 set_config 직후 이 값을 읽는다.
+        # FastAPI(uvicorn) 의 asyncio 환경에서 set_config 는 sync 함수이며 await 가
+        # 없어 한 워커 안에서 한 번에 하나만 실행되므로 동일 워커 안 race-free.
+        self._last_write_version: int = 0
+
         # DB Manager (선택적)
         self.db_manager = db_manager
 
@@ -114,6 +127,27 @@ class RedisConfigManager:
             logger.error(f"Redis health check failed: {e}")
             self._connection_available = False
             return False
+
+    def get_config_version(self) -> int:
+        """글로벌 config version sentinel 값을 조회.
+
+        Multi-Pod 환경에서 각 Pod 의 PersistentConfig 가 in-memory 캐시의 stale
+        여부를 판단할 때 사용한다. 모든 write 경로(set_config / delete_config /
+        update_config_by_name 등)에서 atomic 하게 INCR 된다.
+
+        Returns:
+            현재 버전(int). Redis 미사용 / 장애 / 키 부재 시 0 반환.
+            반환값 0 은 단순히 "버전 정보 없음" 을 의미하며 호출처는 안전하게
+            "이전과 동일" 로 간주해야 한다.
+        """
+        if not self._connection_available:
+            return 0
+        try:
+            raw = self.redis_client.get(self.version_key)
+            return int(raw) if raw is not None else 0
+        except Exception as e:
+            logger.debug(f"get_config_version failed: {e}")
+            return 0
 
     def set_config(self, config_path: str, config_value: Any,
                    data_type: str = "string", category: Optional[str] = None,
@@ -155,6 +189,18 @@ class RedisConfigManager:
             # 카테고리별 인덱스도 저장 (키: config:category:name, 값: env_name)
             category_key = f"{self.config_prefix}:category:{category}"
             self.redis_client.sadd(category_key, final_env_name)
+
+            # 글로벌 version sentinel 을 atomic 하게 증가시켜 다른 Pod 의 캐시 인밸리데이션을 유도.
+            # INCR 반환값(이 write 직후의 정확한 version)을 인스턴스 속성에 기록해 둠으로써
+            # 호출처(composer.update_config)가 다른 Pod 의 동시 쓰기에 영향받지 않고
+            # "내 write 의 정확한 version" 을 안전하게 알 수 있게 한다.
+            # 실패는 silent — set_config 자체의 성공/실패에 영향 주지 않는다.
+            try:
+                new_version = self.redis_client.incr(self.version_key)
+                if new_version is not None:
+                    self._last_write_version = int(new_version)
+            except Exception as version_err:
+                logger.warning(f"Failed to bump config version sentinel: {version_err}")
 
             # DB에도 저장 (DB가 있는 경우)
             if self.db_manager:
@@ -279,6 +325,14 @@ class RedisConfigManager:
                 category_key = f"{self.config_prefix}:category:{category}"
                 self.redis_client.srem(category_key, env_name)
 
+            # 글로벌 version sentinel 갱신 — 다른 Pod 가 삭제 사실을 다음 read 시 감지.
+            try:
+                new_version = self.redis_client.incr(self.version_key)
+                if new_version is not None:
+                    self._last_write_version = int(new_version)
+            except Exception as version_err:
+                logger.warning(f"Failed to bump config version sentinel on delete: {version_err}")
+
             logger.debug(f"Config 삭제 완료: {env_name}")
             return True
 
@@ -362,11 +416,16 @@ class RedisConfigManager:
 
             configs = []
             for key in keys:
-                # category 인덱스 키는 제외
-                if ':category:' not in key:
-                    data = self.redis_client.get(key)
-                    if data:
+                # category 인덱스 키 및 _meta: 네임스페이스(version sentinel 등) 제외
+                if ':category:' in key or ':_meta:' in key:
+                    continue
+                data = self.redis_client.get(key)
+                if data:
+                    try:
                         configs.append(json.loads(data))
+                    except (json.JSONDecodeError, TypeError):
+                        # 비-JSON 값(예: 메타 카운터 등 예기치 못한 키)은 조용히 skip
+                        logger.debug(f"Skipping non-JSON config key during get_all: {key}")
 
             return configs
 

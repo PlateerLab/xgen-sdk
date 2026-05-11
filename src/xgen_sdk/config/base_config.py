@@ -19,12 +19,67 @@ Usage:
 import os
 import json
 import logging
+import time
 from typing import Any, Optional, Union, List, Dict
 from abc import ABC, abstractmethod
 from xgen_sdk.config.redis_config import RedisConfigManager
 from xgen_sdk.db.config_serializer import normalize_config_value
 
 logger = logging.getLogger("xgen-sdk.config-base")
+
+
+# ============================================================== #
+# Multi-Pod 캐시 인밸리데이션 — Version Sentinel
+# ============================================================== #
+#
+# 문제: 멀티 Pod 환경에서 한 Pod 가 config 를 PUT 으로 갱신하면 그 Pod 의
+# in-memory PersistentConfig._value 만 바뀌고, 다른 Pod 들은 boot 시 적재한
+# stale 값을 계속 반환한다. (Redis/DB 는 정합이지만 캐시가 stale.)
+#
+# 해법: RedisConfigManager 가 모든 write 시점에 글로벌 카운터
+# `config:_meta:version` 을 INCR 한다. 각 PersistentConfig 는 자기가 본 마지막
+# 버전(_last_seen_version) 을 들고 있다가 `.value` 접근 시점에 현재 버전과
+# 비교 — 다르면 _load_value() 로 lazy refresh.
+#
+# 핫패스 비용을 억제하기 위해 PersistentConfig 클래스 레벨에서 version 읽기를
+# 50ms TTL 로 메모이즈 한다. 동일 request 안의 다중 `.value` 접근이 Redis 를
+# 1회만 두드리도록.
+# ============================================================== #
+
+_VERSION_CACHE_TTL_S: float = 0.05  # 50ms — 사용자 체감 지연 < 1 frame
+_version_cache_value: Optional[int] = None
+_version_cache_ts: float = 0.0
+
+
+def _invalidate_version_cache() -> None:
+    """클래스 레벨 version 캐시 무효화 — write 직후 호출하여 강제 재조회 유도."""
+    global _version_cache_ts
+    _version_cache_ts = 0.0
+
+
+def _read_version_cached(redis_manager) -> int:
+    """글로벌 config version 을 50ms TTL 로 메모이즈하여 반환.
+
+    `redis_manager` 가 `get_config_version` 을 지원하지 않거나 호출 실패 시
+    이전 캐시 값이 있으면 그대로 반환, 없으면 0. 절대 예외를 propagate 하지
+    않는다 — version sentinel 은 best-effort 메커니즘이며 장애 시에는
+    graceful 하게 in-memory 캐시를 유지하는 쪽이 안전하다.
+    """
+    global _version_cache_value, _version_cache_ts
+    now = time.monotonic()
+    if _version_cache_value is not None and (now - _version_cache_ts) < _VERSION_CACHE_TTL_S:
+        return _version_cache_value
+    try:
+        if redis_manager is not None and hasattr(redis_manager, 'get_config_version'):
+            v = redis_manager.get_config_version()
+        else:
+            v = 0
+    except Exception as e:
+        logger.debug("get_config_version failed (graceful fallback): %s", e)
+        return _version_cache_value if _version_cache_value is not None else 0
+    _version_cache_value = v
+    _version_cache_ts = now
+    return v
 
 
 # ============================================================== #
@@ -65,6 +120,13 @@ class PersistentConfig:
         self.redis_manager = redis_manager or RedisConfigManager()
         self.db_manager = db_manager
         self._value = self._load_value()
+        # Multi-Pod 캐시 인밸리데이션 — 자신이 마지막으로 본 글로벌 config version.
+        # `.value` 접근 시 현재 version 과 비교해 변화가 있으면 lazy refresh.
+        # _load_value() 가 끝난 직후에 읽어 최신값을 박아 둔다.
+        try:
+            self._last_seen_version: int = _read_version_cached(self.redis_manager)
+        except Exception:
+            self._last_seen_version = 0
 
     def _load_value(self) -> Any:
         """DB → Redis → 기본값 순서로 설정 값 로드"""
@@ -79,12 +141,19 @@ class PersistentConfig:
                 if db_value is not None:
                     db_value = normalize_config_value(db_value, expected_type)
                     logger.info(f"[DB] [{category}] {self.env_name} | path={self.config_path} | value={db_value}")
-                    self.redis_manager.set_config(
-                        config_path=self.config_path,
-                        config_value=db_value,
-                        data_type=self._infer_data_type(db_value),
-                        env_name=self.env_name
-                    )
+                    # Redis 에 값이 없을 때만 restore. 이미 있으면 set 을 skip 해
+                    # 불필요한 version sentinel INCR (멀티-Pod stampede 원인) 방지.
+                    try:
+                        redis_has_key = self.redis_manager.exists(self.env_name)
+                    except Exception:
+                        redis_has_key = False
+                    if not redis_has_key:
+                        self.redis_manager.set_config(
+                            config_path=self.config_path,
+                            config_value=db_value,
+                            data_type=self._infer_data_type(db_value),
+                            env_name=self.env_name
+                        )
                     if self.type_converter:
                         return self.type_converter(db_value)
                     return db_value
@@ -139,17 +208,57 @@ class PersistentConfig:
 
     @property
     def value(self) -> Any:
+        """현재 설정 값 반환.
+
+        Multi-Pod 안전성 — 호출 시점에 글로벌 config version sentinel 을 확인하고
+        직전에 본 버전과 다르면 _load_value() 로 lazy refresh 한다. version 조회는
+        50ms TTL 메모이즈가 되어 있어 핫패스의 다중 `.value` 접근도 Redis GET 1회로
+        압축된다. version 조회/refresh 실패는 silent — 마지막으로 적재된 in-memory
+        캐시 값을 그대로 반환하여 Redis 일시 장애 시에도 서비스가 멈추지 않게 한다.
+        """
+        try:
+            current = _read_version_cached(self.redis_manager)
+            if current != self._last_seen_version:
+                refreshed = self._load_value()
+                self._value = refreshed
+                # _load_value 가 default-restore 등으로 version 을 추가로 bump 했을
+                # 가능성이 있으므로 캐시 무효화 후 최신값을 다시 읽어 박는다.
+                # (그렇지 않으면 다음 .value 접근에서 또 다시 mismatch 로 인식.)
+                _invalidate_version_cache()
+                try:
+                    self._last_seen_version = _read_version_cached(self.redis_manager)
+                except Exception:
+                    self._last_seen_version = current
+        except Exception as e:
+            # version sentinel 은 best-effort. 실패해도 기존 _value 그대로 반환.
+            logger.debug("Version sentinel check failed for %s: %s", self.env_name, e)
         return self._value
 
     @value.setter
     def value(self, new_value: Any):
+        """In-memory 캐시 값을 설정. Redis/DB 동기화는 호출처(ConfigComposer.update_config
+        또는 RedisConfigManager.set_config) 에서 명시적으로 수행해야 한다.
+
+        본 setter 자체는 version sentinel 을 건드리지 않는다 — version bump 는
+        RedisConfigManager.set_config 안에서 atomic 하게 일어나며, 호출처가
+        설정 직후 `_last_seen_version` 을 갱신할 책임을 진다.
+        """
         if self.type_converter:
             new_value = self.type_converter(new_value)
         self._value = new_value
 
     def refresh(self):
-        """DB/Redis에서 최신 값 다시 로드"""
+        """DB/Redis 에서 최신 값 다시 로드 + version sentinel 동기화.
+
+        명시적으로 호출되면 version 캐시 TTL 을 무시하고 강제로 _load_value 를 돈다.
+        호출 후 `_last_seen_version` 은 현재 Redis 의 글로벌 version 으로 맞춰진다.
+        """
         self._value = self._load_value()
+        try:
+            self._last_seen_version = _read_version_cached(self.redis_manager)
+        except Exception as e:
+            logger.debug("Failed to update _last_seen_version on refresh for %s: %s",
+                         self.env_name, e)
 
 
 # ============================================================== #

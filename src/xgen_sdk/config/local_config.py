@@ -39,6 +39,14 @@ class LocalConfigManager:
         # Config 키 Prefix (Redis 호환)
         self.config_prefix = "config"
 
+        # RedisConfigManager 와 동일한 인터페이스를 위해 version sentinel 카운터 유지.
+        # 단일 프로세스 동작이므로 0 으로 시작해 set/delete 마다 +1.
+        # PersistentConfig 의 version 체크 로직이 Redis/Local 양쪽에서 동일하게 동작.
+        self._version: int = 0
+        # RedisConfigManager._last_write_version 과 동일 시맨틱 — 가장 최근 write 의 결과.
+        self._last_write_version: int = 0
+        self.version_key = f"{self.config_prefix}:_meta:version"
+
         # DB Manager (선택적)
         self.db_manager = db_manager
 
@@ -107,6 +115,14 @@ class LocalConfigManager:
         """연결 상태 확인 (로컬은 항상 True)"""
         return True
 
+    def get_config_version(self) -> int:
+        """RedisConfigManager.get_config_version 과 동일한 의미의 단조 증가 카운터.
+
+        단일 프로세스 fallback 이므로 multi-pod 의미는 없으나, PersistentConfig 의
+        version 체크 로직이 manager 종류와 무관하게 동작하도록 호환 메서드를 제공.
+        """
+        return self._version
+
     def set_config(self, config_path: str, config_value: Any,
                    data_type: str = "string", category: Optional[str] = None,
                    env_name: Optional[str] = None) -> bool:
@@ -147,6 +163,10 @@ class LocalConfigManager:
             if category not in self._category_index:
                 self._category_index[category] = set()
             self._category_index[category].add(final_env_name)
+
+            # version sentinel 갱신 — Redis 경로와 동일 시맨틱.
+            self._version += 1
+            self._last_write_version = self._version
 
             # DB에도 저장 (DB가 있는 경우) - 분산 환경에서 앱 재시작 시 복원 가능
             if self.db_manager:
@@ -238,6 +258,10 @@ class LocalConfigManager:
                     self.db_manager.delete_config(env_name)
                 except Exception as db_error:
                     logger.warning(f"DB에서 설정 삭제 실패: {env_name} - {db_error}")
+
+            # version sentinel 갱신
+            self._version += 1
+            self._last_write_version = self._version
 
             logger.debug(f"Config 삭제 완료: {env_name}")
             return True
