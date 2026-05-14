@@ -261,13 +261,21 @@ class ConfigComposer:
                 category_summary = category_instance.get_config_summary()
                 categories_summary[category_name] = category_summary
                 for env_name, config_obj in category_instance.configs.items():
-                    all_configs_list.append({
+                    entry = {
                         "env_name": env_name,
                         "config_path": config_obj.config_path,
                         "current_value": config_obj.value,
                         "default_value": config_obj.env_value,
-                        "is_saved": True
-                    })
+                        "is_saved": True,
+                    }
+                    # UI 메타데이터 (선택). 프론트가 셀렉터/도움말 렌더에 사용.
+                    if getattr(config_obj, 'options', None):
+                        entry["options"] = list(config_obj.options)
+                    if getattr(config_obj, 'description', None):
+                        entry["description"] = config_obj.description
+                    if getattr(config_obj, 'label', None):
+                        entry["label"] = config_obj.label
+                    all_configs_list.append(entry)
 
             return {
                 "total_configs": len(all_configs_list),

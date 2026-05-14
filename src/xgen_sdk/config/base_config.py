@@ -107,18 +107,34 @@ def _is_db_available(db_manager) -> bool:
 # ============================================================== #
 
 class PersistentConfig:
-    """설정 값을 담는 데이터 컨테이너 — DB → Redis → Default 로드, dual-write 동기화"""
+    """설정 값을 담는 데이터 컨테이너 — DB → Redis → Default 로드, dual-write 동기화
+
+    options:
+        문자열 enum 설정의 허용 값 리스트. 지정 시 프론트 환경설정 UI 가 자유 텍스트 입력
+        대신 셀렉터(드롭다운) 로 자동 렌더한다. 백엔드는 validation 을 강제하지 않으며
+        (caller 측 책임), 단순히 UI 힌트로만 사용한다 — Bool 컬럼처럼 도메인을 좁히는 메타.
+    description / label:
+        프론트 환경설정 UI 에서 카드 부제목 / 도움말로 노출되는 선택적 메타. 둘 다 영어/한글
+        free-form 문자열. 없으면 UI 가 env_name 만 노출.
+    """
 
     def __init__(self, env_name: str, config_path: str, env_value: Any,
                  type_converter: Optional[callable] = None,
                  redis_manager: Optional[RedisConfigManager] = None,
-                 db_manager=None):
+                 db_manager=None,
+                 options: Optional[list] = None,
+                 description: Optional[str] = None,
+                 label: Optional[str] = None):
         self.env_name = env_name
         self.config_path = config_path
         self.env_value = env_value
         self.type_converter = type_converter
         self.redis_manager = redis_manager or RedisConfigManager()
         self.db_manager = db_manager
+        # UI 메타데이터 — 백엔드 동작에는 영향 없음, 환경설정 편집 UI 렌더 힌트 전용.
+        self.options = list(options) if options else None
+        self.description = description
+        self.label = label
         self._value = self._load_value()
         # Multi-Pod 캐시 인밸리데이션 — 자신이 마지막으로 본 글로벌 config version.
         # `.value` 접근 시 현재 version 과 비교해 변화가 있으면 lazy refresh.
@@ -312,8 +328,15 @@ class BaseConfig(ABC):
 
     def create_persistent_config(self, env_name: str, config_path: str,
                                  default_value: Any, file_path: Optional[str] = None,
-                                 type_converter: Optional[callable] = None) -> PersistentConfig:
-        """PersistentConfig 객체 생성 (Redis + DB 기반)"""
+                                 type_converter: Optional[callable] = None,
+                                 options: Optional[list] = None,
+                                 description: Optional[str] = None,
+                                 label: Optional[str] = None) -> PersistentConfig:
+        """PersistentConfig 객체 생성 (Redis + DB 기반).
+
+        options: 문자열 enum 의 허용 값 리스트. 지정 시 프론트가 셀렉터로 렌더.
+        description / label: 환경설정 UI 부제목/도움말 (선택).
+        """
         env_value = self.get_env_value(env_name, default_value, file_path, type_converter)
         config = PersistentConfig(
             env_name=env_name,
@@ -321,7 +344,10 @@ class BaseConfig(ABC):
             env_value=env_value,
             type_converter=type_converter,
             redis_manager=self.redis_manager,
-            db_manager=self.db_manager
+            db_manager=self.db_manager,
+            options=options,
+            description=description,
+            label=label,
         )
         self.configs[env_name] = config
         return config
@@ -332,17 +358,25 @@ class BaseConfig(ABC):
         raise KeyError(f"Configuration '{key}' not found in {self.__class__.__name__}")
 
     def get_config_summary(self) -> Dict[str, Any]:
+        def _entry(config: PersistentConfig) -> Dict[str, Any]:
+            d = {
+                "current_value": config.value,
+                "default_value": config.env_value,
+                "config_path": config.config_path,
+            }
+            # UI 메타 — 셀렉터/도움말 렌더용 (선택).
+            if getattr(config, 'options', None):
+                d["options"] = list(config.options)
+            if getattr(config, 'description', None):
+                d["description"] = config.description
+            if getattr(config, 'label', None):
+                d["label"] = config.label
+            return d
+
         return {
             "class_name": self.__class__.__name__,
             "config_count": len(self.configs),
-            "configs": {
-                name: {
-                    "current_value": config.value,
-                    "default_value": config.env_value,
-                    "config_path": config.config_path
-                }
-                for name, config in self.configs.items()
-            }
+            "configs": {name: _entry(config) for name, config in self.configs.items()},
         }
 
 
