@@ -169,6 +169,20 @@ def next_stage_on_admin_decision(
     raise InvalidStageTransition(f"알 수 없는 admin decision: {decision!r}")
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 거버넌스 액션 상수 — UI ↔ backend ↔ history 모두 같은 문자열을 사용한다.
+# ──────────────────────────────────────────────────────────────────────────────
+GOVERNANCE_ACTION_APPROVE             = 'approve'              # 승인완료 → stage=deployed
+GOVERNANCE_ACTION_REJECT              = 'reject'               # 승인거절 → stage=rejected_governance
+GOVERNANCE_ACTION_CONDITIONAL_APPROVE = 'conditional_approve'  # 승인보류 → stage 유지(pending_governance), 조건 사유 전달
+
+ALL_GOVERNANCE_ACTIONS = frozenset({
+    GOVERNANCE_ACTION_APPROVE,
+    GOVERNANCE_ACTION_REJECT,
+    GOVERNANCE_ACTION_CONDITIONAL_APPROVE,
+})
+
+
 def next_stage_on_governance_decision(
     current_stage: str,
     decision: str,
@@ -176,8 +190,13 @@ def next_stage_on_governance_decision(
     """거버넌스의 배포 결정. FULL_ACCEPT 모드의 pending_governance 단계에서만 호출.
 
     decision:
-      'approve' — 거버넌스 승인 → stage = deployed
-      'reject'  — 거버넌스 거부 → stage = rejected_governance
+      'approve'              — 거버넌스 승인 → stage = deployed
+      'reject'               — 거버넌스 거부 → stage = rejected_governance
+      'conditional_approve'  — 조건부 보류. 거버넌스가 조건(추가 자료/수정)을 달아 대기시킴.
+                               stage 는 pending_governance 그대로 유지된다 (배포는 활성화되지
+                               않음). 사용자는 latest_review_id 의 comment/conditions 로 사유를
+                               확인한 뒤 워크플로우를 보완해 다시 호출되면 거버넌스가 동일
+                               endpoint 로 approve / reject 를 내릴 수 있다.
     """
     current = _ensure_stage(current_stage)
     decision = (decision or '').strip().lower()
@@ -187,10 +206,14 @@ def next_stage_on_governance_decision(
             f"거버넌스 결정은 stage={current!r} 에서 불가능합니다 (요구: pending_governance)"
         )
 
-    if decision == 'approve':
+    if decision == GOVERNANCE_ACTION_APPROVE:
         return STAGE_DEPLOYED
-    if decision == 'reject':
+    if decision == GOVERNANCE_ACTION_REJECT:
         return STAGE_REJECTED_GOVERNANCE
+    if decision == GOVERNANCE_ACTION_CONDITIONAL_APPROVE:
+        # 조건부 보류 — stage 변화 없음. comment/conditions 만 history 에 누적되어
+        # 사용자가 조건을 확인하고 보완하도록 한다. legacy boolean 도 변하지 않는다.
+        return STAGE_PENDING_GOVERNANCE
 
     raise InvalidStageTransition(f"알 수 없는 governance decision: {decision!r}")
 
