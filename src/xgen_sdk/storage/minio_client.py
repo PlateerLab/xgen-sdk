@@ -177,6 +177,7 @@ def list_files_in_path(
     prefix: str,
     bucket_name: str = FILE_STORAGE_BUCKET,
     extensions: Optional[Set[str]] = None,
+    recursive: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     List all files (not folders) at the given prefix path in MinIO.
@@ -186,6 +187,11 @@ def list_files_in_path(
         prefix: The path prefix to list files from (e.g., "1/zz/" for user_id=1, storage=zz)
         bucket_name: The bucket name to search in
         extensions: Optional set of file extensions to filter (e.g., {'.xlsx', '.csv'})
+        recursive: If True, traverse into sub-prefixes (sub-folders) and return
+            files at any depth under `prefix`. Default False preserves the
+            previous behavior (only files at the top level of `prefix`).
+            Note: the returned `name` field is still the basename only; callers
+            that need the sub-folder portion should derive it from `path`.
 
     Returns:
         List of file info dicts: [{"name": str, "path": str, "size": int, "modified": datetime, "etag": str}]
@@ -200,7 +206,7 @@ def list_files_in_path(
         objects = client.list_objects(
             bucket_name=bucket_name,
             prefix=prefix,
-            recursive=False
+            recursive=recursive,
         )
 
         for obj in objects:
