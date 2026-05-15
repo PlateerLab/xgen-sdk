@@ -206,30 +206,50 @@ def next_stage_on_governance_decision(
     current_stage: str,
     decision: str,
 ) -> str:
-    """거버넌스의 배포 결정. FULL_ACCEPT 모드의 pending_governance 단계에서만 호출.
+    """거버넌스의 배포 결정.
+
+    허용 stage:
+      - pending_governance — 최초 심사
+      - deployed           — 사후 반려 (이미 승인된 배포를 거버넌스가 회수)
 
     decision:
-      'approve'              — 거버넌스 승인 → stage = deployed
-      'reject'               — 거버넌스 거부 → stage = rejected_governance
-      'conditional_approve'  — 조건부 보류. 거버넌스가 조건(추가 자료/수정)을 달아 대기시킴.
-                               stage 는 pending_governance 그대로 유지된다 (배포는 활성화되지
-                               않음). 사용자는 latest_review_id 의 comment/conditions 로 사유를
-                               확인한 뒤 워크플로우를 보완해 다시 호출되면 거버넌스가 동일
-                               endpoint 로 approve / reject 를 내릴 수 있다.
+      'approve'              — 거버넌스 승인.
+                               pending_governance → deployed. deployed 에서 호출은 self-loop 라
+                               의미가 없어 거부.
+      'reject'               — 거버넌스 반려.
+                               pending_governance → rejected_governance (초기 반려, 미배포).
+                               deployed → rejected_governance (사후 반려 = 배포 즉시 회수).
+                               두 경우의 next stage 는 동일하지만 호출 측이 prev_stage 를
+                               audit 로그에 남겨 의미를 구분할 수 있다.
+      'conditional_approve'  — 조건부 보류. pending_governance 에서만 호출, stage 유지.
+                               (현재 정책상 외부 UI 에서는 비노출되지만 alias 호환 보존.)
     """
     current = _ensure_stage(current_stage)
     decision = normalize_governance_action(decision)
 
-    if current != STAGE_PENDING_GOVERNANCE:
+    ALLOWED_STAGES = (STAGE_PENDING_GOVERNANCE, STAGE_DEPLOYED)
+    if current not in ALLOWED_STAGES:
         raise InvalidStageTransition(
-            f"거버넌스 결정은 stage={current!r} 에서 불가능합니다 (요구: pending_governance)"
+            f"거버넌스 결정은 stage={current!r} 에서 불가능합니다 "
+            f"(요구: pending_governance 또는 deployed)"
         )
 
     if decision == GOVERNANCE_ACTION_APPROVE:
+        if current == STAGE_DEPLOYED:
+            # 이미 승인된 상태를 다시 승인 — self-loop, 의미 없음.
+            raise InvalidStageTransition(
+                "이미 배포 승인된 워크플로우입니다 (current=deployed)."
+            )
         return STAGE_DEPLOYED
     if decision == GOVERNANCE_ACTION_REJECT:
+        # 두 stage 모두에서 rejected_governance 로 전이. legacy flags 동기화 시 자동으로
+        # is_deployed=False 가 되어 외부 접근이 즉시 차단된다.
         return STAGE_REJECTED_GOVERNANCE
     if decision == GOVERNANCE_ACTION_CONDITIONAL_APPROVE:
+        if current != STAGE_PENDING_GOVERNANCE:
+            raise InvalidStageTransition(
+                "조건부 보류는 pending_governance 에서만 가능합니다."
+            )
         # 조건부 보류 (외부 표면 이름: 'pending') — stage 변화 없음.
         # comment/conditions 만 history 에 누적되어 사용자가 조건을 확인하고 보완하도록 한다.
         # legacy boolean 도 변하지 않는다.
