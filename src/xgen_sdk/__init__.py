@@ -12,6 +12,7 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.redis: 범용 Redis 클라이언트
     - xgen_sdk.logging: 백엔드 DB 로깅 (BackendLogger)
     - xgen_sdk.quota: 토큰 한도(quota) 정책 평가 (1.13.0+)
+    - xgen_sdk.notification: 일반화된 in-app notification (1.13.1+)
 
 Quick Start:
     from xgen_sdk import XgenApp
@@ -23,7 +24,7 @@ Quick Start:
     config = xgen.config   # RedisConfigManager 또는 LocalConfigManager
 """
 
-__version__ = "1.13.0"
+__version__ = "1.13.1"
 
 from xgen_sdk.app import XgenApp
 
