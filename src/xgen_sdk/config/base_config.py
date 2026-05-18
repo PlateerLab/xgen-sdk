@@ -110,9 +110,16 @@ class PersistentConfig:
     """설정 값을 담는 데이터 컨테이너 — DB → Redis → Default 로드, dual-write 동기화
 
     options:
-        문자열 enum 설정의 허용 값 리스트. 지정 시 프론트 환경설정 UI 가 자유 텍스트 입력
-        대신 셀렉터(드롭다운) 로 자동 렌더한다. 백엔드는 validation 을 강제하지 않으며
-        (caller 측 책임), 단순히 UI 힌트로만 사용한다 — Bool 컬럼처럼 도메인을 좁히는 메타.
+        문자열 enum / dict 설정의 허용 값 리스트. 지정 시 프론트 환경설정 UI 가 자유 텍스트
+        입력 대신 셀렉터(드롭다운) 로 자동 렌더한다. 백엔드는 validation 을 강제하지 않으며
+        (caller 측 책임), 단순히 UI 힌트로만 사용한다.
+        형식 — string 리스트 또는 `[{"value": "x", "label": "X"}, ...]` 객체 리스트 모두 지원.
+    options_loader:
+        callable 지정 시 정적 options 대신 lazy 평가. property `.options` 접근 시 호출되어
+        외부 카탈로그(예: LLM 모델 list API) 결과로 옵션을 동적으로 채운다.
+        결과는 in-process 캐시 (TTL=options_cache_ttl). 실패 시 정적 `options` 로 fallback.
+    options_cache_ttl:
+        options_loader 결과 캐시 TTL (초). 기본 3600 (1시간).
     description / label:
         프론트 환경설정 UI 에서 카드 부제목 / 도움말로 노출되는 선택적 메타. 둘 다 영어/한글
         free-form 문자열. 없으면 UI 가 env_name 만 노출.
@@ -124,7 +131,9 @@ class PersistentConfig:
                  db_manager=None,
                  options: Optional[list] = None,
                  description: Optional[str] = None,
-                 label: Optional[str] = None):
+                 label: Optional[str] = None,
+                 options_loader: Optional[callable] = None,
+                 options_cache_ttl: int = 3600):
         self.env_name = env_name
         self.config_path = config_path
         self.env_value = env_value
@@ -132,7 +141,12 @@ class PersistentConfig:
         self.redis_manager = redis_manager or RedisConfigManager()
         self.db_manager = db_manager
         # UI 메타데이터 — 백엔드 동작에는 영향 없음, 환경설정 편집 UI 렌더 힌트 전용.
-        self.options = list(options) if options else None
+        # _static_options 는 options_loader 가 실패할 때의 최종 fallback.
+        self._static_options = list(options) if options else None
+        self._options_loader = options_loader
+        self._options_cache_ttl = options_cache_ttl if options_cache_ttl and options_cache_ttl > 0 else 3600
+        self._options_cache_value: Optional[list] = None
+        self._options_cache_ts: float = 0.0
         self.description = description
         self.label = label
         self._value = self._load_value()
@@ -276,6 +290,46 @@ class PersistentConfig:
             logger.debug("Failed to update _last_seen_version on refresh for %s: %s",
                          self.env_name, e)
 
+    # ─────────────────────────────────────────────────────────────
+    # options — lazy 평가 + in-process 캐시 (TTL=options_cache_ttl).
+    # options_loader 가 지정되어 있으면 동적 호출, 없으면 정적 _static_options.
+    # 어떤 단계에서도 raise 하지 않음 — 실패 시 stale 캐시 / 정적 fallback.
+    # ─────────────────────────────────────────────────────────────
+    @property
+    def options(self) -> Optional[list]:
+        """현재 옵션 리스트. options_loader 가 있으면 lazy 평가 + 캐시."""
+        if self._options_loader is None:
+            return list(self._static_options) if self._static_options else None
+
+        now = time.time()
+        if (
+            self._options_cache_value is not None
+            and (now - self._options_cache_ts) < self._options_cache_ttl
+        ):
+            return list(self._options_cache_value)
+
+        try:
+            loaded = self._options_loader()
+            if loaded:
+                self._options_cache_value = list(loaded)
+                self._options_cache_ts = now
+                return list(self._options_cache_value)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("options_loader failed (path=%s): %s", self.config_path, e)
+
+        # loader 실패 또는 빈 결과 — 기존 캐시 우선, 없으면 정적 fallback
+        if self._options_cache_value:
+            return list(self._options_cache_value)
+        if self._static_options:
+            return list(self._static_options)
+        return None
+
+    @options.setter
+    def options(self, new_value: Optional[list]) -> None:
+        """정적 options 변경 — 주로 테스트/runtime override 용도."""
+        self._static_options = list(new_value) if new_value else None
+        # loader 캐시는 그대로 둠. loader 가 우선.
+
 
 # ============================================================== #
 # BaseConfig — 설정 카테고리 기반 클래스
@@ -331,10 +385,15 @@ class BaseConfig(ABC):
                                  type_converter: Optional[callable] = None,
                                  options: Optional[list] = None,
                                  description: Optional[str] = None,
-                                 label: Optional[str] = None) -> PersistentConfig:
+                                 label: Optional[str] = None,
+                                 options_loader: Optional[callable] = None,
+                                 options_cache_ttl: int = 3600) -> PersistentConfig:
         """PersistentConfig 객체 생성 (Redis + DB 기반).
 
-        options: 문자열 enum 의 허용 값 리스트. 지정 시 프론트가 셀렉터로 렌더.
+        options: 정적 옵션 리스트 (문자열 또는 dict). 프론트가 셀렉터로 렌더.
+        options_loader: 동적 옵션 로더 callable. 지정 시 lazy 평가 + 캐시 (TTL=options_cache_ttl).
+                        실패 시 정적 `options` 로 fallback.
+        options_cache_ttl: options_loader 결과 캐시 TTL (초). 기본 3600.
         description / label: 환경설정 UI 부제목/도움말 (선택).
         """
         env_value = self.get_env_value(env_name, default_value, file_path, type_converter)
@@ -348,6 +407,8 @@ class BaseConfig(ABC):
             options=options,
             description=description,
             label=label,
+            options_loader=options_loader,
+            options_cache_ttl=options_cache_ttl,
         )
         self.configs[env_name] = config
         return config
