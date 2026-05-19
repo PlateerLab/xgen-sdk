@@ -1036,7 +1036,10 @@ class DatabaseManagerPsycopg3:
         return cls._MODEL_TO_PG_TYPE.get(first_token)
 
     def _alter_column_type(self, table_name: str, column_name: str, column_def: str, current_pg_type: str) -> bool:
-        """기존 컬럼의 타입을 모델 정의에 맞게 변경합니다."""
+        """기존 컬럼의 타입을 모델 정의에 맞게 변경합니다.
+
+        execute_query 가 실패를 silent 로 삼키지 않도록 _execute_ddl_strict 를 통해 실행한다.
+        """
         try:
             expected_pg_type = self._normalize_pg_type(column_def)
             if not expected_pg_type:
@@ -1051,11 +1054,7 @@ class DatabaseManagerPsycopg3:
                 f"'{current_pg_type}' → '{expected_pg_type}' (def: {column_def})"
             )
 
-            # 타입 변환에 사용할 순수 SQL 타입 (DEFAULT/NOT NULL 등 제거)
-            # column_def에서 타입 부분만 추출: 첫 토큰(+괄호+배열) ~ DEFAULT/NOT NULL/REFERENCES 직전까지
             type_sql = self._extract_type_sql(column_def)
-
-            # USING 절: 기존 데이터 캐스팅
             using_clause = self._build_using_clause(column_name, current_pg_type, expected_pg_type, type_sql)
 
             alter_query = (
@@ -1063,20 +1062,20 @@ class DatabaseManagerPsycopg3:
                 f"ALTER COLUMN {column_name} TYPE {type_sql}{using_clause}"
             )
 
-            self.execute_query(alter_query)
+            if not self._execute_ddl_strict(alter_query):
+                self.logger.error(f"Failed to alter column {table_name}.{column_name} — see DDL error above")
+                return False
             self.logger.info(f"Successfully altered column {table_name}.{column_name} to {type_sql}")
 
-            # DEFAULT 값이 column_def에 있으면 별도로 설정
+            # DEFAULT 값이 column_def에 있으면 별도로 설정 (실패해도 type 변경 자체는 성공)
             default_val = self._extract_default(column_def)
             if default_val is not None:
                 default_query = (
                     f"ALTER TABLE {table_name} "
                     f"ALTER COLUMN {column_name} SET DEFAULT {default_val}"
                 )
-                try:
-                    self.execute_query(default_query)
-                except Exception as de:
-                    self.logger.warning(f"Failed to set default for {table_name}.{column_name}: {de}")
+                if not self._execute_ddl_strict(default_query):
+                    self.logger.warning(f"Failed to set default for {table_name}.{column_name}, continuing...")
 
             return True
 
@@ -1156,73 +1155,117 @@ class DatabaseManagerPsycopg3:
         return f" USING {column_name}::{type_sql}"
 
     def _run_schema_migrations(self, models_registry) -> bool:
-        """스키마 변경 감지 및 마이그레이션 실행 (컬럼 추가/삭제/타입 변경)"""
+        """스키마 변경 감지 및 마이그레이션 실행 (컬럼 추가/삭제/타입 변경).
+
+        설계 원칙: **한 컬럼/테이블의 실패가 전체 마이그레이션을 중단시키지 않는다.**
+        과거엔 한 ADD COLUMN 실패에 즉시 return False 하여 그 뒤 모델/컬럼들은
+        영영 추가되지 못했다. FK 참조 타겟 테이블이 같은 패스 안에서 늦게 만들어지는
+        케이스 (예: deploy_meta.latest_review_id → governance_review_history)에서
+        실패한 컬럼 이후 모든 마이그레이션이 silent 로 정지하던 회귀의 핵심 원인.
+
+        실패한 컬럼은 다음 부팅에 같은 _add_column_to_table 가 다시 시도하므로,
+        FK 의존성이 풀리면 자연스럽게 회복된다.
+        """
+        any_failure = False
         try:
             self.logger.info("Running schema migrations...")
 
+            # 두 패스 — FK 의존성 자연 복원 효과:
+            #   1) 모든 모델의 누락 컬럼 + 타입 변경 + stale drop + constraint 동기화
+            #   2) (다음 부팅 시) 1차에서 FK 미해결로 실패한 컬럼도 재시도
             for model_class in models_registry:
-                table_name = model_class().get_table_name()
-                instance = model_class()
-                expected_schema = instance.get_schema()
-                column_names = set(instance.get_column_names())
-
-                current_columns = self._get_table_columns(table_name)
-
-                if not current_columns:
-                    self.logger.warning(f"Table {table_name} does not exist or has no columns")
+                try:
+                    table_name = model_class().get_table_name()
+                except Exception as e:
+                    self.logger.error(f"Cannot resolve table name for {model_class.__name__}: {e}")
+                    any_failure = True
                     continue
 
-                missing_columns = []
-                type_mismatch_columns = []
+                try:
+                    instance = model_class()
+                    expected_schema = instance.get_schema()
+                    column_names = set(instance.get_column_names())
 
-                for column_name, column_def in expected_schema.items():
-                    # 제약조건(UNIQUE_, CHECK_)은 컬럼이 아니므로 스킵
-                    if column_name not in column_names:
+                    current_columns = self._get_table_columns(table_name)
+
+                    if not current_columns:
+                        self.logger.warning(f"Table {table_name} does not exist or has no columns")
                         continue
 
-                    if column_name not in current_columns:
-                        missing_columns.append((column_name, column_def))
-                        self.logger.info(f"Found missing column: {column_name} ({column_def})")
-                    elif self.db_type == "postgresql":
-                        # 기존 컬럼의 타입 불일치 감지
-                        current_pg_type = current_columns[column_name]
-                        expected_pg_type = self._normalize_pg_type(column_def)
-                        if expected_pg_type and current_pg_type != expected_pg_type:
-                            type_mismatch_columns.append((column_name, column_def, current_pg_type))
-                            self.logger.info(
-                                f"Type mismatch: {table_name}.{column_name} "
-                                f"DB='{current_pg_type}' vs Model='{expected_pg_type}'"
+                    missing_columns = []
+                    type_mismatch_columns = []
+
+                    for column_name, column_def in expected_schema.items():
+                        # 제약조건(UNIQUE_, CHECK_)은 컬럼이 아니므로 스킵
+                        if column_name not in column_names:
+                            continue
+
+                        if column_name not in current_columns:
+                            missing_columns.append((column_name, column_def))
+                            self.logger.info(f"Found missing column: {column_name} ({column_def})")
+                        elif self.db_type == "postgresql":
+                            # 기존 컬럼의 타입 불일치 감지
+                            current_pg_type = current_columns[column_name]
+                            expected_pg_type = self._normalize_pg_type(column_def)
+                            if expected_pg_type and current_pg_type != expected_pg_type:
+                                type_mismatch_columns.append((column_name, column_def, current_pg_type))
+                                self.logger.info(
+                                    f"Type mismatch: {table_name}.{column_name} "
+                                    f"DB='{current_pg_type}' vs Model='{expected_pg_type}'"
+                                )
+
+                    # ─ ADD COLUMN: 한 컬럼 실패해도 같은 테이블의 다른 컬럼은 계속 시도.
+                    # 이전 구현은 첫 실패에 return False 로 전체 마이그레이션을 중단해, 한
+                    # 컬럼의 FK 미해결이 그 뒤 모든 모델/컬럼을 silent 로 막아 버렸다.
+                    for column_name, column_def in missing_columns:
+                        if not self._add_column_to_table(table_name, column_name, column_def):
+                            any_failure = True
+                            self.logger.warning(
+                                f"Skipped {table_name}.{column_name} — will retry next boot. Continuing..."
                             )
 
-                for column_name, column_def in missing_columns:
-                    if not self._add_column_to_table(table_name, column_name, column_def):
-                        return False
+                    # 컬럼 타입 변경
+                    for column_name, column_def, current_pg_type in type_mismatch_columns:
+                        if not self._alter_column_type(table_name, column_name, column_def, current_pg_type):
+                            any_failure = True
+                            self.logger.warning(
+                                f"Failed to alter column type {table_name}.{column_name}, continuing..."
+                            )
 
-                # 컬럼 타입 변경
-                for column_name, column_def, current_pg_type in type_mismatch_columns:
-                    if not self._alter_column_type(table_name, column_name, column_def, current_pg_type):
-                        self.logger.warning(
-                            f"Failed to alter column type {table_name}.{column_name}, continuing..."
-                        )
+                    # 모델 스키마에 없는 불필요 컬럼 감지 및 제거
+                    base_columns = {'id', 'created_at', 'updated_at'}
+                    stale_columns = []
+                    for column_name in current_columns:
+                        if column_name not in column_names and column_name not in base_columns:
+                            stale_columns.append(column_name)
 
-                # 모델 스키마에 없는 불필요 컬럼 감지 및 제거
-                base_columns = {'id', 'created_at', 'updated_at'}
-                stale_columns = []
-                for column_name in current_columns:
-                    if column_name not in column_names and column_name not in base_columns:
-                        stale_columns.append(column_name)
+                    for column_name in stale_columns:
+                        self.logger.info(f"Found stale column: {column_name} in table {table_name}")
+                        if not self._drop_column_from_table(table_name, column_name):
+                            any_failure = True
+                            self.logger.warning(f"Failed to drop stale column {column_name} from {table_name}, continuing...")
 
-                for column_name in stale_columns:
-                    self.logger.info(f"Found stale column: {column_name} in table {table_name}")
-                    if not self._drop_column_from_table(table_name, column_name):
-                        self.logger.warning(f"Failed to drop stale column {column_name} from {table_name}, continuing...")
+                    # 제약조건(NOT NULL, UNIQUE, DEFAULT) 동기화
+                    try:
+                        self._run_constraint_migrations(table_name, expected_schema, column_names)
+                    except Exception as ce:
+                        any_failure = True
+                        self.logger.error(f"Constraint migration error for {table_name}: {ce}")
 
-                # 제약조건(NOT NULL, UNIQUE, DEFAULT) 동기화
-                self._run_constraint_migrations(table_name, expected_schema, column_names)
+                    if not missing_columns and not stale_columns and not type_mismatch_columns:
+                        self.logger.info(f"Table {table_name} schema is up to date")
 
-                if not missing_columns and not stale_columns and not type_mismatch_columns:
-                    self.logger.info(f"Table {table_name} schema is up to date")
+                except Exception as inner_e:
+                    # 한 테이블의 예측 못 한 예외도 전체를 중단시키지 않는다.
+                    any_failure = True
+                    self.logger.error(f"Schema migration error for table {table_name}: {inner_e}")
+                    continue
 
+            if any_failure:
+                self.logger.warning(
+                    "Schema migration finished with one or more per-column failures — "
+                    "see errors above. Next boot will retry."
+                )
             return True
 
         except Exception as e:
@@ -1396,64 +1439,43 @@ class DatabaseManagerPsycopg3:
                 current_is_unique = column_name in current_unique
 
                 # ── NOT NULL 동기화 ──
+                # NOTE: execute_query 는 silent 로 실패를 삼키므로 _execute_ddl_strict 사용.
+                # 이전엔 ALTER 가 실패해도 changes_made=True 가 되어 "Constraint migrations
+                # completed" 로그가 거짓으로 찍혔다.
                 if expected['not_null'] and current_nullable:
-                    # 모델은 NOT NULL이지만 DB는 nullable → SET NOT NULL
-                    # NULL 데이터가 있으면 먼저 처리
-                    try:
-                        self.logger.info(
-                            f"Setting NOT NULL on {table_name}.{column_name}"
-                        )
-                        self.execute_query(
-                            f"ALTER TABLE {table_name} "
-                            f"ALTER COLUMN {column_name} SET NOT NULL"
-                        )
+                    self.logger.info(f"Setting NOT NULL on {table_name}.{column_name}")
+                    if self._execute_ddl_strict(
+                        f"ALTER TABLE {table_name} ALTER COLUMN {column_name} SET NOT NULL"
+                    ):
                         changes_made = True
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Failed to SET NOT NULL on {table_name}.{column_name}: {e}"
-                        )
+                    else:
+                        self.logger.warning(f"Failed to SET NOT NULL on {table_name}.{column_name}")
 
                 elif not expected['not_null'] and not current_nullable:
-                    # 모델은 nullable이지만 DB는 NOT NULL → DROP NOT NULL
-                    try:
-                        self.logger.info(
-                            f"Dropping NOT NULL on {table_name}.{column_name}"
-                        )
-                        self.execute_query(
-                            f"ALTER TABLE {table_name} "
-                            f"ALTER COLUMN {column_name} DROP NOT NULL"
-                        )
+                    self.logger.info(f"Dropping NOT NULL on {table_name}.{column_name}")
+                    if self._execute_ddl_strict(
+                        f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP NOT NULL"
+                    ):
                         changes_made = True
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Failed to DROP NOT NULL on {table_name}.{column_name}: {e}"
-                        )
+                    else:
+                        self.logger.warning(f"Failed to DROP NOT NULL on {table_name}.{column_name}")
 
                 # ── UNIQUE 동기화 ──
                 if expected['unique'] and not current_is_unique:
-                    # 모델은 UNIQUE이지만 DB에 없음 → ADD UNIQUE
                     constraint_name = f"uq_{table_name}_{column_name}"
-                    try:
-                        self.logger.info(
-                            f"Adding UNIQUE constraint on {table_name}.{column_name}"
-                        )
-                        self.execute_query(
-                            f"ALTER TABLE {table_name} "
-                            f"ADD CONSTRAINT {constraint_name} UNIQUE ({column_name})"
-                        )
+                    self.logger.info(f"Adding UNIQUE constraint on {table_name}.{column_name}")
+                    if self._execute_ddl_strict(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD CONSTRAINT {constraint_name} UNIQUE ({column_name})"
+                    ):
                         changes_made = True
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Failed to add UNIQUE on {table_name}.{column_name}: {e}"
-                        )
+                    else:
+                        self.logger.warning(f"Failed to add UNIQUE on {table_name}.{column_name}")
 
                 elif not expected['unique'] and current_is_unique:
-                    # 모델은 UNIQUE 아닌데 DB에 있음 → DROP UNIQUE
+                    self.logger.info(f"Dropping UNIQUE constraint on {table_name}.{column_name}")
                     try:
-                        self.logger.info(
-                            f"Dropping UNIQUE constraint on {table_name}.{column_name}"
-                        )
-                        # 제약조건 이름을 조회하여 삭제
+                        # 제약조건 이름 조회 (SELECT 는 execute_query 유지)
                         name_query = """
                         SELECT conname FROM pg_constraint
                         JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = ANY(conkey)
@@ -1463,11 +1485,10 @@ class DatabaseManagerPsycopg3:
                         result = self.execute_query(name_query, (table_name, column_name))
                         if result:
                             for row in result:
-                                self.execute_query(
-                                    f"ALTER TABLE {table_name} "
-                                    f"DROP CONSTRAINT IF EXISTS {row['conname']}"
-                                )
-                            changes_made = True
+                                if self._execute_ddl_strict(
+                                    f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {row['conname']}"
+                                ):
+                                    changes_made = True
                         else:
                             # pg_constraint에 없으면 인덱스 기반 UNIQUE일 수 있음
                             idx_query = """
@@ -1479,10 +1500,10 @@ class DatabaseManagerPsycopg3:
                             )
                             if idx_result:
                                 for row in idx_result:
-                                    self.execute_query(
+                                    if self._execute_ddl_strict(
                                         f"DROP INDEX IF EXISTS {row['indexname']}"
-                                    )
-                                changes_made = True
+                                    ):
+                                        changes_made = True
                     except Exception as e:
                         self.logger.warning(
                             f"Failed to drop UNIQUE on {table_name}.{column_name}: {e}"
@@ -1490,51 +1511,42 @@ class DatabaseManagerPsycopg3:
 
                 # ── DEFAULT 동기화 ──
                 if expected['default'] is not None:
-                    # 모델에 DEFAULT가 정의됨
                     expected_default_upper = expected['default'].upper()
-                    # DB의 current_default는 PostgreSQL이 정규화한 형태
-                    # (예: 'true' → 'true', 'FALSE' → 'false', "'text'" → "'text'::...")
                     needs_set = False
                     if current_default is None:
                         needs_set = True
                     else:
-                        # 간단한 비교: 정규화된 값끼리 비교
                         norm_current = current_default.split('::')[0].strip().strip("'").upper()
                         if norm_current != expected_default_upper:
                             needs_set = True
 
                     if needs_set:
-                        try:
-                            self.logger.info(
-                                f"Setting DEFAULT {expected['default']} on "
-                                f"{table_name}.{column_name}"
-                            )
-                            self.execute_query(
-                                f"ALTER TABLE {table_name} "
-                                f"ALTER COLUMN {column_name} SET DEFAULT {expected['default']}"
-                            )
+                        self.logger.info(
+                            f"Setting DEFAULT {expected['default']} on {table_name}.{column_name}"
+                        )
+                        if self._execute_ddl_strict(
+                            f"ALTER TABLE {table_name} "
+                            f"ALTER COLUMN {column_name} SET DEFAULT {expected['default']}"
+                        ):
                             changes_made = True
-                        except Exception as e:
+                        else:
                             self.logger.warning(
-                                f"Failed to SET DEFAULT on {table_name}.{column_name}: {e}"
+                                f"Failed to SET DEFAULT on {table_name}.{column_name}"
                             )
 
                 elif expected['default'] is None and current_default is not None:
                     # 모델에 DEFAULT가 없지만 DB에 있음 → DROP DEFAULT
                     # 단, serial/nextval 자동 DEFAULT는 건드리지 않음
                     if current_default and 'nextval' not in current_default:
-                        try:
-                            self.logger.info(
-                                f"Dropping DEFAULT on {table_name}.{column_name}"
-                            )
-                            self.execute_query(
-                                f"ALTER TABLE {table_name} "
-                                f"ALTER COLUMN {column_name} DROP DEFAULT"
-                            )
+                        self.logger.info(f"Dropping DEFAULT on {table_name}.{column_name}")
+                        if self._execute_ddl_strict(
+                            f"ALTER TABLE {table_name} "
+                            f"ALTER COLUMN {column_name} DROP DEFAULT"
+                        ):
                             changes_made = True
-                        except Exception as e:
+                        else:
                             self.logger.warning(
-                                f"Failed to DROP DEFAULT on {table_name}.{column_name}: {e}"
+                                f"Failed to DROP DEFAULT on {table_name}.{column_name}"
                             )
 
             if changes_made:
@@ -1545,43 +1557,72 @@ class DatabaseManagerPsycopg3:
             self.logger.error(f"Constraint migration failed for {table_name}: {e}")
             return False
 
-    def _add_column_to_table(self, table_name: str, column_name: str, column_def: str) -> bool:
-        """테이블에 컬럼 추가"""
+    def _execute_ddl_strict(self, ddl: str) -> bool:
+        """DDL 한 줄을 실행하고 성공 여부를 정확히 반환한다.
+
+        주의: `execute_query` 는 실패 시 예외를 삼키고 `None` 을 반환한다 (라인 793-834).
+        그래서 그걸 직접 호출하면 "ALTER TABLE 이 실패했는데도 호출자 입장에선 성공한 것
+        처럼 보이는" 회귀가 생긴다 — 실제로 deploy_meta 등에 신규 컬럼이 silent 로 빠진
+        근본 원인. 본 헬퍼는 connection cursor 를 직접 잡아 raise 로 명확히 실패를 알린다.
+
+        Returns:
+            True  — 성공적으로 실행됨 (또는 idempotent ADD/DROP COLUMN IF EXISTS no-op)
+            False — DB 단에서 실패. 호출자가 다음 컬럼/테이블로 진행하든 abort 하든 결정.
+        """
         try:
-            self.logger.info(f"Adding missing column {column_name} to table {table_name}")
-
             if self.db_type == "postgresql":
-                alter_query = f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_def}"
-            else:
-                alter_query = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"
+                with self.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(ddl)
+                        conn.commit()
+                return True
 
-            # DDL 문은 결과를 반환하지 않으므로, 예외가 발생하지 않으면 성공으로 간주
-            self.execute_query(alter_query)
+            if self.db_type == "sqlite":
+                with self._sqlite_lock:
+                    if not self._sqlite_connection:
+                        self._connect_sqlite()
+                    cur = self._sqlite_connection.cursor()
+                    cur.execute(ddl)
+                    self._sqlite_connection.commit()
+                return True
+
+            self.logger.error(f"Unknown db_type {self.db_type}, skipping DDL: {ddl}")
+            return False
+        except Exception as e:
+            # 진짜 원인 (FK reference 누락, 잘못된 컬럼 정의, 권한 등) 을 그대로 노출.
+            self.logger.error(f"DDL failed: {ddl} -- {type(e).__name__}: {e}")
+            return False
+
+    def _add_column_to_table(self, table_name: str, column_name: str, column_def: str) -> bool:
+        """테이블에 컬럼 추가. 실패 시 명확히 False 를 반환."""
+        self.logger.info(f"Adding missing column {column_name} to table {table_name}")
+
+        if self.db_type == "postgresql":
+            alter_query = f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_def}"
+        else:
+            alter_query = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"
+
+        if self._execute_ddl_strict(alter_query):
             self.logger.info(f"Successfully added column {column_name} to {table_name}")
             return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to add column {column_name} to {table_name}: {e}")
-            return False
+        self.logger.error(f"Failed to add column {column_name} to {table_name} — see DDL error above")
+        return False
 
     def _drop_column_from_table(self, table_name: str, column_name: str) -> bool:
-        """테이블에서 불필요 컬럼 제거"""
-        try:
-            self.logger.info(f"Dropping stale column {column_name} from table {table_name}")
+        """테이블에서 불필요 컬럼 제거. 실패 시 False."""
+        self.logger.info(f"Dropping stale column {column_name} from table {table_name}")
 
-            if self.db_type == "postgresql":
-                alter_query = f"ALTER TABLE {table_name} DROP COLUMN IF EXISTS {column_name}"
-            else:
-                self.logger.warning(f"SQLite does not support DROP COLUMN easily, skipping {column_name}")
-                return False
+        if self.db_type == "postgresql":
+            alter_query = f"ALTER TABLE {table_name} DROP COLUMN IF EXISTS {column_name}"
+        else:
+            self.logger.warning(f"SQLite does not support DROP COLUMN easily, skipping {column_name}")
+            return False
 
-            self.execute_query(alter_query)
+        if self._execute_ddl_strict(alter_query):
             self.logger.info(f"Successfully dropped column {column_name} from {table_name}")
             return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to drop column {column_name} from {table_name}: {e}")
-            return False
+        self.logger.error(f"Failed to drop column {column_name} from {table_name} — see DDL error above")
+        return False
 
     def _migration_001_add_indexes(self) -> bool:
         """마이그레이션 001: 인덱스 추가"""
