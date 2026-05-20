@@ -1023,8 +1023,14 @@ class DatabaseManagerPsycopg3:
         if "[]" in lower:
             return "ARRAY"
 
-        # "TIMESTAMP WITH TIME ZONE" 같은 multi-word 타입을 먼저 매칭
-        for model_type, pg_type in cls._MODEL_TO_PG_TYPE.items():
+        # "TIMESTAMP WITH TIME ZONE" 같은 multi-word 타입을 먼저 매칭.
+        # 길이 내림차순 정렬 — `"timestamp"` 가 `"timestamp with time zone"` 보다 먼저
+        # 매치되어 `timestamp without time zone` 으로 잘못 normalize 되던 버그 차단.
+        # (그 결과 매 boot 마다 동일 컬럼에 무한 ALTER 가 실행되며 로그가 폭증했음.)
+        for model_type, pg_type in sorted(
+            cls._MODEL_TO_PG_TYPE.items(),
+            key=lambda kv: -len(kv[0]),
+        ):
             if lower.startswith(model_type):
                 # 정확히 그 타입 뒤에 공백, 괄호, 또는 문자열 끝이 오는지 확인
                 rest = lower[len(model_type):]

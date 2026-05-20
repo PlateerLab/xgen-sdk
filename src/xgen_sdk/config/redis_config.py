@@ -199,6 +199,31 @@ class RedisConfigManager:
             # env_name이 없으면 config_path 사용
             final_env_name = env_name or config_path
 
+            # ── 입력 정규화 — escape 누적 차단 ──
+            # data_type 이 list/dict 인데 config_value 가 string (이미 JSON-serialized)
+            # 으로 들어오면 그대로 json.dumps 에 넣어 escape 누적 (`"["..."]"` → 매 boot 폭증)
+            # 발생. set 직전에 한 번 deserialize 해서 native list/dict 로 정규화.
+            if data_type == "list":
+                if isinstance(config_value, str):
+                    try:
+                        from xgen_sdk.db.config_serializer import _safe_parse_json_list
+                        config_value = _safe_parse_json_list(config_value)
+                    except Exception as norm_err:
+                        logger.warning(f"set_config: list normalize failed for {final_env_name}: {norm_err}")
+                elif isinstance(config_value, list):
+                    # element 가 escape string 인 경우(=이미 corrupt 된 입력) 복원.
+                    try:
+                        from xgen_sdk.db.config_serializer import _safe_parse_json_list
+                        config_value = _safe_parse_json_list(config_value)
+                    except Exception as norm_err:
+                        logger.warning(f"set_config: list element-normalize failed for {final_env_name}: {norm_err}")
+            elif data_type == "dict" and isinstance(config_value, str):
+                try:
+                    from xgen_sdk.db.config_serializer import _safe_parse_json_dict
+                    config_value = _safe_parse_json_dict(config_value)
+                except Exception as norm_err:
+                    logger.warning(f"set_config: dict normalize failed for {final_env_name}: {norm_err}")
+
             # 설정 값과 메타데이터를 JSON으로 저장
             config_data = {
                 'value': config_value,

@@ -465,13 +465,35 @@ def convert_to_list(value: Union[str, list], separator: str = ',') -> List[str]:
     return [item.strip() for item in str(value).split(separator) if item.strip()]
 
 def convert_to_int_list(value: Union[str, List[int]], separator: str = ',') -> List[int]:
+    """문자열/리스트 → 정수 리스트.
+
+    Corruption 회복: 입력이 list 인데 element 가 escape 된 list-ish 문자열
+    (예: `[ "[\\\"1\\\", \\\"2\\\"]" ]`) 인 경우 한 단계 풀어내 재시도.
+    매 boot 마다 escape 누적으로 폭증하는 corruption 패턴을 차단한다.
+    """
     if isinstance(value, list):
+        # ── element-level escape 복원 ──
+        # 단일 element 가 "[...]" 형태이면 그 안에 진짜 list 가 있다고 가정.
+        if len(value) == 1 and isinstance(value[0], str):
+            inner = value[0].strip()
+            if inner.startswith('[') and inner.endswith(']'):
+                try:
+                    parsed = json.loads(inner)
+                    if isinstance(parsed, list):
+                        # 재귀 — element 가 또 escape string 일 수 있음.
+                        return convert_to_int_list(parsed, separator)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
         result = []
         for item in value:
             try:
                 result.append(int(item))
             except (ValueError, TypeError):
-                pass
+                # element 가 또 escape string 일 수 있음 — 풀어보고 재귀.
+                if isinstance(item, str):
+                    s = item.strip()
+                    if s.startswith('[') and s.endswith(']'):
+                        result.extend(convert_to_int_list(s, separator))
         return result
     elif isinstance(value, str):
         value = value.strip()
@@ -479,7 +501,11 @@ def convert_to_int_list(value: Union[str, List[int]], separator: str = ',') -> L
             try:
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
-                    return [int(item) for item in parsed]
+                    # 재귀로 element-level corruption 도 처리.
+                    return convert_to_int_list(parsed, separator)
+                # parsed 가 string 이면 다중 escape — 한 번 더 시도.
+                if isinstance(parsed, str):
+                    return convert_to_int_list(parsed, separator)
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
         result = []

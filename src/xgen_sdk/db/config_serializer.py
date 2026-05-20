@@ -150,7 +150,7 @@ def _is_json_string(value: str) -> bool:
         return False
 
 
-def _safe_parse_json_list(value: str, max_depth: int = 10) -> list:
+def _safe_parse_json_list(value: Any, max_depth: int = 10) -> list:
     """
     다중 이스케이프된 JSON 리스트를 안전하게 파싱
 
@@ -160,17 +160,37 @@ def _safe_parse_json_list(value: str, max_depth: int = 10) -> list:
     - 2회 이스케이프: "\"[\\\"a\\\", \\\"b\\\"]\""
     - ...
 
+    입력이 list 인 경우에도 element 가 escape 된 list-ish 문자열일 수 있어
+    (예: `[ "[\\\"a\\\", \\\"b\\\"]" ]`) element-level 재귀 복원을 수행한다.
+    매 boot 마다 escape 한 단계씩 누적되어 폭증하는 corruption 패턴 차단.
+
     Args:
-        value: 파싱할 문자열
+        value: 파싱할 값 (문자열 또는 list)
         max_depth: 최대 역직렬화 반복 횟수 (무한 루프 방지)
 
     Returns:
         파싱된 리스트 또는 빈 리스트
     """
+    # ── list 입력 — element 가 escape 된 list-ish string 이면 풀어내기 ──
+    # 단일 element 가 "[...]" 형태의 string 이면 그 안의 진짜 list 를 복원.
+    # (corruption 회복 path)
+    if isinstance(value, list):
+        if len(value) == 1 and isinstance(value[0], str):
+            inner = value[0].strip()
+            if inner.startswith('[') and inner.endswith(']'):
+                recovered = _safe_parse_json_list(inner, max_depth)
+                if recovered:
+                    logger.warning(
+                        "Recovered list from single-element escape wrapper "
+                        f"(escape collapse). Original len=1 → {len(recovered)} elements."
+                    )
+                    return recovered
+        return value
+
     if not isinstance(value, str) or not value.strip():
         return []
 
-    current = value.strip()
+    current: Any = value.strip()
     depth = 0
 
     while depth < max_depth:
@@ -191,6 +211,13 @@ def _safe_parse_json_list(value: str, max_depth: int = 10) -> list:
             # 파싱 결과가 리스트면 성공
             if isinstance(parsed, list):
                 logger.debug(f"Successfully parsed JSON list at depth {depth}")
+                # 풀어낸 list 도 element-level corruption 가능 — 재귀로 검사.
+                if len(parsed) == 1 and isinstance(parsed[0], str):
+                    inner = parsed[0].strip()
+                    if inner.startswith('[') and inner.endswith(']'):
+                        recovered = _safe_parse_json_list(inner, max_depth - depth)
+                        if recovered:
+                            return recovered
                 return parsed
 
             # 문자열이면 다시 파싱 시도 (다중 이스케이프 처리)
@@ -208,10 +235,10 @@ def _safe_parse_json_list(value: str, max_depth: int = 10) -> list:
             break
 
     # 파싱 실패 - 쉼표로 구분된 문자열 시도
-    logger.warning(f"Failed to parse JSON list after {depth} attempts, trying comma-split: {value[:100]}...")
+    logger.warning(f"Failed to parse JSON list after {depth} attempts, trying comma-split: {str(value)[:100]}...")
     try:
         # 대괄호 제거 후 쉼표로 분리
-        clean_value = value.strip().strip('[]')
+        clean_value = str(value).strip().strip('[]')
         if clean_value:
             return [item.strip().strip('"\'') for item in clean_value.split(',') if item.strip()]
     except Exception:
@@ -291,8 +318,16 @@ def normalize_config_value(value: Any, data_type: str = None) -> Any:
     if value is None:
         return None
 
-    # 이미 올바른 타입이면 그대로 반환
-    if isinstance(value, (list, dict)):
+    # ── list/dict — element 가 escape 된 string 으로 잘못 들어왔는지 검사 ──
+    # 이전엔 `isinstance(value, (list, dict))` 시 무조건 return → escape 누적된
+    # list (단일 element 가 `"[...]"` 문자열) 가 그대로 통과하여 매 boot 폭증.
+    # 이제 list/dict 도 _safe_parse_json_list/_dict 에 위임해 element-level 복원.
+    if isinstance(value, list):
+        if data_type == "list" or data_type is None:
+            return _safe_parse_json_list(value)
+        return value
+
+    if isinstance(value, dict):
         return value
 
     if isinstance(value, bool):
