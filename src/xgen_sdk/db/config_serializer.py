@@ -150,7 +150,7 @@ def _is_json_string(value: str) -> bool:
         return False
 
 
-def _safe_parse_json_list(value: Any, max_depth: int = 10) -> list:
+def _safe_parse_json_list(value: Any, max_depth: int = 1000) -> list:
     """
     다중 이스케이프된 JSON 리스트를 안전하게 파싱
 

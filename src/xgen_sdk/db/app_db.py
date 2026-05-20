@@ -760,6 +760,14 @@ class XgenDB:
                 placeholders = ", ".join([placeholder] * len(value))
                 where_clauses.append(f"{actual_key} NOT IN ({placeholders})")
                 values.extend(value)
+        elif key.endswith("__isnull__"):
+            # value=True → IS NULL, value=False → IS NOT NULL.
+            # placeholder 사용 안 함 — SQL NULL 비교는 = NULL 이 항상 false 라 IS 키워드 필수.
+            actual_key = key[:-len("__isnull__")]
+            if value:
+                where_clauses.append(f"{actual_key} IS NULL")
+            else:
+                where_clauses.append(f"{actual_key} IS NOT NULL")
         else:
             where_clauses.append(f"{key} = {placeholder}")
             values.append(value)
