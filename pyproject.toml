@@ -1,9 +1,61 @@
 [project]
 name = "xgen-sdk"
-version = "1.14.3"
-description = "XGen Platform Shared SDK - DB, Config, Storage, Auth, Quota, LLM Catalog"
+version = "1.14.4"
+description = "XGen Platform Shared SDK — unified DB, Config, Storage, Auth, Quota, Notification, and LLM Catalog for agent and RAG services"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+    { name = "PlateerLab" },
+]
+keywords = [
+    "xgen",
+    "xgen-sdk",
+    "agent",
+    "agents",
+    "ai-agent",
+    "rag",
+    "retrieval-augmented-generation",
+    "llm",
+    "llm-platform",
+    "llm-catalog",
+    "openai",
+    "anthropic",
+    "gemini",
+    "fastapi",
+    "postgresql",
+    "psycopg",
+    "redis",
+    "minio",
+    "s3",
+    "abac",
+    "permissions",
+    "authentication",
+    "quota",
+    "rate-limiting",
+    "notification",
+    "platform-sdk",
+    "plateerlab",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Framework :: FastAPI",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Database",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     "psycopg[binary]>=3.1.0",
     "psycopg-pool>=3.1.0",
@@ -13,6 +65,13 @@ dependencies = [
     "pydantic>=2.0.0",
     "fastapi>=0.100.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/PlateerLab/xgen-sdk"
+Repository = "https://github.com/PlateerLab/xgen-sdk"
+"Source Code" = "https://github.com/PlateerLab/xgen-sdk"
+"Issue Tracker" = "https://github.com/PlateerLab/xgen-sdk/issues"
+Changelog = "https://github.com/PlateerLab/xgen-sdk/releases"
 
 [build-system]
 requires = ["setuptools>=69.0.0", "wheel"]

@@ -2,6 +2,10 @@
 
 **The shared platform SDK for the XGen ecosystem — one dependency, one boot call, everything wired up.**
 
+[![PyPI](https://img.shields.io/pypi/v/xgen-sdk.svg)](https://pypi.org/project/xgen-sdk/)
+[![Python](https://img.shields.io/pypi/pyversions/xgen-sdk.svg)](https://pypi.org/project/xgen-sdk/)
+[![GitHub](https://img.shields.io/badge/source-PlateerLab%2Fxgen--sdk-181717?logo=github)](https://github.com/PlateerLab/xgen-sdk)
+
 `xgen-sdk` is the common infrastructure layer that powers every Python service in
 the XGen platform (`xgen-core`, `xgen-workflow`, `xgen-documents`, and friends).
 It provides direct, pooled access to PostgreSQL, Redis-backed configuration,
@@ -346,6 +350,12 @@ automatically:
 dependencies = ["xgen-sdk>=1.14,<2.0"]
 ```
 
+## Links
+
+- **Source code:** https://github.com/PlateerLab/xgen-sdk
+- **Issue tracker:** https://github.com/PlateerLab/xgen-sdk/issues
+- **Releases / Changelog:** https://github.com/PlateerLab/xgen-sdk/releases
+
 ## License
 
-Proprietary — internal use within the XGen platform.
+Proprietary — internal use within the XGen platform, maintained by PlateerLab.
