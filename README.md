@@ -1,61 +1,62 @@
 # xgen-sdk
 
-**The shared platform SDK for the XGen ecosystem — one dependency, one boot call, everything wired up.**
+**A general-purpose Python toolkit of powerful, reusable building blocks — the foundation the entire XGen platform is built on.**
 
 [![PyPI](https://img.shields.io/pypi/v/xgen-sdk.svg)](https://pypi.org/project/xgen-sdk/)
 [![Python](https://img.shields.io/pypi/pyversions/xgen-sdk.svg)](https://pypi.org/project/xgen-sdk/)
 [![GitHub](https://img.shields.io/badge/source-PlateerLab%2Fxgen--sdk-181717?logo=github)](https://github.com/PlateerLab/xgen-sdk)
 
-`xgen-sdk` is the common infrastructure layer that powers every Python service in
-the XGen platform (`xgen-core`, `xgen-workflow`, `xgen-documents`, and friends).
-It provides direct, pooled access to PostgreSQL, Redis-backed configuration,
-MinIO object storage, an ABAC permission system, structured backend logging,
-quota policy evaluation, in-app notifications, and a dynamic LLM model catalog
-— all behind a single `XgenApp` bootstrap class.
+`xgen-sdk` is a curated library of **strong, general-purpose Python methods and
+modules** — the kind of logic every serious backend, agent runtime, or RAG
+pipeline ends up reinventing. Database pools, config management, object
+storage, ABAC authorization, quota evaluation, structured logging, LLM model
+discovery, in-app notifications — all consolidated into one canonical
+implementation that any Python project can pick up and use.
 
-Instead of every service re-implementing connection pools, permission headers,
-config loaders, and S3 clients, `xgen-sdk` ships one canonical implementation
-and lets each service consume it through a stable, versioned API.
+The XGen platform itself (`xgen-core`, `xgen-workflow`, `xgen-documents`, …)
+is essentially **a thin layer of business logic built on top of this SDK**.
+The SDK is where the heavy lifting lives.
 
----
-
-## Why xgen-sdk?
-
-Before the SDK, the XGen platform had the same problem most multi-service
-Python stacks have:
-
-- `DatabaseClient` was duplicated across services with subtle drift.
-- `ConfigClient`, `minio_client`, and gateway-header parsers were all
-  copy-pasted, then slowly diverged.
-- Most service-to-service traffic went over **HTTP proxies**, paying ~50 ms
-  of serialization + network overhead per database call.
-- Permission checks were enforced inconsistently across services.
-
-`xgen-sdk` consolidates all of this into one package that every service
-installs as a dependency. Services connect directly to PostgreSQL, Redis,
-and MinIO through pooled clients — no internal HTTP hops — and share a single
-source of truth for auth, configuration, and observability.
-
-> **Result:** ~10× faster DB calls (direct psycopg3 pool vs. HTTP proxy),
-> zero code duplication for shared infrastructure, and one place to fix
-> bugs or roll out improvements.
+> One install. No optional extras. Everything you need, ready on `pip install xgen-sdk`.
 
 ---
 
-## Highlights
+## Philosophy
 
-| Module | What it gives you |
+`xgen-sdk` follows three rules:
+
+1. **Generalize relentlessly.** If a piece of logic is useful in more than one
+   place, it belongs in the SDK — not duplicated in each service.
+2. **Be opinionated where it matters, flexible where it doesn't.** Sensible
+   defaults from environment variables, escape hatches for everything.
+3. **Stay batteries-included.** No `[extras]` to remember, no optional
+   dependency dance. `pip install xgen-sdk` and you have the full toolkit.
+
+The platform services are intentionally small. `xgen-core` is admin and auth
+business logic. `xgen-workflow` is workflow orchestration business logic.
+`xgen-documents` is document-processing business logic. **All of the heavy
+infrastructure code lives here.**
+
+---
+
+## What's in the box
+
+| Module | Purpose |
 |---|---|
 | `xgen_sdk.db` | psycopg3 connection pool, model-based + table-name CRUD, raw SQL, retries |
 | `xgen_sdk.config` | Redis-backed config with local-file fallback, typed `BaseConfig` registration |
-| `xgen_sdk.storage` | MinIO client with upload/download, listing, copy, presigned URLs |
+| `xgen_sdk.storage` | MinIO / S3-compatible client — upload, download, listing, copy, presigned URLs |
 | `xgen_sdk.auth` | Gateway header parsing, ABAC permissions with wildcards, FastAPI `Depends()` guards |
-| `xgen_sdk.redis` | General-purpose Redis client (sessions, caching, pub/sub) |
+| `xgen_sdk.redis` | General-purpose Redis client for sessions, caching, and pub/sub |
 | `xgen_sdk.logging` | `BackendLogger` for structured, DB-persisted application logs |
-| `xgen_sdk.quota` | Pure-Python quota policy specs and evaluation (no DB/HTTP) |
-| `xgen_sdk.notification` | Generic per-user in-app notifications with read tracking |
-| `xgen_sdk.llm_catalog` | Dynamic model list fetching for OpenAI / Anthropic / Gemini with TTL cache |
+| `xgen_sdk.quota` | Pure-Python quota policy specs and evaluation (no DB / HTTP coupling) |
+| `xgen_sdk.notification` | Generic per-user persistent in-app notifications with read tracking |
+| `xgen_sdk.llm_catalog` | Dynamic model list for OpenAI / Anthropic / Gemini with TTL cache and fallback |
 | `xgen_sdk.XgenApp` | One-call bootstrap that wires DB + Config + Storage together |
+
+More general-purpose utilities are added with every release — tracing,
+retry strategies, schema migration, agent and RAG primitives, prompt
+templating, async task patterns. **If it's reusable, it belongs here.**
 
 ---
 
@@ -65,19 +66,8 @@ source of truth for auth, configuration, and observability.
 pip install xgen-sdk
 ```
 
-Requires **Python 3.11+**.
-
-### Optional extras
-
-Install only the parts you need:
-
-```bash
-pip install "xgen-sdk[db]"        # PostgreSQL only
-pip install "xgen-sdk[config]"    # Redis config only
-pip install "xgen-sdk[storage]"   # MinIO only
-pip install "xgen-sdk[auth]"      # FastAPI auth helpers
-pip install "xgen-sdk[all]"       # Everything (recommended for services)
-```
+Requires **Python 3.11+**. That's it — every module is installed and ready
+to import. No extras, no flags, no surprises.
 
 ---
 
@@ -119,6 +109,10 @@ Each subsystem can be disabled independently:
 xgen = XgenApp(enable_db=True, enable_config=True, enable_storage=False)
 ```
 
+You're not required to use `XgenApp` — every module is fully usable on its
+own. `XgenApp` is the convenient default for "I want a FastAPI service with
+the standard infrastructure stack."
+
 ---
 
 ## Modules
@@ -137,7 +131,7 @@ db.initialize_connection()
 record_id = db.insert(user_model)
 records = db.find_by_condition(UserModel, {"status": "active"}, limit=100)
 
-# Table-name CRUD (no model class required — great for cross-service callers)
+# Table-name CRUD (no model class required)
 db.insert_record("users", {"name": "Ada", "email": "ada@example.com"})
 rows = db.find_records_by_condition("users", {"is_active": True})
 
@@ -303,26 +297,35 @@ for local development.
 
 ---
 
-## Architecture at a glance
+## Where it fits
 
 ```
-┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
-│   xgen-workflow  │   │  xgen-documents  │   │    xgen-core     │
-│                  │   │                  │   │                  │
-│   ┌──────────┐   │   │   ┌──────────┐   │   │   ┌──────────┐   │
-│   │ xgen-sdk │   │   │   │ xgen-sdk │   │   │   │ xgen-sdk │   │
-│   └────┬─────┘   │   │   └────┬─────┘   │   │   └────┬─────┘   │
-└────────┼─────────┘   └────────┼─────────┘   └────────┼─────────┘
-         │                      │                      │
-         ▼                      ▼                      ▼
-   ┌─────────────────────────────────────────────────────────┐
-   │   PostgreSQL   │   Redis   │   MinIO   │   Gateway      │
-   └─────────────────────────────────────────────────────────┘
+        ┌────────────────────────────────────────────────────┐
+        │                  Your application                  │
+        │   (xgen-core / xgen-workflow / xgen-documents /    │
+        │    your own agent / RAG / API service)             │
+        │                                                    │
+        │              ──── business logic only ────         │
+        └─────────────────────────┬──────────────────────────┘
+                                  │
+                                  ▼
+        ┌────────────────────────────────────────────────────┐
+        │                    xgen-sdk                        │
+        │                                                    │
+        │   db │ config │ storage │ auth │ redis │ logging   │
+        │   quota │ notification │ llm_catalog │ XgenApp     │
+        │              (+ more in every release)             │
+        └─────────────────────────┬──────────────────────────┘
+                                  │
+                                  ▼
+        ┌────────────────────────────────────────────────────┐
+        │   PostgreSQL │ Redis │ MinIO │ Gateway │ LLM APIs  │
+        └────────────────────────────────────────────────────┘
 ```
 
-Every service speaks **directly** to the shared infrastructure through the
-same SDK code path. Schema definitions and migrations remain centralized
-in `xgen-core`; the SDK provides the connection and CRUD primitives.
+Every XGen service speaks **directly** to the underlying infrastructure
+through the same SDK code path — no internal HTTP proxies, no duplicated
+client code. The SDK is the only place those concerns live.
 
 ---
 
@@ -336,7 +339,7 @@ in `xgen-core`; the SDK provides the connection and CRUD primitives.
 ## Runtime dependencies
 
 `psycopg[binary]`, `psycopg-pool`, `redis`, `minio`, `httpx`, `pydantic`,
-`fastapi`.
+`fastapi`. All installed automatically with `pip install xgen-sdk`.
 
 ---
 
@@ -358,4 +361,4 @@ dependencies = ["xgen-sdk>=1.14,<2.0"]
 
 ## License
 
-Proprietary — internal use within the XGen platform, maintained by PlateerLab.
+Proprietary — maintained by PlateerLab as the foundation of the XGen platform.
