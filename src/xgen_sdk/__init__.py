@@ -14,6 +14,7 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.quota: 토큰 한도(quota) 정책 평가 (1.13.0+)
     - xgen_sdk.notification: 일반화된 in-app notification (1.13.1+)
     - xgen_sdk.llm_catalog: LLM 모델 카탈로그 동적 조회 + 캐시 (1.14.0+)
+    - xgen_sdk.harness: 하네스 엔진(xgen-harness) facade — add_step/delete_step/run (1.16.0+)
 
 Quick Start:
     from xgen_sdk import XgenApp

@@ -64,6 +64,9 @@ dependencies = [
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "fastapi>=0.100.0",
+    # 하네스 facade(xgen_sdk.harness) 용 엔진. 도메인 agnostic 별도 패키지(httpx 만 의존)
+    # 라 footprint 거의 0 — SDK 의 batteries-included(extra 없음) 기조대로 정규 의존성.
+    "xgen-harness>=1.19,<2.0",
 ]
 
 [project.urls]
