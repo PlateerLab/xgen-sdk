@@ -34,6 +34,18 @@ npm 이 engine-node 를 npmjs 에서 자동 설치 → spec.json 대로 전체 s
 
 **Python 채널**: `python_compile.transpile_to_python` → `python_pack.build_wheel/build_sdist` → PyPI.
 
+## 채널 / 실행 모드 매트릭스
+
+한 워크플로우를 어느 채널로 뽑든 **stdio MCP 서버로 실행**된다. 배포처만 다르다.
+
+| 채널 | 산출물 | 실행 (stdio MCP) | 배포처 |
+|---|---|---|---|
+| **npm** | `xgen-harness-{name}.tgz` | `npx -y xgen-harness-{name} serve-mcp` — engine-node 가 stdio 서버 | npm/npx (wrapper 는 minio presigned, engine-node 는 npmjs) |
+| **Python** | wheel/sdist + `{module}/mcp.py` | `python -m {module}.mcp` — FastMCP stdio (`claude mcp add … -- python -m {module}.mcp`) | **PyPI** (console_scripts: `{module}` CLI + `{module}-mcp`) |
+
+→ **stdio(MCP)는 npm·Python 양쪽 다, PyPI 배포는 Python 채널.** `include_mcp=True`(기본)면 Python
+산출물에 FastMCP 엔트리(`mcp = ["fastmcp>=0.2.0"]` extra)가 포함된다.
+
 ## 파일 맵
 
 | 파일 | 역할 |
