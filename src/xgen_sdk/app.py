@@ -224,6 +224,35 @@ class XgenApp:
         """설정값 조회 shortcut"""
         return self._config.get_config_value(name, default) if self._config else default
 
+    def harness(
+        self,
+        *,
+        provider: str = "",
+        model: str = "",
+        api_key: Optional[str] = None,
+        persist: bool = True,
+        logger: Optional[Any] = None,
+        **config_kwargs: Any,
+    ):
+        """이 앱의 DB(세션 영속)·Config(API 키)·Logging 에 연결된 Harness 생성."""
+        from xgen_harness.providers import get_api_key_env
+        from xgen_sdk.harness import Harness, XgenDBSessionStore, logging_emitter
+
+        if api_key is None and provider and self._config is not None:
+            api_key = self.get_config_value(get_api_key_env(provider))
+
+        store = XgenDBSessionStore(self._db) if (persist and self._db is not None) else None
+        emitter = logging_emitter(logger) if logger is not None else None
+
+        return Harness(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            store=store,
+            emitter=emitter,
+            **config_kwargs,
+        )
+
     def ensure_redis_sync(self) -> None:
         """Redis/Local 동기화 점검"""
         if self._config and hasattr(self._config, 'sync_to_redis'):

@@ -52,7 +52,7 @@ infrastructure code lives here.**
 | `xgen_sdk.quota` | Pure-Python quota policy specs and evaluation (no DB / HTTP coupling) |
 | `xgen_sdk.notification` | Generic per-user persistent in-app notifications with read tracking |
 | `xgen_sdk.llm_catalog` | Dynamic model list for OpenAI / Anthropic / Gemini with TTL cache and fallback |
-| `xgen_sdk.harness` | Facade over the `xgen-harness` agent engine — run a 10-stage pipeline, add/remove steps |
+| `xgen_sdk.harness` | The `xgen-harness` agent engine woven into the platform — keys from config, sessions in the DB, events to logging, add/remove steps |
 | `xgen_sdk.XgenApp` | One-call bootstrap that wires DB + Config + Storage together |
 
 More general-purpose utilities are added with every release — tracing,
@@ -265,40 +265,46 @@ invalidate("openai")   # Call after rotating the API key
 
 ### Harness — `xgen_sdk.harness`
 
-A thin facade over the [`xgen-harness`](https://github.com/PlateerLab/xgen-harness-executor)
-agent engine — a 10-stage pipeline (`s00`…`s09`) that turns a single config into a
-running agent. The engine is a separate, domain-agnostic package; the SDK only
-**wraps** it (dependency direction SDK → engine, engine never imports the SDK).
+The [`xgen-harness`](https://github.com/PlateerLab/xgen-harness-executor) agent
+engine — a 10-stage pipeline (`s00`…`s09`) that turns a single config into a
+running agent — **woven into the platform**. The engine stays domain-agnostic and
+never imports the SDK; the SDK plugs its own infrastructure into the engine's
+extension points:
 
-The pipeline is **composable**: steps (stages) can be added and removed.
-`add_step` registers a custom stage through the engine's extension point;
-`delete_step` disables a stage via config. The three required stages
-(`s01_input`, `s08_decide`, `s09_finalize`) are protected — the engine refuses to
-disable them.
+- **Keys from config** — the provider API key is resolved from `xgen_sdk.config`
+  (env fallback), so no key needs to be passed by hand.
+- **Sessions in the platform DB** — `XgenDBSessionStore` implements the engine's
+  `SessionStore` protocol on top of `xgen_sdk.db`; multi-turn sessions persist to
+  the `harness_sessions` table and resume across processes by `session_id`.
+- **Events to logging** — `logging_emitter` forwards run events to a
+  `xgen_sdk.logging.BackendLogger`.
+
+The pipeline is **composable**: `add_step` registers a custom stage through the
+engine's extension point; `delete_step` disables a stage via config. The three
+required stages (`s01_input`, `s08_decide`, `s09_finalize`) are protected — the
+engine refuses to disable them.
+
+The platform-native entry point is `XgenApp.harness()`, which returns a `Harness`
+already wired to the app's DB, config, and (optionally) logging:
 
 ```python
-from xgen_sdk.harness import Harness, Stage
+from xgen_sdk import XgenApp
 
-h = Harness(
-    provider="anthropic",
-    model="claude-sonnet-4-6",
-    api_key=key,
-    system_prompt="You are a careful assistant.",
-    max_iterations=5,
-)
+xgen = XgenApp().boot()
+h = xgen.harness(provider="anthropic", model="claude-sonnet-4-6", max_iterations=5)
 
 h.delete_step("s06_context")          # remove a non-required step
 h.add_step("s_audit", MyAuditStage)    # add a custom step (a xgen_harness.Stage subclass)
 print(h.steps())                       # active stage ids, in order
 
-state = await h.run("질문")            # run the pipeline
+state = await h.run("질문", session_id="user-42")   # persists + resumes via the DB store
 ```
 
-`Harness.run()` resolves the provider from the config; tool sources are wired by
-the platform through the engine's `entry_points` (the engine stays agnostic).
-For advanced use, `h.build()` returns the raw engine `Pipeline`, and the engine
-types (`HarnessConfig`, `PipelineBuilder`, `Stage`, `ALL_STAGES`,
-`REQUIRED_STAGES`) are re-exported from `xgen_sdk.harness`.
+Used standalone, `Harness(...)` resolves keys from config the same way and takes
+an explicit `store=` / `emitter=` for persistence and logging. `h.build()` returns
+the raw engine `Pipeline`, and the engine types (`HarnessConfig`,
+`PipelineBuilder`, `Stage`, `SessionStore`, `ALL_STAGES`, `REQUIRED_STAGES`) are
+re-exported from `xgen_sdk.harness`.
 
 ---
 
