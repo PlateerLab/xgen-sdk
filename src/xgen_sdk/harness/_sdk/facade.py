@@ -2,22 +2,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
-from xgen_harness import (
-    HarnessConfig,
-    HarnessSession,
-    Pipeline,
-    load_session,
-    register_stage,
-    save_session,
-)
-from xgen_harness.core.config import mark_stage_required
-from xgen_harness.core.execution_context import set_execution_context
-from xgen_harness.providers import get_api_key_env
+from ..core.config import HarnessConfig, mark_stage_required
+from ..core.execution_context import set_execution_context
+from ..core.pipeline import Pipeline
+from ..core.registry import register_stage
+from ..core.session import HarnessSession
+from ..memory import load_session, save_session
+from ..providers import get_api_key_env
 
 if TYPE_CHECKING:
-    from xgen_harness.core.state import PipelineState
-    from xgen_harness.events.emitter import EventEmitter
-    from xgen_harness.memory import SessionStore
+    from ..core.state import PipelineState
+    from ..events.emitter import EventEmitter
+    from ..memory import SessionStore
 
 
 def _resolve_key(provider: str, explicit: Optional[str]) -> str:

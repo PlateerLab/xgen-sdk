@@ -1,0 +1,48 @@
+"""장기실행(multi-session) 메모리 — progress artifact + 영속 SessionStore.
+
+세션 간 작업상태 인계를 책임진다 (s06_context 의 *세션 내* 압축과 보완 관계).
+엔진 코어는 인터페이스만 알고, 플랫폼은 entry_points 로 자기 백엔드를 끼운다.
+"""
+
+from .progress import ProgressStatus, ProgressItem, ProgressLog
+from .recall import (
+    Priority,
+    RecallItem,
+    RecallSet,
+    DEFAULT_RECALL_CAP,
+)
+from .dedupe import content_fingerprint, dedupe
+from .store import (
+    SessionStore,
+    InMemorySessionStore,
+    FileSessionStore,
+    register_session_store,
+    get_session_store,
+    available_session_stores,
+    save_session,
+    load_session,
+    attach_progress,
+    read_progress,
+)
+
+__all__ = [
+    "ProgressStatus",
+    "ProgressItem",
+    "ProgressLog",
+    "Priority",
+    "RecallItem",
+    "RecallSet",
+    "DEFAULT_RECALL_CAP",
+    "content_fingerprint",
+    "dedupe",
+    "SessionStore",
+    "InMemorySessionStore",
+    "FileSessionStore",
+    "register_session_store",
+    "get_session_store",
+    "available_session_stores",
+    "save_session",
+    "load_session",
+    "attach_progress",
+    "read_progress",
+]

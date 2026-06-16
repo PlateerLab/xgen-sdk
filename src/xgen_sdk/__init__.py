@@ -14,7 +14,7 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.quota: 토큰 한도(quota) 정책 평가 (1.13.0+)
     - xgen_sdk.notification: 일반화된 in-app notification (1.13.1+)
     - xgen_sdk.llm_catalog: LLM 모델 카탈로그 동적 조회 + 캐시 (1.14.0+)
-    - xgen_sdk.harness: 하네스 엔진 편입 — DB 세션영속·config 키·logging 연동 + add/delete step (1.16.0+)
+    - xgen_sdk.harness: 내장 하네스 엔진(LangChain-free) — DB 세션영속·config 키·logging 연동 + add/delete step (1.17.0+ 엔진 소스 내장)
 
 Quick Start:
     from xgen_sdk import XgenApp
@@ -26,7 +26,7 @@ Quick Start:
     config = xgen.config   # RedisConfigManager 또는 LocalConfigManager
 """
 
-__version__ = "1.16.1"
+__version__ = "1.17.0"
 
 from xgen_sdk.app import XgenApp
 

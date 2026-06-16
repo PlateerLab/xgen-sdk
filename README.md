@@ -52,7 +52,7 @@ infrastructure code lives here.**
 | `xgen_sdk.quota` | Pure-Python quota policy specs and evaluation (no DB / HTTP coupling) |
 | `xgen_sdk.notification` | Generic per-user persistent in-app notifications with read tracking |
 | `xgen_sdk.llm_catalog` | Dynamic model list for OpenAI / Anthropic / Gemini with TTL cache and fallback |
-| `xgen_sdk.harness` | The `xgen-harness` agent engine woven into the platform — keys from config, sessions in the DB, events to logging, add/remove steps |
+| `xgen_sdk.harness` | Built-in agent engine (10-stage pipeline, LangChain-free) — keys from config, sessions in the DB, events to logging, add/remove steps |
 | `xgen_sdk.XgenApp` | One-call bootstrap that wires DB + Config + Storage together |
 
 More general-purpose utilities are added with every release — tracing,
@@ -265,11 +265,11 @@ invalidate("openai")   # Call after rotating the API key
 
 ### Harness — `xgen_sdk.harness`
 
-The [`xgen-harness`](https://github.com/PlateerLab/xgen-harness-executor) agent
-engine — a 10-stage pipeline (`s00`…`s09`) that turns a single config into a
-running agent — **woven into the platform**. The engine stays domain-agnostic and
-never imports the SDK; the SDK plugs its own infrastructure into the engine's
-extension points:
+The XGEN agent engine — a 10-stage pipeline (`s00`…`s09`) that turns a single
+config into a running agent — **lives inside the SDK** (`xgen_sdk.harness`), not as
+an external dependency. It is **dependency-free of LangChain** and pure-Python
+(httpx only). The engine core stays domain-agnostic; a thin internal integration
+layer (`xgen_sdk.harness._sdk`) wires it into the platform:
 
 - **Keys from config** — the provider API key is resolved from `xgen_sdk.config`
   (env fallback), so no key needs to be passed by hand.
@@ -294,7 +294,7 @@ xgen = XgenApp().boot()
 h = xgen.harness(provider="anthropic", model="claude-sonnet-4-6", max_iterations=5)
 
 h.delete_step("s06_context")          # remove a non-required step
-h.add_step("s_audit", MyAuditStage)    # add a custom step (a xgen_harness.Stage subclass)
+h.add_step("s_audit", MyAuditStage)    # add a custom step (a xgen_sdk.harness.Stage subclass)
 print(h.steps())                       # active stage ids, in order
 
 state = await h.run("질문", session_id="user-42")   # persists + resumes via the DB store
@@ -384,7 +384,8 @@ client code. The SDK is the only place those concerns live.
 ## Runtime dependencies
 
 `psycopg[binary]`, `psycopg-pool`, `redis`, `minio`, `httpx`, `pydantic`,
-`fastapi`, `xgen-harness`. All installed automatically with `pip install xgen-sdk`.
+`fastapi`, `mcp`. All installed automatically with `pip install xgen-sdk`. The
+harness engine ships inside the package — no separate engine dependency.
 
 ---
 

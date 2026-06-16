@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from xgen_harness import (
+from ..events.emitter import EventEmitter
+from ..events.types import (
     DoneEvent,
     ErrorEvent,
-    EventEmitter,
     RetryEvent,
     StageEnterEvent,
     StageExitEvent,
 )
 
 if TYPE_CHECKING:
-    from xgen_harness.events.types import HarnessEvent
+    from ..events.types import HarnessEvent
     from xgen_sdk.logging import BackendLogger
 
 

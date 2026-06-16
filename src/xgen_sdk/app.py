@@ -235,7 +235,7 @@ class XgenApp:
         **config_kwargs: Any,
     ):
         """이 앱의 DB(세션 영속)·Config(API 키)·Logging 에 연결된 Harness 생성."""
-        from xgen_harness.providers import get_api_key_env
+        from xgen_sdk.harness.providers import get_api_key_env
         from xgen_sdk.harness import Harness, XgenDBSessionStore, logging_emitter
 
         if api_key is None and provider and self._config is not None:

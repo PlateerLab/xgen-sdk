@@ -1,6 +1,6 @@
 [project]
 name = "xgen-sdk"
-version = "1.16.1"
+version = "1.17.0"
 description = "XGen Platform Shared SDK — unified DB, Config, Storage, Auth, Quota, Notification, and LLM Catalog for agent and RAG services"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -61,12 +61,10 @@ dependencies = [
     "psycopg-pool>=3.1.0",
     "redis>=5.0.0",
     "minio>=7.2.0",
-    "httpx>=0.25.0",
+    "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "fastapi>=0.100.0",
-    # 하네스 facade(xgen_sdk.harness) 용 엔진. 도메인 agnostic 별도 패키지(httpx 만 의존)
-    # 라 footprint 거의 0 — SDK 의 batteries-included(extra 없음) 기조대로 정규 의존성.
-    "xgen-harness>=1.19,<2.0",
+    "mcp>=0.9",
 ]
 
 [project.urls]
@@ -76,6 +74,17 @@ Repository = "https://github.com/PlateerLab/xgen-sdk"
 "Issue Tracker" = "https://github.com/PlateerLab/xgen-sdk/issues"
 Changelog = "https://github.com/PlateerLab/xgen-sdk/releases"
 
+# 하네스 빌트인 Guard 자동 발견. 그룹명 "xgen_harness.guards"는 외부 플러그인 계약이라
+# 유지하고, 타겟 경로만 vendored 위치(xgen_sdk.harness.*)로 이식.
+[project.entry-points."xgen_harness.guards"]
+token_budget      = "xgen_sdk.harness.stages.strategies.guard:TokenBudgetGuard"
+cost_budget       = "xgen_sdk.harness.stages.strategies.guard:CostBudgetGuard"
+iteration         = "xgen_sdk.harness.stages.strategies.guard:IterationGuard"
+content           = "xgen_sdk.harness.stages.strategies.guard:ContentGuard"
+tool_precondition = "xgen_sdk.harness.stages.strategies.guard_precondition:ToolPreconditionGuard"
+hitl              = "xgen_sdk.harness.stages.strategies.guard:HITLGuard"
+tool_diversity    = "xgen_sdk.harness.stages.strategies.guard:ToolDiversityGuard"
+
 [build-system]
 requires = ["setuptools>=69.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -83,3 +92,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["xgen_sdk*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
