@@ -197,14 +197,6 @@ def _register_default_stages(registry: ArtifactRegistry) -> None:
     if art_count:
         logger.debug("[registry] fs_scanner: %d stage artifacts", art_count)
 
-    # 멀티에이전트 planner 는 `orchestrator/` 디렉토리에 있어 일반 Stage 스캔 대상 외 —
-    # v1.0: s00_harness 의 multi_agent strategy 로 register (구 s05_strategy 슬롯 삭제됨).
-    try:
-        from ..orchestrator.multi_agent_planner import MultiAgentPlannerStage
-        registry.register("s00_harness", "multi_agent", MultiAgentPlannerStage)
-    except ImportError:
-        pass
-
     # 외부 패키지 플러그인 (entry_points 경로) 탐색 — `xgen_harness.stages` 그룹.
     _discover_plugin_stages(registry)
 

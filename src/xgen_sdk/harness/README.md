@@ -43,7 +43,6 @@ harness/
 ├── stages/        s00_harness · s01_input · s02_history · s03_prompt · s04_tool ·
 │                  s05_policy · s06_context · s07_act · s08_decide · s09_finalize + strategies/
 ├── providers/     anthropic · openai · base (httpx SSE, OpenAI 호환 shim=google/bedrock/vllm)
-├── orchestrator/  DAG · multi_agent (멀티에이전트 fan-out)
 ├── tools/         ToolSource · gallery · rag_tool · frozen_source · skill_registry
 ├── capabilities/  Capability 매칭·머티리얼라이즈
 ├── memory/        SessionStore Protocol · ProgressLog · recall

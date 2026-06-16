@@ -109,8 +109,6 @@ from .memory import (
     attach_progress,
     read_progress,
 )
-from .orchestrator.dag import DAGOrchestrator, AgentNode, DAGEdge, DAGResult, DAGCycleError
-from .orchestrator.multi_agent import MultiAgentExecutor
 from .core.services import ServiceProvider, NullServiceProvider
 from .tools.gallery import ToolPackageSpec, GalleryTool, load_tool_package, discover_gallery_tools
 from .tools import ToolSource, register_tool_source, get_tool_sources
@@ -123,7 +121,6 @@ from .tools.term_expansion import (
 )
 from .providers import register_provider
 from .adapters.node_adapters import register_node_adapter
-from .orchestrator.multi_agent_planner import register_fan_out_strategy
 from .stages.strategies._decide import register_decide_defaults
 from .stages.strategies.token_tracker import register_model_pricing
 from .tools.rag_tool import register_progressive_policy, get_progressive_policy
@@ -332,13 +329,6 @@ __all__ = [
     "PipelineBuilder",
     "HarnessSession",
     "SessionManager",
-    # Orchestrator
-    "DAGOrchestrator",
-    "AgentNode",
-    "DAGEdge",
-    "DAGResult",
-    "DAGCycleError",
-    "MultiAgentExecutor",
     # Services (pluggable)
     "ServiceProvider",
     "NullServiceProvider",
@@ -437,7 +427,6 @@ __all__ = [
     "register_node_plugin",
     "register_provider",
     "register_node_adapter",
-    "register_fan_out_strategy",
     "register_decide_defaults",
     "register_model_pricing",
     "register_preset",

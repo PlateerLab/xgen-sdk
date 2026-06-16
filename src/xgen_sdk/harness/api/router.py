@@ -245,37 +245,6 @@ try:
         except WebSocketDisconnect:
             pass
 
-    # === 오케스트레이터 ===
-
-    class OrchestratorRequest(BaseModel):
-        text: str
-        workflow_data: dict
-        # sentinel "" — providers.get_default_provider() 가 런타임 해석
-        provider: str = ""
-        # sentinel "" — 비어있으면 MultiAgentExecutor 가 PROVIDER_DEFAULT_MODEL 에서 해석
-        model: str = ""
-
-    @harness_router.post("/orchestrate")
-    async def orchestrate(req: OrchestratorRequest):
-        from ..orchestrator.multi_agent import MultiAgentExecutor
-        from ..events.emitter import EventEmitter
-        from ..events.types import event_to_dict
-
-        emitter = EventEmitter()
-        executor = MultiAgentExecutor(
-            workflow_data=req.workflow_data, event_emitter=emitter,
-            default_provider=req.provider, default_model=req.model,
-        )
-
-        async def gen():
-            task = asyncio.create_task(executor.run(req.text))
-            async for event in emitter.stream():
-                yield f"data: {json.dumps(event_to_dict(event), ensure_ascii=False)}\n\n"
-            await task
-
-        return StreamingResponse(gen(), media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-
     # WS event converter
     def _ws_event(event) -> dict:
         from ..events.types import (

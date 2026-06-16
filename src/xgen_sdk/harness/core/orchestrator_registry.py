@@ -3,7 +3,7 @@ Orchestrator Registry — LLM 이 선택 가능한 실행 패턴 레지스트리
 
 철학 (v0.15.0 재귀적 자율주행 / 자동 연동 자동 확장성):
   - `orchestrator_hint` 의 enum 을 리터럴로 박지 않는다.
-  - 엔진 기본 5개는 defaults 로 등록하되, 외부 플러그인이 `register_orchestrator()`
+  - 엔진 기본 4개는 defaults 로 등록하되, 외부 플러그인이 `register_orchestrator()`
     한 줄만 호출하면 즉시 Planner 의 도구 스키마(enum) 에 합류한다.
   - LLM 은 레지스트리의 description 을 보고 어느 패턴이 이번 요청에 어울릴지 판단.
 
@@ -91,13 +91,13 @@ def get_orchestrator(name: str) -> Optional[OrchestratorSpec]:
 
 
 def _ensure_defaults_registered() -> None:
-    """엔진 기본 5개 패턴. 사용자가 `unregister_orchestrator` 로 덜어낼 수 있도록 idempotent."""
+    """엔진 기본 4개 패턴. 사용자가 `unregister_orchestrator` 로 덜어낼 수 있도록 idempotent."""
     global _DEFAULTS_REGISTERED
     if _DEFAULTS_REGISTERED:
         return
     _DEFAULTS_REGISTERED = True
 
-    # 기본 5개 — geny-harness / LangGraph 패턴을 참고한 최소 집합.
+    # 기본 4개 — geny-harness / LangGraph 패턴을 참고한 최소 집합.
     # 외부에서 새 패턴 추가는 `register_orchestrator("custom_name", ...)` 한 줄.
     if "linear" not in _REGISTRY:
         register_orchestrator(
@@ -128,14 +128,6 @@ def _ensure_defaults_registered() -> None:
             dispatch_key="plan_execute",
             replan_per_iter=False,
         )
-    if "dag" not in _REGISTRY:
-        register_orchestrator(
-            "dag",
-            description="멀티 에이전트 DAG. 노드 간 병렬/직렬 혼합, 이식측 DAGOrchestrator 가 실행.",
-            dispatch_key="dag",
-            replan_per_iter=True,
-        )
-
     # entry_points 기반 자동 발견 — pip install xxx 한 것이 즉시 합류.
     _discover_from_entry_points()
 
