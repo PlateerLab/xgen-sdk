@@ -48,6 +48,7 @@ harness/
 ├── memory/        SessionStore Protocol · ProgressLog · recall
 ├── events/        EventEmitter · 이벤트 타입 (SSE 스트리밍)
 ├── compile/       워크플로우 → npm/wheel standalone 컴파일 (→ compile/README.md)
+├── forge/         Self-Forging — config 자가개선 루프(GEPA 반성 진화). **opt-in**, `import xgen_sdk.harness`엔 미로드. `from xgen_sdk.harness.forge import SelfForge, forge_config`
 ├── adapters/      node_adapters · embedders · resource_registry
 ├── config/ · errors/ · interfaces/ · api/(FastAPI 라우터) · utils/
 ```

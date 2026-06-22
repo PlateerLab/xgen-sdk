@@ -463,10 +463,13 @@ async def aux_call(
         raise PipelineAbortError("LLM provider not initialized", stage_id)
 
     config = state.config
-    effective_max_tokens = (
-        int(max_tokens) if max_tokens is not None
-        else int(getattr(config, "aux_max_tokens", 500) if config else 500)
+    # aux_max_tokens is a present-but-None sentinel by default, so getattr's
+    # fallback never fires; resolve None to the aux floor or int() crashes.
+    from .runtime_defaults import resolve_with_default
+    cfg_aux = resolve_with_default(
+        getattr(config, "aux_max_tokens", None) if config else None, "aux_max_tokens", 500,
     )
+    effective_max_tokens = int(max_tokens) if max_tokens is not None else int(cfg_aux)
 
     await state.emit_verbose(StageSubstepEvent(
         stage_id=stage_id, substep="aux_llm_request_start",
