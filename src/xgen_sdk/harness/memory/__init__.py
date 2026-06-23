@@ -29,6 +29,11 @@ from .activity import (
     ActivityFeed,
     activity_from_message,
 )
+from .lifecycle import (
+    LifecyclePhase,
+    LifecycleStep,
+    ProjectLifecycle,
+)
 from .store import (
     SessionStore,
     InMemorySessionStore,
@@ -63,6 +68,9 @@ __all__ = [
     "ActivityEvent",
     "ActivityFeed",
     "activity_from_message",
+    "LifecyclePhase",
+    "LifecycleStep",
+    "ProjectLifecycle",
     "SessionStore",
     "InMemorySessionStore",
     "FileSessionStore",
