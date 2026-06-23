@@ -90,6 +90,27 @@ class ConfigService(Protocol):
         ...
 
 
+@runtime_checkable
+class MutableConfigService(ConfigService, Protocol):
+    """ConfigService + 쓰기경로 (v1.24 — 자가설정 노드용).
+
+    엔진은 환경/설정을 "읽기"만 하던 ConfigService 에 **되쓰기 계약**을 추가한다.
+    단 구현은 선택사항 — RuntimeConfigMutator 는 `getattr(svc, "set_value", None)`
+    로 가드하므로, 이 프로토콜을 구현하지 않은 ConfigService 도 graceful no-op.
+    base ConfigService 의 runtime_checkable 계약을 깨지 않으려 별도 Protocol 로 분리.
+
+    이식 책임: 멀티테넌시/ABAC/감사 — 자율 되쓰기는 권한 경계 안에서만 허용해야 함.
+    """
+
+    async def set_value(self, key: str, value: str, category: str = "") -> bool:
+        """설정 값 되쓰기 (persistent_configs). 성공 True / 권한·미지원 False."""
+        ...
+
+    async def set_api_key(self, provider: str, api_key: str) -> bool:
+        """프로바이더 API 키 되쓰기. 성공 True / 권한·미지원 False."""
+        ...
+
+
 # ──────────────────────────────────────────────
 # 3. MCPService — MCP 도구 디스커버리/실행
 # ──────────────────────────────────────────────

@@ -12,6 +12,18 @@ from .recall import (
     DEFAULT_RECALL_CAP,
 )
 from .dedupe import content_fingerprint, dedupe
+from .refine import (
+    RefinedMemory,
+    MemoryRefiner,
+    ExtractiveRefiner,
+    redact_sensitive,
+    refine_message,
+)
+from .repro import (
+    ReproBundle,
+    build_repro_bundle,
+    config_fingerprint,
+)
 from .store import (
     SessionStore,
     InMemorySessionStore,
@@ -35,6 +47,14 @@ __all__ = [
     "DEFAULT_RECALL_CAP",
     "content_fingerprint",
     "dedupe",
+    "RefinedMemory",
+    "MemoryRefiner",
+    "ExtractiveRefiner",
+    "redact_sensitive",
+    "refine_message",
+    "ReproBundle",
+    "build_repro_bundle",
+    "config_fingerprint",
     "SessionStore",
     "InMemorySessionStore",
     "FileSessionStore",

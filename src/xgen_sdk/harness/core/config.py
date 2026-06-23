@@ -248,6 +248,14 @@ class HarnessConfig:
     # StageSubstep / Retry) 가 추가 발행. 기본 False 라 기존 SSE 출력량 변화 없음.
     verbose_events: bool = False
 
+    # --- 런타임 자기조정 게이트 (v1.24 — 자가설정 노드) ---
+    # 엔진은 "실행 중 자기 config 를 되쓰는" 중립 메커니즘(RuntimeConfigMutator)만 제공하고,
+    # 그 활성화 정책은 이식측이 이 한 값으로 opt-in 한다 (PHILOSOPHY: 엔진=메커니즘, 이식=정책).
+    #   - "off"     : 기본. Mutator 의 모든 변이가 no-op (default-inert). 동작 변화 0.
+    #   - "observe" : 변이를 적용하지 않고 제안(proposals)만 기록 — diff 가시화/HITL 용.
+    #   - "act"     : algebra 로 legality 검증 + inverse 저널 후 라이브 적용 (롤백 가능).
+    runtime_self_govern: str = "off"
+
     # --- Judge LLM (v1.1.0+) ---
     # s08_decide 의 judge_then_loop 가 사용하는 별도 평가 모델. 미지정(빈 문자열) 시
     # 본문 provider/model 재사용 — backward compat. 사용자 의도: "Judge 가 자기 답을

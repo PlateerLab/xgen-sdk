@@ -115,37 +115,27 @@ class HarnessStage(Stage):
     # ── helpers ─────────────────────────────────────────────────────
 
     def _merge_plan_into_config(self, state: PipelineState, plan: "HarnessPlan") -> None:  # type: ignore  # noqa: F821
-        """Plan 의 params/strategies/max_iterations 를 `state.config` 에 덮어씌운다.
+        """Plan 의 params/strategies/max_iterations 를 `state.config` 에 반영한다.
 
-        이미 사용자가 UI 에서 지정한 값보다 Plan 이 우선. 하지만 Plan 이 언급하지
-        않은 파라미터는 기존 값 유지 (부분 override). 이게 "환경만 주어주고 알아서
-        조립" 의 실전 구현 — Planner 는 필요한 부분만 조정하고 나머지는 default 존중.
+        v1.24 — "환경만 주어주고 알아서 조립" 의 실전 구현. 단 ungated 직접 변이가
+        아니라 **gated RuntimeConfigMutator 경유**로 바뀌었다 (자가설정 노드 seam 부활):
+          - mode = config.runtime_self_govern (기본 "off") → 기본은 no-op (동작 변화 0).
+          - "observe" → 적용 없이 제안만 기록, "act" → legality 검증·inverse 저널 후 적용.
+        활성화 정책은 이식 노드 파라미터가 opt-in 한다 (엔진=메커니즘, 이식=정책).
         """
         config = state.config
         if not config:
             return
 
-        # params 병합 — 기존 stage_params[sid] 에 Plan.params[sid] 를 shallow update
-        for sid, overrides in (plan.params or {}).items():
-            if not isinstance(overrides, dict):
-                continue
-            existing = dict(config.stage_params.get(sid) or {})
-            existing.update(overrides)
-            config.stage_params[sid] = existing
-
-        # strategies 병합 — active_strategies[sid] = plan 선택값
-        for sid, strategy_name in (plan.strategies or {}).items():
-            if isinstance(strategy_name, str) and strategy_name:
-                config.active_strategies[sid] = strategy_name
-
-        # v0.15.0 재귀적 자율주행 — LLM 이 이번 요청 적정 반복 수 판단.
-        # Plan 이 명시하지 않으면 (None) config 기본값(10) 유지.
-        if isinstance(getattr(plan, "max_iterations", None), int) and plan.max_iterations > 0:
+        mutator = state.get_config_mutator()
+        applied = mutator.apply_plan(plan)
+        if applied:
             logger.info(
-                "[Harness] Plan.max_iterations=%d 적용 (기존 %d → override)",
-                plan.max_iterations, config.max_iterations,
+                "[Harness] Plan 반영 mode=%s applied=%d diff=%s",
+                mutator.mode, applied, mutator.diff(),
             )
-            config.max_iterations = plan.max_iterations
+        # mutator 핸들을 노출 — 이식측 SSE 중계가 config_diff 이벤트로 캔버스에 push.
+        state.metadata["config_mutator"] = mutator
 
         # orchestrator_hint 는 엔진에서는 메타데이터로만 기록.
         # 이식측 dispatcher / 프론트 PlanningCard 가 해석.

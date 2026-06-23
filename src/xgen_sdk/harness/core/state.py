@@ -329,6 +329,23 @@ class PipelineState:
         """해당 kind 의 보존 리소스 id 목록."""
         return list(self.pd_stores.get(kind, {}).keys())
 
+    # --- 런타임 자기조정 (v1.24 — 자가설정 노드) ---
+    def get_config_mutator(self) -> Any:
+        """실행 중 자기 config 를 되쓰는 RuntimeConfigMutator 를 반환.
+
+        mode 는 `config.runtime_self_govern`(기본 "off") 로 게이트되므로, 스테이지/
+        전략/플러그인이 이 메서드를 호출해도 기본 config 에선 모든 변이가 no-op 다
+        (default-inert). 이식 노드가 "observe"/"act" 로 opt-in 했을 때만 살아난다.
+        services 는 `metadata["services"]` 에서 가져온다(persist_env 용, 없으면 None).
+        """
+        from .runtime_config import RuntimeConfigMutator
+
+        mode = "off"
+        if self.config is not None:
+            mode = getattr(self.config, "runtime_self_govern", "off") or "off"
+        services = self.metadata.get("services") if isinstance(self.metadata, dict) else None
+        return RuntimeConfigMutator(self.config, services=services, mode=mode)
+
     async def emit_verbose(self, event: Any) -> None:
         """HarnessConfig.verbose_events=True 시에만 이벤트 발행.
 
