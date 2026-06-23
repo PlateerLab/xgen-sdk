@@ -24,6 +24,11 @@ from .repro import (
     build_repro_bundle,
     config_fingerprint,
 )
+from .activity import (
+    ActivityEvent,
+    ActivityFeed,
+    activity_from_message,
+)
 from .store import (
     SessionStore,
     InMemorySessionStore,
@@ -55,6 +60,9 @@ __all__ = [
     "ReproBundle",
     "build_repro_bundle",
     "config_fingerprint",
+    "ActivityEvent",
+    "ActivityFeed",
+    "activity_from_message",
     "SessionStore",
     "InMemorySessionStore",
     "FileSessionStore",
