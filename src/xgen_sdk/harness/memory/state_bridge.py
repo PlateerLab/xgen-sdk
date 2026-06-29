@@ -1,12 +1,8 @@
 """StateProvider/StateRecorder 참조 구현 — memory 모듈을 stateful loop seam 에 연결.
 
-효율 원칙(매 iteration·서브에이전트 누적/누수 방지):
-- Provider 는 **stateless 재계산** — 호출마다 소스에서 bounded(cap·char_budget) 뷰만
-  합성, 내부에 아무것도 쌓지 않는다. 컨텍스트 비대(prompt 무한증식) 차단.
-- Recorder 는 **int seq 만** 보유 — 매 회차 1건을 persist 콜백으로 외부(spine 등)에
-  넘기고 즉시 참조 해제. 프로세스 메모리에 이벤트를 누적하지 않는다.
-- 둘 다 DB 무관(순수 메커니즘) — 소스/persist 는 이식측 콜백. 서브에이전트마다 새
-  인스턴스를 쓰면 상태 공유가 없어 누수가 구조적으로 불가능.
+Provider 는 호출마다 bounded(cap·char_budget) 뷰를 재계산(내부 무축적), Recorder 는
+seq(int)만 보유하고 매 회차 1건을 persist 콜백으로 위임(프로세스 무축적). 둘 다 DB
+무관 — 소스/persist 는 이식측 콜백. 서브에이전트별 새 인스턴스라 누수가 구조적으로 없다.
 """
 from __future__ import annotations
 
@@ -16,7 +12,6 @@ from .recall import RecallSet
 from .refine import RefinedMemory, refine_message
 from .activity import activity_from_message
 
-# 소스: 고정 컬렉션 또는 state 의존 fresh fetch 콜백
 _RecallSrc = Union[RecallSet, Callable[[Any], Optional[RecallSet]], None]
 _RefinedSrc = Union[Sequence[RefinedMemory], Callable[[Any], Sequence[RefinedMemory]], None]
 
@@ -111,8 +106,7 @@ class MemoryStateRecorder:
             ref=ref,
         )
         self._persist("activity", ev.to_dict())
-        if decision == "retry":
-            # Reflexion: 실패 회차를 교훈으로 정제 → in-run bounded buffer + 영속.
+        if decision == "retry":  # Reflexion: 실패 회차를 교훈으로 정제(다음 회차 반영)
             lesson = refine_message(
                 self._last_user(state), self._last_assistant(state),
                 memory_id=f"lesson-{ref.get('run_id', 'run')}-{self._seq}",
@@ -128,11 +122,9 @@ class MemoryStateRecorder:
                 provenance=ref,
             )
             self._persist("refined_memory", mem.to_dict())
-        # ev/mem/lesson 은 함수 종료와 함께 해제 — 프로세스 누적 없음(버퍼는 bounded).
 
     def _push_lesson(self, state, lesson: dict) -> None:
-        """in-run 교훈 bounded 버퍼(state.metadata['loop_lessons']) — provider 가 읽음.
-        max_lessons 로 FIFO 캡 → 매 retry 누적돼도 무한증식 차단."""
+        """in-run 교훈 버퍼(state.metadata['loop_lessons']) — max_lessons FIFO 캡."""
         meta = getattr(state, "metadata", None)
         if meta is None:
             return
