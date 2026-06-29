@@ -494,6 +494,9 @@ class ExecuteStage(Stage):
                         content = _json.dumps(content, ensure_ascii=False, default=str)
                     except Exception:
                         content = str(content)
+                # ToolSource 가 선언한 is_error 를 존중 — 실패로 기록돼 graceful fallback 발동.
+                if isinstance(result, dict) and result.get("is_error"):
+                    raise ToolError(content, tool_name)
                 return content
 
         # 레거시 폴백: state.metadata에 직접 등록된 Tool 인스턴스
