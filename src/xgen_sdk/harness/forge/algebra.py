@@ -23,35 +23,79 @@ from typing import Any
 # Managed prompt block the GEPA reflector evolves (kept separate from the user's prompt).
 _GUIDANCE_RE = re.compile(r"\n*<forge_guidance>.*?</forge_guidance>", re.S)
 
-# Scalars the forge may tune, with a discretized candidate ladder. Keys must be
-# real HarnessConfig fields; ranges are clamped to runtime-default floors at use.
-_SCALAR_CHOICES: dict[str, list[Any]] = {
-    "validation_threshold": [0.5, 0.6, 0.7, 0.8, 0.9],
-    "max_retries": [0, 1, 2, 3],
-    "max_iterations": [4, 6, 8, 10],
-    "temperature": [0.0, 0.2, 0.5, 0.7],
+# forge 가 tune 하는 scalar 의 **범위 스펙**(고정 ladder 아님). 후보는 현재값 기준
+# 적응형 이웃(±step·×2·÷2)으로 생성 → forge 가 국소탐색하며 범위 전체를 단계적으로
+# 도달(작은 ladder 한계 제거). lo/hi 는 임의 튜닝값이 아니라 **타입-안전 경계**.
+# spec = {lo,hi,step,kind} (범위) 또는 {choices:[...]} (명시 후보). Keys = HarnessConfig 필드.
+_SCALAR_SPECS: dict[str, dict[str, Any]] = {
+    "validation_threshold": {"lo": 0.0, "hi": 1.0, "step": 0.1, "kind": "float"},
+    "max_retries":          {"lo": 0,   "hi": 8,   "step": 1,   "kind": "int"},
+    "max_iterations":       {"lo": 1,   "hi": 20,  "step": 2,   "kind": "int"},
+    "temperature":          {"lo": 0.0, "hi": 1.5, "step": 0.2, "kind": "float"},
     # stateful loop — forge 가 state 설정까지 자가튜닝(HarnessConfig 정식 필드).
-    "state_max_lessons": [2, 3, 5],
-    "state_max_refined": [3, 5, 8],
-    "state_max_recall": [5, 8, 12],
-    "state_char_budget": [1000, 2000, 3000],
+    "state_max_lessons":    {"lo": 1,   "hi": 20,    "step": 1,    "kind": "int"},
+    "state_max_refined":    {"lo": 1,   "hi": 20,    "step": 2,    "kind": "int"},
+    "state_max_recall":     {"lo": 1,   "hi": 40,    "step": 3,    "kind": "int"},
+    "state_char_budget":    {"lo": 500, "hi": 20000, "step": 1000, "kind": "int"},
 }
 
 
-def register_tunable_scalar(name: str, choices: list) -> None:
-    """forge 변이공간에 tunable scalar 추가 — 엔진 수정 없이 확장(무하드코딩).
+def _gen_candidates(key: str, cur: Any) -> list[Any]:
+    """현재값 기준 적응형 후보 — ±step·×2·÷2 를 경계 클램프. 고정 ladder 없음.
 
-    name 은 forge 가 mutate 하는 top-level HarnessConfig 필드. 외부(이식/도메인)가
-    자기 knob 을 forge 의 자가튜닝 대상으로 등록. 같은 이름이면 후보 갱신.
-    (stage_params 경로 knob 은 set_stage_param move 로 별도 튜닝.)
+    forge step 마다 현재값 주변을 탐색 → 여러 step 에 걸쳐 [lo,hi] 전 구간 도달.
+    cur 미설정이면 lo/중앙/hi 로 시드. choices spec 이면 그대로(명시 override).
     """
-    if name and choices:
-        _SCALAR_CHOICES[str(name)] = list(choices)
+    spec = _SCALAR_SPECS.get(key)
+    if not spec:
+        return []
+    if "choices" in spec:
+        return [v for v in spec["choices"] if v != cur]
+    lo, hi, step, kind = spec["lo"], spec["hi"], spec["step"], spec.get("kind", "float")
+
+    def _clamp(x: float) -> Any:
+        x = max(lo, min(hi, x))
+        return int(round(x)) if kind == "int" else round(x, 4)
+
+    if cur is None:
+        raw = [lo, (lo + hi) / 2.0, hi]
+    else:
+        raw = [cur - step, cur + step, cur * 2, cur * 0.5]
+    out: list[Any] = []
+    for x in raw:
+        try:
+            v = _clamp(float(x))
+        except (TypeError, ValueError):
+            continue
+        if v != cur and v not in out:
+            out.append(v)
+    return out
 
 
-def tunable_scalars() -> dict[str, list]:
-    """현재 forge 가 튜닝 가능한 scalar 카탈로그(내성/디버그용)."""
-    return dict(_SCALAR_CHOICES)
+def register_tunable_scalar(name: str, spec: Any) -> None:
+    """forge 변이공간에 tunable scalar 추가/갱신 — 엔진 수정 없이 확장(무하드코딩).
+
+    spec 형식(셋 다 허용):
+      · list  → 명시 후보 [v1, v2, …]
+      · tuple → 범위 (lo, hi, step[, kind])  kind="int"|"float"
+      · dict  → {"lo","hi","step","kind"} 또는 {"choices":[…]}
+    name 은 forge 가 mutate 하는 HarnessConfig 필드. 외부(이식/도메인)가 자기 knob·범위를 등록.
+    """
+    if not name or spec is None:
+        return
+    if isinstance(spec, dict):
+        _SCALAR_SPECS[str(name)] = dict(spec)
+    elif isinstance(spec, tuple):
+        lo, hi, st = spec[0], spec[1], spec[2]
+        kind = spec[3] if len(spec) > 3 else ("int" if all(isinstance(v, int) for v in (lo, hi, st)) else "float")
+        _SCALAR_SPECS[str(name)] = {"lo": lo, "hi": hi, "step": st, "kind": kind}
+    elif isinstance(spec, list) and spec:
+        _SCALAR_SPECS[str(name)] = {"choices": list(spec)}
+
+
+def tunable_scalars() -> dict[str, dict]:
+    """현재 forge 가 튜닝 가능한 scalar 범위 스펙(내성/디버그용)."""
+    return {k: dict(v) for k, v in _SCALAR_SPECS.items()}
 
 
 @dataclass(frozen=True)
@@ -66,7 +110,7 @@ class Move:
 
 def _discover_registry() -> dict[str, Any]:
     """Snapshot the engine's registered primitive vocabulary (best-effort)."""
-    reg: dict[str, Any] = {"strategies": {}, "guards": [], "criteria": [], "orchestrators": [], "scalars": list(_SCALAR_CHOICES)}
+    reg: dict[str, Any] = {"strategies": {}, "guards": [], "criteria": [], "orchestrators": [], "scalars": list(_SCALAR_SPECS)}
     try:
         from ..core import strategy_resolver as sr
         sr._register_defaults()  # idempotent; populates the module registry
@@ -114,9 +158,9 @@ class EngineAlgebra:
         present = {g.get("name") for g in _guards(config)}
         for name in self.reg["guards"]:
             moves.append(Move("toggle_guard", name, name not in present))
-        for key, choices in _SCALAR_CHOICES.items():
+        for key in _SCALAR_SPECS:
             cur = config.get(key)
-            moves += [Move("tune_scalar", key, v) for v in choices if v != cur]
+            moves += [Move("tune_scalar", key, v) for v in _gen_candidates(key, cur)]
         moves.append(Move("set_stage_param", "s08_decide:judge_enabled",
                           not bool(_stage_param(config, "s08_decide", "judge_enabled", False))))
         active_crit = {c.get("name") for c in _stage_param(config, "s08_decide", "criteria_defs", []) or []}
@@ -131,7 +175,7 @@ class EngineAlgebra:
         if move.op == "toggle_guard":
             return move.target in self.reg["guards"] and isinstance(move.value, bool)
         if move.op == "tune_scalar":
-            return move.target in _SCALAR_CHOICES
+            return move.target in _SCALAR_SPECS
         if move.op == "set_stage_param":
             return ":" in move.target
         if move.op == "edit_criterion":
