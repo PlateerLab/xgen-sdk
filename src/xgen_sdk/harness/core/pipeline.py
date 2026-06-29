@@ -17,6 +17,7 @@ from typing import Optional
 from .config import HarnessConfig
 from .stage import Stage
 from .state import PipelineState
+from .state_loop import apply_state_view, record_iteration
 from ..events.emitter import EventEmitter
 from ..events.types import (
     StageEnterEvent,
@@ -185,6 +186,10 @@ class Pipeline:
                 state.loop_iteration += 1
                 logger.info("[Pipeline] Loop iteration %d", state.loop_iteration)
 
+                # Stateful loop(read): 외부 state 뷰를 이번 회차 컨텍스트에 갱신 주입.
+                # provider 미주입이면 no-op.
+                apply_state_view(state)
+
                 # v1.1.0 — iterative replan dead code 제거 (Planner 항상 OFF).
 
                 for stage in self.loop_stages:
@@ -237,6 +242,10 @@ class Pipeline:
 
                 # v0.17.0 — iter 말미 loop_boundary 훅 (예산·반복 등 누적 정책)
                 await self._invoke_policy_gate(state, policy_stage, "loop_boundary")
+
+                # Stateful loop(write): 이번 회차 과정을 외부 state 에 기록(C3).
+                # recorder 미주입이면 no-op.
+                record_iteration(state, state.loop_decision)
 
                 # v0.22.0 — max_iterations_override=1 (linear 등) 이면 강제 종료.
                 # 이름 리터럴 없이 spec 의 수치를 본다.
