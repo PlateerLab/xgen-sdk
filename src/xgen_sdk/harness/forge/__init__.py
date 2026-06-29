@@ -17,7 +17,7 @@ See spec: forge-engineering/spec/CONFIG-FORGE.md.
 """
 from __future__ import annotations
 
-from .algebra import EngineAlgebra, Move
+from .algebra import EngineAlgebra, Move, register_tunable_scalar, tunable_scalars
 from .gepa import GepaReflector
 from .loop import Commit, ForgeResult, SelfForge, forge_config
 from .objective import Objective, Score, register_secondary_metric
@@ -29,6 +29,8 @@ from .synthesis import register_synthesizer, synthesize
 __all__ = [
     "EngineAlgebra",
     "Move",
+    "register_tunable_scalar",
+    "tunable_scalars",
     "Reflection",
     "reflect",
     "register_symptom_fix",

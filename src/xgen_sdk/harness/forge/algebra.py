@@ -33,6 +33,22 @@ _SCALAR_CHOICES: dict[str, list[Any]] = {
 }
 
 
+def register_tunable_scalar(name: str, choices: list) -> None:
+    """forge 변이공간에 tunable scalar 추가 — 엔진 수정 없이 확장(무하드코딩).
+
+    name 은 forge 가 mutate 하는 top-level HarnessConfig 필드. 외부(이식/도메인)가
+    자기 knob 을 forge 의 자가튜닝 대상으로 등록. 같은 이름이면 후보 갱신.
+    (stage_params 경로 knob 은 set_stage_param move 로 별도 튜닝.)
+    """
+    if name and choices:
+        _SCALAR_CHOICES[str(name)] = list(choices)
+
+
+def tunable_scalars() -> dict[str, list]:
+    """현재 forge 가 튜닝 가능한 scalar 카탈로그(내성/디버그용)."""
+    return dict(_SCALAR_CHOICES)
+
+
 @dataclass(frozen=True)
 class Move:
     op: str          # set_strategy | toggle_guard | tune_scalar | set_stage_param | edit_criterion
