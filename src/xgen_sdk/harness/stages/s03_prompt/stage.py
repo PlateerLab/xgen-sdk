@@ -29,6 +29,7 @@ SECTION_PRIORITIES = {
     "planning": 2.5,  # v1.0: CoT/ReAct 지시 — rules 다음, tools 전 (구 s05_strategy 흡수)
     "harness_stages": 2.7,  # v1.11.5: stage 토폴로지 — rules 다음, tools 전
     "meta_tools_by_stage": 2.8,  # v1.11.5: stage 별 도구 매핑
+    "improvement_guidelines": 2.6,  # 실행 간 학습 — 회상된 개선 지침(insight)
     "tools": 3,
     "rag": 4,
     "history": 5,
@@ -244,6 +245,10 @@ class SystemPromptStage(Stage):
         # 2. Rules — 기본 행동 규칙 (include_rules=False면 건너뛰기)
         if include_rules:
             sections.append((SECTION_PRIORITIES["rules"], "rules", self._default_rules(state)))
+
+        _guidelines_section = self._build_improvement_guidelines_section(state)
+        if _guidelines_section:
+            sections.append((SECTION_PRIORITIES["improvement_guidelines"], "improvement_guidelines", _guidelines_section))
 
         # 3. Tool Index — Level 1 메타데이터 (progressive disclosure)
         # v1.2.0 — eager (tool_index) + deferred (state.deferred_tools) 두 그룹 표시.
@@ -774,6 +779,31 @@ class SystemPromptStage(Stage):
         for st in STAGE_TOPOLOGY:
             lines.append(f"- {st['id']} ({st['label']}): {st['desc']}")
         lines.append("</harness_stages>")
+        return "\n".join(lines)
+
+    def _build_improvement_guidelines_section(self, state: PipelineState) -> str:
+        """회상된 개선 지침(state.metadata['improvement_guidelines'])을 렌더. 소스=port."""
+        meta = getattr(state, "metadata", None) or {}
+        raw = meta.get("improvement_guidelines") or []
+        if not isinstance(raw, (list, tuple)):
+            return ""
+        seen: set[str] = set()
+        items: list[str] = []
+        for g in raw:
+            s = (g if isinstance(g, str) else str(g)).strip()
+            if s and s not in seen:
+                seen.add(s)
+                items.append(s)
+        if not items:
+            return ""
+        cap = int(self.get_param("max_improvement_guidelines", state, 5) or 5)
+        lines = [
+            "<improvement_guidelines>",
+            "Lessons recalled from prior runs — apply these, do not repeat past mistakes:",
+        ]
+        for s in items[:cap]:
+            lines.append(f"- {s}")
+        lines.append("</improvement_guidelines>")
         return "\n".join(lines)
 
     def _build_meta_tools_by_stage_section(self, state: PipelineState) -> str:
