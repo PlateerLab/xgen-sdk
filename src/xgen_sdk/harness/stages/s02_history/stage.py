@@ -87,15 +87,10 @@ class MemoryStage(Stage):
         }
 
     async def _execute_embedding_search(self, state: PipelineState) -> dict:
-        """임베딩 기반 관련 기억 검색.
-
-        ServiceProvider.documents가 등록되어 있으면
-        "memory" 컬렉션에서 user_input을 쿼리로 임베딩 검색.
-        검색된 과거 상호작용을 시스템 프롬프트에 추가한다.
-        """
-        collection = self.get_param("memory_collection", state, "memory")
+        """HP2 — memory_collections(복수) 병렬 검색·score 병합. 미지정 시 단일 collection(하위호환)."""
         top_k = int(self.get_param("memory_top_k", state, None) or 0)
         score_threshold = float(self.get_param("memory_score_threshold", state, None) or 0)
+        collections = self._resolve_memory_collections(state)
 
         # 기본 전략도 함께 실행 (대화 이력 주입)
         base_result = await self._execute_default(state)
@@ -111,13 +106,26 @@ class MemoryStage(Stage):
             base_result["embedding_results"] = 0
             return base_result
 
-        memories = []
-        try:
-            memories = await self._search_via_service(
-                doc_service, collection, state.user_input, top_k, score_threshold
-            )
-        except Exception as e:
-            logger.warning("[Memory] embedding search via DocumentService failed: %s", e)
+        import asyncio
+
+        async def _one(coll: str) -> list:
+            try:
+                rows = await self._search_via_service(
+                    doc_service, coll, state.user_input, top_k, score_threshold
+                )
+                for r in rows:
+                    if isinstance(r, dict):
+                        r.setdefault("collection", coll)
+                return rows
+            except Exception as e:
+                logger.warning("[Memory] embedding search 실패 (collection=%s): %s", coll, e)
+                return []
+
+        results = await asyncio.gather(*[_one(c) for c in collections])
+        memories: list = [m for rows in results for m in rows]
+        memories.sort(key=lambda m: (m.get("score", 0) if isinstance(m, dict) else 0), reverse=True)
+        if top_k > 0:
+            memories = memories[:top_k]
 
         # 검색 결과를 시스템 프롬프트에 추가
         if memories:
@@ -128,12 +136,43 @@ class MemoryStage(Stage):
                 memory_text += f"[{i + 1}] (relevance: {score:.2f}) {content}\n\n"
             memory_text += "</relevant_memories>"
             state.system_prompt = state.system_prompt + memory_text
-            logger.info("[Memory] embedding_search: %d memories injected (collection=%s)", len(memories), collection)
+            logger.info("[Memory] embedding_search: %d memories injected (collections=%s)", len(memories), collections)
 
         base_result["strategy"] = "embedding_search"
         base_result["embedding_results"] = len(memories)
-        base_result["memory_collection"] = collection
+        base_result["memory_collections"] = collections
         return base_result
+
+    def _resolve_memory_collections(self, state: PipelineState) -> list[str]:
+        """memory_collections(복수) 우선, 없으면 memory_collection(단수). {user_id}/{interaction_id} 치환,
+        치환할 값 없으면 해당 컬렉션 제외."""
+        raw = self.get_param("memory_collections", state, None)
+        if isinstance(raw, str):
+            raw = [c.strip() for c in raw.split(",") if c.strip()]
+        if not raw:
+            raw = [self.get_param("memory_collection", state, "memory")]
+
+        subs = {
+            "user_id": str(getattr(state, "user_id", "") or ""),
+            "interaction_id": str(getattr(state, "interaction_id", "") or ""),
+        }
+        out: list[str] = []
+        for coll in raw:
+            if not coll:
+                continue
+            name = str(coll)
+            skip = False
+            for token, val in subs.items():
+                if "{" + token + "}" in name:
+                    if not val:
+                        skip = True
+                        break
+                    name = name.replace("{" + token + "}", val)
+            if skip or not name:
+                continue
+            if name not in out:
+                out.append(name)
+        return out or ["memory"]
 
     async def _search_via_service(self, doc_service, collection: str, query: str, top_k: int, threshold: float) -> list:
         """ServiceProvider.documents 를 통한 검색.

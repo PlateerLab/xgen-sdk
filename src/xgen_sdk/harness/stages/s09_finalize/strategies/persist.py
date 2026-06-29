@@ -91,9 +91,32 @@ async def persist_execution_record(state, get_param) -> dict:
         "[Finalize.persist] record prepared: %s (table=%s, inserted_id=%s)",
         state.execution_id, table_name, inserted_id,
     )
+
+    extracted = await _maybe_extract_memory(state, get_param)
+
     return {
         "saved": True,
         "execution_id": state.execution_id,
         "table_name": table_name,
         "inserted_id": inserted_id,
+        "memory_extracted": extracted,
     }
+
+
+async def _maybe_extract_memory(state, get_param) -> Optional[int]:
+    """HP3 — memory_extract 켜져 있으면 추출 콜백 호출. 판정·저장은 콜백(이식) 책임."""
+    if not get_param("memory_extract", state, False):
+        return None
+    try:
+        import inspect
+        from ....memory.memory_store import get_memory_extractor
+        extractor = get_memory_extractor()
+        if extractor is None:
+            return None
+        res = extractor(state)
+        if inspect.isawaitable(res):
+            res = await res
+        return int(res) if isinstance(res, (int, bool)) else None
+    except Exception as e:
+        logger.warning("[Finalize.persist] memory_extract 실패 (graceful skip): %s", e)
+        return None
