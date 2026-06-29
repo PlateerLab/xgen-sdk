@@ -30,6 +30,11 @@ _SCALAR_CHOICES: dict[str, list[Any]] = {
     "max_retries": [0, 1, 2, 3],
     "max_iterations": [4, 6, 8, 10],
     "temperature": [0.0, 0.2, 0.5, 0.7],
+    # stateful loop — forge 가 state 설정까지 자가튜닝(HarnessConfig 정식 필드).
+    "state_max_lessons": [2, 3, 5],
+    "state_max_refined": [3, 5, 8],
+    "state_max_recall": [5, 8, 12],
+    "state_char_budget": [1000, 2000, 3000],
 }
 
 

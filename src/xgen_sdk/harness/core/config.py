@@ -181,6 +181,13 @@ class HarnessConfig:
     max_retries: Optional[int] = None          # 검증 재시도 한도
     validation_threshold: Optional[float] = None  # judge 통과 임계
 
+    # --- Stateful loop (정책 — sentinel; 미설정 시 state_bridge 시그니처 기본) ---
+    # 정식 필드라 strict from_dict 통과 + forge tune_scalar 대상이 됨(자가튜닝).
+    state_max_lessons: Optional[int] = None     # Reflexion 교훈 버퍼 깊이
+    state_max_refined: Optional[int] = None     # 정제 장기기억 노출 수
+    state_max_recall: Optional[int] = None      # 작업기억 노출 수
+    state_char_budget: Optional[int] = None     # state 뷰 char 예산
+
     # --- 시스템 프롬프트 ---
     system_prompt: str = ""
 
