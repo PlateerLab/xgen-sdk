@@ -31,16 +31,27 @@ class MemoryStateProvider:
         refined: _RefinedSrc = None,
         max_recall: int = 8,
         max_refined: int = 5,
+        max_lessons: int = 3,
         char_budget: int = 2000,
     ) -> None:
         self._recall = recall
         self._refined = refined
         self.max_recall = max_recall
         self.max_refined = max_refined
+        self.max_lessons = max_lessons
         self.char_budget = char_budget
 
     def get_state_view(self, state) -> Optional[str]:
         parts: list[str] = []
+        # Reflexion: 이번 런의 최근 실패 교훈(in-run, bounded) — 같은 실수 반복 회피.
+        lessons = (getattr(state, "metadata", None) or {}).get("loop_lessons") or []
+        if lessons:
+            parts.append("### 최근 시도 교훈 (반복 회피)")
+            for l in list(lessons)[-self.max_lessons:]:
+                line = f"- {l.get('intent', '')}".rstrip()
+                if l.get("outcome"):
+                    line += f" → {l['outcome']}"
+                parts.append(line)
         refined = self._resolve(self._refined, state) or []
         if refined:
             parts.append("### 장기기억(정제)")
@@ -79,10 +90,12 @@ class MemoryStateRecorder:
         *,
         actor: str = "harness",
         refine_on_complete: bool = True,
+        max_lessons: int = 3,
     ) -> None:
         self._persist = persist
         self.actor = actor
         self.refine_on_complete = refine_on_complete
+        self.max_lessons = max_lessons
         self._seq = 0
 
     def record_iteration(self, state, decision: str) -> None:
@@ -98,6 +111,15 @@ class MemoryStateRecorder:
             ref=ref,
         )
         self._persist("activity", ev.to_dict())
+        if decision == "retry":
+            # Reflexion: 실패 회차를 교훈으로 정제 → in-run bounded buffer + 영속.
+            lesson = refine_message(
+                self._last_user(state), self._last_assistant(state),
+                memory_id=f"lesson-{ref.get('run_id', 'run')}-{self._seq}",
+                provenance={**ref, "kind": "lesson", "iteration": self._seq},
+            )
+            self._push_lesson(state, lesson.to_dict())
+            self._persist("lesson", lesson.to_dict())
         if self.refine_on_complete and decision == "complete":
             mem = refine_message(
                 self._last_user(state),
@@ -106,7 +128,21 @@ class MemoryStateRecorder:
                 provenance=ref,
             )
             self._persist("refined_memory", mem.to_dict())
-        # ev/mem 은 함수 종료와 함께 해제 — 누적 없음.
+        # ev/mem/lesson 은 함수 종료와 함께 해제 — 프로세스 누적 없음(버퍼는 bounded).
+
+    def _push_lesson(self, state, lesson: dict) -> None:
+        """in-run 교훈 bounded 버퍼(state.metadata['loop_lessons']) — provider 가 읽음.
+        max_lessons 로 FIFO 캡 → 매 retry 누적돼도 무한증식 차단."""
+        meta = getattr(state, "metadata", None)
+        if meta is None:
+            return
+        buf = meta.get("loop_lessons")
+        if not isinstance(buf, list):
+            buf = []
+            meta["loop_lessons"] = buf
+        buf.append(lesson)
+        if len(buf) > self.max_lessons:
+            del buf[: len(buf) - self.max_lessons]
 
     @staticmethod
     def _ref(state) -> dict:
