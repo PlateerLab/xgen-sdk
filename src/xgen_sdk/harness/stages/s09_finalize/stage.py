@@ -177,7 +177,26 @@ class FinalizeStage(Stage):
             persist_result = await persist_execution_record(state, self.get_param)
             result["persisted"] = persist_result
 
+        # 4. 기억 추출 (HP3) — persist 전략과 무관. 판정·저장은 등록된 콜백(이식)이 책임.
+        if self.get_param("memory_extract", state, False):
+            result["memory_extracted"] = await self._extract_memory(state)
+
         return result
+
+    async def _extract_memory(self, state):
+        try:
+            import inspect
+            from ...memory.memory_store import get_memory_extractor
+            fn = get_memory_extractor()
+            if fn is None:
+                return None
+            res = fn(state)
+            if inspect.isawaitable(res):
+                res = await res
+            return int(res) if isinstance(res, (int, bool)) else None
+        except Exception as e:
+            logger.warning("[Finalize] memory_extract 실패 (graceful skip): %s", e)
+            return None
 
     @staticmethod
     def _fallback_output(state: PipelineState) -> str:
