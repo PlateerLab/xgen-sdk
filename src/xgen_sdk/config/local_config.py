@@ -758,4 +758,5 @@ def create_config_manager(db_manager=None):
         return redis_manager
     else:
         logger.warning("🟡 Redis 연결 실패 - LocalConfigManager로 fallback")
-        return LocalConfigManager(db_manager=db_manager)
+        # LocalConfigManager 생성이 에러를 만들지 않는 문제가 있으므로, 그냥 None을 반환하여 해결.
+        return None
