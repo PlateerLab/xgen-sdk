@@ -23,6 +23,7 @@ PERSIST_DEFAULTS: dict[str, Any] = {
     "table_name": "harness_execution_log",
     "input_text_cap": 5_000,
     "output_text_cap": 50_000,
+    "feedback_text_cap": 2_000,
 }
 
 
@@ -69,6 +70,11 @@ async def persist_execution_record(state, get_param) -> dict:
 
     if state.validation_score is not None:
         record["metrics"]["validation_score"] = state.validation_score
+
+    _feedback = getattr(state, "validation_feedback", None)
+    if _feedback:
+        fb_cap = int(get_param("feedback_text_cap", state, PERSIST_DEFAULTS["feedback_text_cap"]))
+        record["metrics"]["validation_feedback"] = str(_feedback)[:fb_cap]
 
     state.metadata["execution_record"] = record
     state.metadata["execution_table_name"] = table_name
