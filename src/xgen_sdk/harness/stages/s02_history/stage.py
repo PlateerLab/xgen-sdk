@@ -32,8 +32,10 @@ class MemoryStage(Stage):
         # 더 흔하다는 사용자 피드백.
         if strategy_name == "none":
             return True
-        # embedding_search 전략은 conversation_history 없어도 실행 가능
         if strategy_name == "embedding_search":
+            return not state.user_input
+        # memory_scopes 설정 시 유저기억 회상 위해 이력 없어도 실행.
+        if self._resolve_memory_scopes(state):
             return not state.user_input
         return not state.previous_results and not state.conversation_history
 
@@ -41,15 +43,17 @@ class MemoryStage(Stage):
         strategy_name = self.get_param("strategy", state, "default")
 
         if strategy_name == "none":
-            # 이력/이전결과 미주입. messages 는 s01_input 이 만든 그대로 유지.
-            # 보통 should_bypass=True 가 이 분기 도달 전에 차단하지만, 외부에서
-            # 직접 execute() 를 호출하는 테스트/서브클래스 시나리오를 위한 안전 가드.
             return {"injected": 0, "previous_results": 0, "strategy": "none"}
 
         if strategy_name == "embedding_search":
-            return await self._execute_embedding_search(state)
+            result = await self._execute_embedding_search(state)
+        else:
+            result = await self._execute_default(state)
 
-        return await self._execute_default(state)
+        recalled = await self._recall_user_memory(state)
+        if recalled:
+            result["user_memory_recalled"] = recalled
+        return result
 
     async def _execute_default(self, state: PipelineState) -> dict:
         """기본 전략: 대화 이력 + previous_results"""
@@ -173,6 +177,57 @@ class MemoryStage(Stage):
             if name not in out:
                 out.append(name)
         return out or ["memory"]
+
+    def _resolve_memory_scopes(self, state: PipelineState) -> list[str]:
+        raw = self.get_param("memory_scopes", state, None)
+        if isinstance(raw, str):
+            raw = [s.strip() for s in raw.split(",") if s.strip()]
+        if not raw:
+            return []
+        subs = {
+            "user_id": str(getattr(state, "user_id", "") or ""),
+            "interaction_id": str(getattr(state, "interaction_id", "") or ""),
+        }
+        out: list[str] = []
+        for sc in raw:
+            name = str(sc or "")
+            skip = False
+            for token, val in subs.items():
+                if "{" + token + "}" in name:
+                    if not val:
+                        skip = True
+                        break
+                    name = name.replace("{" + token + "}", val)
+            if skip or not name or name in out:
+                continue
+            out.append(name)
+        return out
+
+    async def _recall_user_memory(self, state: PipelineState) -> int:
+        """memory_scopes 설정 시 MemoryStore 에서 키워드 회상해 system_prompt 에 주입(HP2 보완)."""
+        scopes = self._resolve_memory_scopes(state)
+        if not scopes:
+            return 0
+        try:
+            from ...memory.memory_store import get_memory_store
+            top_k = int(self.get_param("memory_top_k", state, None) or 5)
+            types = self.get_param("memory_types", state, None)
+            if isinstance(types, str):
+                types = [t.strip() for t in types.split(",") if t.strip()]
+            entries = get_memory_store().search(state.user_input or "", scopes=scopes, top_k=top_k, types=types or None)
+        except Exception as e:
+            logger.warning("[Memory] user_memory 회상 실패: %s", e)
+            return 0
+        if not entries:
+            return 0
+        block = "\n\n<user_memory>\n"
+        for i, e in enumerate(entries):
+            desc = (getattr(e, "description", "") or "").strip()
+            block += f"[{i + 1}] ({e.type}) {desc + ': ' if desc else ''}{e.content}\n"
+        block += "</user_memory>"
+        state.system_prompt = state.system_prompt + block
+        logger.info("[Memory] user_memory 회상 %d건 주입 (scopes=%s)", len(entries), scopes)
+        return len(entries)
 
     async def _search_via_service(self, doc_service, collection: str, query: str, top_k: int, threshold: float) -> list:
         """ServiceProvider.documents 를 통한 검색.
