@@ -41,7 +41,7 @@ class MemoryStateProvider:
         # Reflexion: 이번 런의 최근 실패 교훈(in-run, bounded) — 같은 실수 반복 회피.
         lessons = (getattr(state, "metadata", None) or {}).get("loop_lessons") or []
         if lessons:
-            parts.append("### 최근 시도 교훈 (반복 회피)")
+            parts.append("### Recent attempt lessons (avoid repeating mistakes)")
             for l in list(lessons)[-self.max_lessons:]:
                 line = f"- {l.get('intent', '')}".rstrip()
                 if l.get("outcome"):
@@ -49,7 +49,7 @@ class MemoryStateProvider:
                 parts.append(line)
         refined = self._resolve(self._refined, state) or []
         if refined:
-            parts.append("### 장기기억(정제)")
+            parts.append("### Long-term memory (refined)")
             for m in list(refined)[: self.max_refined]:
                 line = f"- {m.intent}".rstrip()
                 if m.outcome:
@@ -59,14 +59,14 @@ class MemoryStateProvider:
         if recall is not None:
             ranked = recall.ranked()[: self.max_recall]
             if ranked:
-                parts.append("### 작업기억")
+                parts.append("### Working memory")
                 for it in ranked:
                     parts.append(f"- {it.content}".rstrip())
         view = "\n".join(parts).strip()
         if not view:
             return None
         if len(view) > self.char_budget:
-            view = view[: self.char_budget].rstrip() + "\n…(생략)"
+            view = view[: self.char_budget].rstrip() + "\n…(truncated)"
         return view
 
     @staticmethod
