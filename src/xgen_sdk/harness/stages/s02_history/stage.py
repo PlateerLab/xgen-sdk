@@ -220,13 +220,12 @@ class MemoryStage(Stage):
             return 0
         if not entries:
             return 0
-        block = "\n\n<user_memory>\n"
-        for i, e in enumerate(entries):
-            desc = (getattr(e, "description", "") or "").strip()
-            block += f"[{i + 1}] ({e.type}) {desc + ': ' if desc else ''}{e.content}\n"
-        block += "</user_memory>"
-        state.system_prompt = state.system_prompt + block
-        logger.info("[Memory] user_memory 회상 %d건 주입 (scopes=%s)", len(entries), scopes)
+        # S03 가 system_prompt 를 재조립하므로 metadata 로 넘겨 S03 user_memory 섹션이 렌더.
+        state.metadata["recalled_user_memory"] = [
+            {"type": e.type, "description": getattr(e, "description", "") or "", "content": e.content}
+            for e in entries
+        ]
+        logger.info("[Memory] user_memory 회상 %d건 (scopes=%s)", len(entries), scopes)
         return len(entries)
 
     async def _search_via_service(self, doc_service, collection: str, query: str, top_k: int, threshold: float) -> list:

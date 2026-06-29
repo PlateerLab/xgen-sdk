@@ -26,6 +26,7 @@ logger = logging.getLogger("harness.stage.system_prompt")
 SECTION_PRIORITIES = {
     "identity": 1,
     "rules": 2,
+    "user_memory": 2.3,  # 회상된 유저 기억(선호·사실) — rules 직후, 알려진 사실로 취급
     "planning": 2.5,  # v1.0: CoT/ReAct 지시 — rules 다음, tools 전 (구 s05_strategy 흡수)
     "harness_stages": 2.7,  # v1.11.5: stage 토폴로지 — rules 다음, tools 전
     "meta_tools_by_stage": 2.8,  # v1.11.5: stage 별 도구 매핑
@@ -249,6 +250,10 @@ class SystemPromptStage(Stage):
         _guidelines_section = self._build_improvement_guidelines_section(state)
         if _guidelines_section:
             sections.append((SECTION_PRIORITIES["improvement_guidelines"], "improvement_guidelines", _guidelines_section))
+
+        _user_memory_section = self._build_user_memory_section(state)
+        if _user_memory_section:
+            sections.append((SECTION_PRIORITIES["user_memory"], "user_memory", _user_memory_section))
 
         # 3. Tool Index — Level 1 메타데이터 (progressive disclosure)
         # v1.2.0 — eager (tool_index) + deferred (state.deferred_tools) 두 그룹 표시.
@@ -805,6 +810,27 @@ class SystemPromptStage(Stage):
             lines.append(f"- {s}")
         lines.append("</improvement_guidelines>")
         return "\n".join(lines)
+
+    def _build_user_memory_section(self, state: PipelineState) -> str:
+        """회상된 유저 기억(state.metadata['recalled_user_memory'])을 알려진 사실로 렌더. 소스=port."""
+        meta = getattr(state, "metadata", None) or {}
+        raw = meta.get("recalled_user_memory") or []
+        if not isinstance(raw, (list, tuple)) or not raw:
+            return ""
+        lines = [
+            "<user_memory>",
+            "Known facts/preferences about the current user (from earlier conversations). Treat as true and honor them:",
+        ]
+        for e in raw:
+            if not isinstance(e, dict):
+                continue
+            desc = (e.get("description") or "").strip()
+            content = (e.get("content") or "").strip()
+            if not content:
+                continue
+            lines.append(f"- ({e.get('type', 'fact')}) {desc + ': ' if desc else ''}{content}")
+        lines.append("</user_memory>")
+        return "\n".join(lines) if len(lines) > 3 else ""
 
     def _build_meta_tools_by_stage_section(self, state: PipelineState) -> str:
         """v1.11.5 — 현재 indexed 된 도구를 stage 별 그룹화.
