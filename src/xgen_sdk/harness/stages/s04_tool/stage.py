@@ -490,16 +490,39 @@ class ToolIndexStage(Stage):
                 default_rerank_top_k=_rerank_topk_int,
                 default_file_names=list(_files_default) if _files_default else None,
             )
-            if not any(td.get("name") == "rag_search" for td in state.tool_definitions):
-                state.tool_definitions.append(rag_tool.to_api_format())
-                tool_index.append(rag_tool.to_index_entry())
+            _rag_already = any(td.get("name") == "rag_search" for td in state.tool_definitions) \
+                or any(t.get("name") == "rag_search" for t in (state.deferred_tools or []))
+            if not _rag_already:
+                _rag_api = rag_tool.to_api_format()
                 state.metadata.setdefault("tool_registry", {})["rag_search"] = rag_tool
-                logger.info(
-                    "[Tool Index] rag_search registered (v1.9.0 Option C — single tool path) "
-                    "defaults: score_th=%s files=%d filter=%s rerank=%s rerank_top_k=%s",
-                    _score_th_float, len(_files_default) if _files_default else 0,
-                    "set" if _raw_filter else "none", _reranker, _rerank_topk_int,
-                )
+                if rag_pd_mode_for_tool == "progressive":
+                    # 4.8 Tool search 패턴(백과사전 + Claude MCP Tool Search / OpenAI tool search):
+                    # 연결된 RAG 를 eager 로 박지 않고 deferred 카탈로그(안내데스크)에 둔다. LLM 이
+                    # search_tools 로 "RAG 연결됨" 발견 → ToolSearch 승격 → rag_search 호출 — "연결
+                    # 노드를 tool 로 인식해 검색·사용" 사고 흐름이 지도 타고 이어진다. eager 면 그냥
+                    # 박혀 발견 단계가 사라짐(도구 폭발 4.6). 검색 자체는 rag_collections 가 s06/
+                    # active_resources 로 노출돼 에이전트가 "무엇이 연결됐는지" 는 안다.
+                    state.tool_schemas["rag_search"] = _rag_api
+                    state.deferred_tools.append({
+                        # category != "deferred" → s03 가 익명 대량 카탈로그(MCP)와 달리 이름으로
+                        # 노출(사용자가 명시 연결한 자원이라 발견 단서가 보여야 약한 모델도 탄다).
+                        "name": "rag_search",
+                        "description": (_rag_api.get("description") or "")[:120],
+                        "category": "retrieval",
+                    })
+                    logger.info(
+                        "[Tool Index] rag_search DEFERRED (progressive PD — search_tools/ToolSearch 로 발견) "
+                        "collections=%s score_th=%s", rag_collections, _score_th_float,
+                    )
+                else:
+                    state.tool_definitions.append(_rag_api)
+                    tool_index.append(rag_tool.to_index_entry())
+                    logger.info(
+                        "[Tool Index] rag_search registered (eager) "
+                        "defaults: score_th=%s files=%d filter=%s rerank=%s rerank_top_k=%s",
+                        _score_th_float, len(_files_default) if _files_default else 0,
+                        "set" if _raw_filter else "none", _reranker, _rerank_topk_int,
+                    )
 
         # ─── 3.5 Ontology / GraphRAG 도구 등록 (v1.9.0 Option C) ────────
         # 사용자가 박은 ontology_collections 를 query_graph 빌트인 도구로 노출.
@@ -540,6 +563,18 @@ class ToolIndexStage(Stage):
         if force_tool_use and state.tool_definitions:
             state.metadata["force_tool_choice"] = "required"
             logger.info("[Tool Index] force_tool_use=True → tool_choice=required")
+
+        # ─── 4b. discovery-first (tool-search-first, 백과사전 4.8) ──────────
+        # 연결된 자원이 deferred(안내데스크 뒤)에 있으면, 첫 턴 행동을 search_tools 로 강제한다.
+        # 약한 모델이 카탈로그를 안 열고 바로 답/엉뚱한 도구로 가는 걸 막고 "tool search 를
+        # 선으로 → 거기서 도구 발견" 흐름을 보장(하네스가 일을 해준다). 첫 턴만(circuit breaker
+        # 는 llm_call 이 loop_iteration 으로 처리). opt-out: discovery_first 파라미터 False.
+        _has_deferred = bool(getattr(state, "deferred_tools", None))
+        _has_search = "search_tools" in (state.metadata.get("tool_registry") or {})
+        _disc_first = bool(self.get_param("discovery_first", state, True))
+        if _disc_first and _has_deferred and _has_search and not force_tool_use:
+            state.metadata["discovery_first_tool"] = "search_tools"
+            logger.info("[Tool Index] discovery_first → 첫 턴 search_tools 강제 (tool-search-first)")
 
         logger.info("[Tool Index] %d tools indexed, %d definitions bound",
                     len(tool_index), len(state.tool_definitions))

@@ -948,35 +948,56 @@ class SystemPromptStage(Stage):
         for tool in tool_index or []:
             cat = (tool.get("category") or "general").strip() or "general"
             groups[cat].append(tool)
+        # Deferred tools split by intent:
+        #  - Anonymous bulk catalog (MCP / generic, category "deferred"/"mcp"/"general")
+        #    stays hidden — too many to list; the agent finds them with search_tools.
+        #  - Explicitly-connected resources (meaningful category, e.g. "retrieval"/"graph")
+        #    are surfaced BY NAME with a (load first) cue, so even a weaker model sees the
+        #    discovery path: "a RAG is connected → load it → use it". This is the harness
+        #    doing the work, not relying on the model to guess a hidden tool exists.
+        deferred_names: set[str] = set()
         if deferred_list:
             for tool in deferred_list:
-                groups["deferred"].append(tool)
+                dcat = (tool.get("category") or "deferred").strip() or "deferred"
+                nm = tool.get("name", "")
+                if nm:
+                    deferred_names.add(nm)
+                if dcat in ("deferred", "mcp", "general"):
+                    groups["deferred"].append(tool)
+                else:
+                    groups[dcat].append(tool)
 
         lines = ["<available_tools>"]
-        # system 그룹 우선 (찾는 도구), 그 다음 알파벳, deferred 마지막
+        # Discovery rules — short and imperative so weaker models follow them reliably.
+        if deferred_names:
+            lines.append(
+                "A tool marked (load first) is connected but not yet loaded — call "
+                "ToolSearch(names=[\"<tool>\"]) to load its schema, then call it. When a "
+                "connected knowledge source is relevant to the request, load and use its "
+                "search tool before answering from your own knowledge."
+            )
+        # system 그룹 우선 (찾는 도구), 그 다음 알파벳, deferred(익명 카탈로그) 마지막
         priority = {"system": 0}
         sorted_cats = sorted(groups.keys(), key=lambda c: (priority.get(c, 1), 1 if c == "deferred" else 0, c))
-        # deferred 항상 마지막
         if "deferred" in sorted_cats:
             sorted_cats = [c for c in sorted_cats if c != "deferred"] + ["deferred"]
 
         for cat in sorted_cats:
             if cat == "deferred":
-                # v1.8.0 — strict PD: deferred 도구 list 자체를 system_prompt 에서 제거.
-                # 이름/desc 박으면 system_prompt 두꺼워지고 (~3000자) 사용자 의도 (지도 간편화)
-                # 위반. LLM 은 search_tools(query=...) 또는 discover_tools() 무조건 호출해야
-                # deferred 도구 발견 가능 — 진짜 strict PD. 첫 응답 1 turn 늘어남은 trade-off.
                 count = len(groups[cat])
+                if not count:
+                    continue
                 lines.append(
-                    f"\n[deferred] ({count} tools — list hidden. Use search_tools(query=...) "
-                    f"or discover_tools() to find, then ToolSearch(names=[...]) to load.)"
+                    f"\n[catalog] ({count} more tools, hidden) — call search_tools(query=\"...\") "
+                    f"to find a tool here, then ToolSearch(names=[...]) to load it."
                 )
                 continue
             lines.append(f"\n[{cat}]")
             for tool in groups[cat]:
                 name = tool.get("name", "unknown")
                 desc = tool.get("description", "")
-                line = f"- {name}: {desc}" if desc else f"- {name}"
+                mark = " (load first)" if name in deferred_names else ""
+                line = f"- {name}{mark}: {desc}" if desc else f"- {name}{mark}"
                 lines.append(line)
         lines.append("\n</available_tools>")
 

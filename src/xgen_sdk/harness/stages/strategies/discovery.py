@@ -133,7 +133,9 @@ class ProgressiveDiscovery(ToolDiscoveryStrategy):
             state.metadata.setdefault("tool_registry", {})["discover_tools"] = discover
 
         if len(all_known) >= _SEARCH_TOOLS_THRESHOLD:
-            search = SearchToolsTool(all_known)
+            # state_ref 전달 — execute 시 state.tool_schemas(live)를 보게 해, discover 이후
+            # s04 가 등록하는 연결 자원(rag_search/query_graph)도 search_tools 가 발견.
+            search = SearchToolsTool(all_known, state_ref=state)
             augmented.append(search.to_api_format())
             tool_index.append({
                 "name": search.name,

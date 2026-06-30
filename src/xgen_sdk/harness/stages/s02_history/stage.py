@@ -8,6 +8,7 @@ S02 Memory — 대화 이력/기억 로드
 """
 
 import logging
+import re
 
 from ...core.stage import Stage, StrategyInfo
 from ...core.state import PipelineState
@@ -184,20 +185,19 @@ class MemoryStage(Stage):
             raw = [s.strip() for s in raw.split(",") if s.strip()]
         if not raw:
             return []
-        subs = {
-            "user_id": str(getattr(state, "user_id", "") or ""),
-            "interaction_id": str(getattr(state, "interaction_id", "") or ""),
-        }
         out: list[str] = []
         for sc in raw:
             name = str(sc or "")
+            # {token} 는 모두 state 속성에서 해석(user_id/interaction_id/workflow_id/thread_id …).
+            # 미해석(속성 없음/빈값) placeholder 가 남는 스코프는 검색 대상에서 제외 — literal
+            # "{workflow_id}" 로 헛검색 방지. 토큰 화이트리스트 없이 제네릭(무하드코딩).
             skip = False
-            for token, val in subs.items():
-                if "{" + token + "}" in name:
-                    if not val:
-                        skip = True
-                        break
-                    name = name.replace("{" + token + "}", val)
+            for token in re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", name):
+                val = str(getattr(state, token, "") or "")
+                if not val:
+                    skip = True
+                    break
+                name = name.replace("{" + token + "}", val)
             if skip or not name or name in out:
                 continue
             out.append(name)

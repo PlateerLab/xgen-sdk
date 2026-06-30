@@ -244,13 +244,22 @@ async def _single_call(
     # tool_choice circuit breaker (기존 s07 규칙 그대로)
     _tool_choice = None
     if state.tool_definitions:
-        _tool_choice = (state.metadata or {}).get("force_tool_choice")
-        if _tool_choice == "required" and getattr(state, "loop_iteration", 0) >= 1:
-            logger.info(
-                "[LLM] force_tool_choice=required → auto (iter=%d, circuit breaker)",
-                getattr(state, "loop_iteration", 0),
-            )
-            _tool_choice = "auto"
+        # discovery-first (4.8 tool-search-first) — 첫 main LLM 호출은 무조건 search_tools 로
+        # 카탈로그를 연다. one-shot(pop): loop_iteration 은 첫 iteration 전에 1로 증가하므로
+        # iteration 번호에 기대지 않고 메타 키를 한 번 소비한다. 약한 모델도 "tool search 선 →
+        # 발견" 흐름을 타게 강제. 소비 후 둘째 호출부터 auto.
+        _disc = (state.metadata or {}).pop("discovery_first_tool", None) if state.metadata else None
+        if _disc:
+            _tool_choice = _disc
+            logger.info("[LLM] discovery_first → tool_choice=%s (one-shot, lead with tool search)", _disc)
+        else:
+            _tool_choice = (state.metadata or {}).get("force_tool_choice")
+            if _tool_choice == "required" and getattr(state, "loop_iteration", 0) >= 1:
+                logger.info(
+                    "[LLM] force_tool_choice=required → auto (iter=%d, circuit breaker)",
+                    getattr(state, "loop_iteration", 0),
+                )
+                _tool_choice = "auto"
     elif (state.metadata or {}).get("force_tool_choice"):
         logger.warning("[LLM] force_tool_choice set but no tool_definitions — ignored")
 

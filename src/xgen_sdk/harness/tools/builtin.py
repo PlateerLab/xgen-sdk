@@ -107,8 +107,46 @@ class DiscoverToolsTool(Tool):
         return ToolResult.success(json.dumps(td, indent=2, ensure_ascii=False))
 
 
+# ── BM25F 도구검색 헬퍼 (Anthropic Tool Search 정합: BM25 over name + description +
+#    argument names + argument descriptions). 이전 ad-hoc 가중치(+3/+5/+1)는 업계 어디서도
+#    안 쓰는 임시방편이라 정식 BM25 로 교체. 필드 가중치는 BM25F(원리), title boost 는
+#    synaptic-memory(BM25 FTS title 3x) 참조. 토큰 부분일치로 한국어 조사 변형 흡수. ──
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+_BM25_FIELD_WEIGHTS = {"name": 3.0, "argn": 2.0, "desc": 1.0, "argd": 1.0}
+
+
+def _st_tokenize(text: str) -> list[str]:
+    return [t for t in re.split(r"[^0-9a-zA-Z가-힣_]+", (text or "").lower()) if t]
+
+
+def _st_field_tokens(td: dict) -> dict:
+    """도구 dict → 4 필드 토큰. input_schema.properties 에서 인자명·인자설명까지."""
+    schema = td.get("input_schema") or td.get("inputSchema") or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    argn: list[str] = []
+    argd: list[str] = []
+    if isinstance(props, dict):
+        for k, v in props.items():
+            argn.append(str(k))
+            if isinstance(v, dict) and v.get("description"):
+                argd.append(str(v.get("description")))
+    return {
+        "name": _st_tokenize(td.get("name") or ""),
+        "argn": _st_tokenize(" ".join(argn)),
+        "desc": _st_tokenize(td.get("description") or ""),
+        "argd": _st_tokenize(" ".join(argd)),
+    }
+
+
+def _st_tf(term: str, toks: list[str]) -> int:
+    # 토큰 부분일치 — '컬렉션' ⊂ '컬렉션에'(조사) 대응. 순수 BM25 는 정확토큰이나 한국어
+    # 형태소 미적용 환경에서 재현율 위해 substring 허용(synaptic 의 substring fallback 참조).
+    return sum(1 for tok in toks if term in tok)
+
+
 class SearchToolsTool(Tool):
-    """도구 카탈로그를 키워드로 검색 — Progressive Disclosure Level 0.
+    """도구 카탈로그를 BM25 로 검색 — Progressive Disclosure Level 0.
 
     카탈로그가 큰 환경(100+ 도구) 에서 첫 호출에 모든 메타를 system_prompt 에
     싣는 비효율을 막음. Anthropic 의 sandbox 도구 패턴 차용 — 환경만 주고
@@ -119,8 +157,20 @@ class SearchToolsTool(Tool):
       → [{"name":"mcp_gmail_send","description":"..."}, ...]
     """
 
-    def __init__(self, tool_definitions: list[dict]):
+    def __init__(self, tool_definitions: list[dict], state_ref=None):
         self._tools = list(tool_definitions)
+        # live 카탈로그 — state.tool_schemas 가 있으면 그것을 본다. 순서버그 fix:
+        # SearchToolsTool 생성(discovery 전략) 이후 s04 가 등록하는 연결 자원
+        # (rag_search/query_graph)도 검색 대상에 포함되게 한다(스냅샷이면 영영 누락).
+        self._state = state_ref
+
+    def _catalog(self) -> list[dict]:
+        st = self._state
+        if st is not None:
+            sch = getattr(st, "tool_schemas", None)
+            if sch:
+                return list(sch.values())
+        return self._tools
 
     @property
     def name(self) -> str:
@@ -138,7 +188,7 @@ class SearchToolsTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Keyword(s) to search for in tool name/description."},
+                "query": {"type": "string", "description": "Keyword(s); BM25-ranked over tool name, description, and argument names/descriptions."},
                 "limit": {"type": "integer", "description": "Max results (default 8).", "default": 8},
                 "category": {"type": "string", "description": "Filter by category (optional)."},
             },
@@ -175,6 +225,10 @@ class SearchToolsTool(Tool):
         raw_terms = [t for t in re.split(r"\s+", q) if t]
         expanded_terms = _expand_query_terms(raw_terms)
         scored = self._score_terms(expanded_terms, category_filter)
+        # category 필터가 0건이면 풀고 재검색 — 카탈로그(to_api_format)엔 category 메타가
+        # 없어 LLM 이 박은 필터가 전부 제외시키는 회귀 방지(0건 침묵 대신 BM25 결과 노출).
+        if not scored and category_filter:
+            scored = self._score_terms(expanded_terms, "")
 
         scored.sort(key=lambda x: -x[0])
         top = scored[:limit]
@@ -193,24 +247,43 @@ class SearchToolsTool(Tool):
         # v1.11.4 — PD 정신: 결과 자체가 환경 노출. 다음 행동 권유 폐기.
         return ToolResult.success("\n".join(lines))
 
-    def _score_terms(self, terms: list[str], category_filter: str) -> list[tuple[int, dict]]:
-        scored: list[tuple[int, dict]] = []
-        for td in self._tools:
-            name = (td.get("name") or "").lower()
-            desc = (td.get("description") or "").lower()
+    def _score_terms(self, terms: list[str], category_filter: str) -> list[tuple[float, dict]]:
+        """BM25F over {name, arg-names, description, arg-descriptions}.
+
+        IDF(희소어 가중) · TF saturation(k1) · 길이정규화(b) · 필드가중치(BM25F).
+        이전 +3/+5/+1 ad-hoc 점수 대비: 희귀어 우대, 긴 설명 편향 제거, 인자 필드 포함.
+        """
+        import math
+        docs: list[tuple[dict, dict, float]] = []
+        for td in self._catalog():
             cat = (td.get("category") or td.get("metadata", {}).get("category") or "").lower()
             if category_filter and category_filter not in cat:
                 continue
-            score = 0
+            ftoks = _st_field_tokens(td)
+            dl = sum(_BM25_FIELD_WEIGHTS[f] * len(toks) for f, toks in ftoks.items())
+            docs.append((td, ftoks, dl))
+        if not docs:
+            return []
+        N = len(docs)
+        avgdl = (sum(dl for _, _, dl in docs) / N) or 1.0
+        idf: dict[str, float] = {}
+        for t in terms:
+            dfq = sum(1 for _, ftoks, _ in docs if any(_st_tf(t, toks) for toks in ftoks.values()))
+            if dfq > 0:
+                idf[t] = math.log(1 + (N - dfq + 0.5) / (dfq + 0.5))
+        scored: list[tuple[float, dict]] = []
+        for td, ftoks, dl in docs:
+            s = 0.0
             for t in terms:
-                if t in name:
-                    score += 3
-                if t in desc:
-                    score += 1
-                if t == name:
-                    score += 5
-            if score > 0:
-                scored.append((score, td))
+                w = idf.get(t)
+                if not w:
+                    continue
+                wtf = sum(_BM25_FIELD_WEIGHTS[f] * _st_tf(t, toks) for f, toks in ftoks.items())
+                if wtf <= 0:
+                    continue
+                s += w * (wtf * (_BM25_K1 + 1)) / (wtf + _BM25_K1 * (1 - _BM25_B + _BM25_B * dl / avgdl))
+            if s > 0:
+                scored.append((round(s, 3), td))
         return scored
 
     def _empty_match_hint(self, q: str, category_filter: str, limit: int) -> str:
@@ -219,12 +292,13 @@ class SearchToolsTool(Tool):
         총 도구 수 적으면 (≤ 20) 그냥 전체 목록 제공. 많으면 카테고리별 top 몇 개씩
         샘플링. 마지막에 명확한 다음 액션 (discover_tools / 다른 query) 안내.
         """
-        if not self._tools:
+        catalog = self._catalog()
+        if not catalog:
             return f"No tools available."
 
         from collections import defaultdict
         by_cat: dict[str, list[dict]] = defaultdict(list)
-        for td in self._tools:
+        for td in catalog:
             cat = (td.get("category") or td.get("metadata", {}).get("category") or "uncategorized").lower()
             by_cat[cat].append(td)
 
