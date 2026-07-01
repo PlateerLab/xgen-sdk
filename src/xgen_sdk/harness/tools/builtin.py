@@ -235,6 +235,14 @@ class SearchToolsTool(Tool):
         if not top:
             return ToolResult.success(self._empty_match_hint(q, category_filter, limit))
 
+        # promote-on-search — 검색이 곧 노출+무장. PD 2-step(search_tools → ToolSearch 승격
+        # → call)은 약모델이 승격 단계를 건너뛰고 search 만 무한반복하는 실패모드가 있다
+        # (deferred 도구는 tools= 배열에 없어 애초에 호출 자체가 불가). 매칭된 도구의 full
+        # schema 를 곧바로 state.tool_definitions 에 합류시켜 다음 턴에 이름으로 직접 호출
+        # 가능하게 한다. deferred 카탈로그는 유지 — 검색으로 짚은 것만 승격하므로 PD 의 lean
+        # 카탈로그 원칙과 양립(강제 tool_choice 같은 땜질 아님, 발견 흐름 자체를 1-step 화).
+        promoted = self._promote_matched([td for _s, td in top])
+
         used_aliases = [t for t in expanded_terms if t not in raw_terms]
         header = f"Matched {len(top)} of {len(scored)} tools"
         if used_aliases:
@@ -244,8 +252,38 @@ class SearchToolsTool(Tool):
             n = td.get("name", "?")
             d = (td.get("description") or "")[:120]
             lines.append(f"- {n} (score={s}): {d}")
-        # v1.11.4 — PD 정신: 결과 자체가 환경 노출. 다음 행동 권유 폐기.
+        if promoted:
+            lines.append("\nThese tools are now callable directly — invoke by name: "
+                         + ", ".join(promoted))
         return ToolResult.success("\n".join(lines))
+
+    def _promote_matched(self, matched: list[dict]) -> list[str]:
+        """매칭 도구를 state.tool_definitions 에 합류(promote) → 다음 턴 callable.
+        기존 ToolSearch 승격과 동일 경로(state.tool_schemas[name] → tool_definitions).
+        state_ref 없거나 이미 있으면 skip. 실패는 치명적 아님(검색 결과는 그대로)."""
+        st = self._state
+        if st is None:
+            return []
+        try:
+            defs = st.tool_definitions
+            if defs is None:
+                return []
+            have = {d.get("name") for d in defs}
+            schemas = getattr(st, "tool_schemas", None) or {}
+            promoted: list[str] = []
+            for td in matched:
+                name = td.get("name")
+                if not name or name in have:
+                    continue
+                schema = schemas.get(name) or td   # 캐시 우선, 없으면 검색결과 td 자체
+                defs.append(schema)
+                have.add(name)
+                promoted.append(name)
+            if promoted:
+                st.tool_definitions = defs
+            return promoted
+        except Exception:
+            return []
 
     def _score_terms(self, terms: list[str], category_filter: str) -> list[tuple[float, dict]]:
         """BM25F over {name, arg-names, description, arg-descriptions}.
