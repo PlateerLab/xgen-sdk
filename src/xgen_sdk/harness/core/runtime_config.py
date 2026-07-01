@@ -196,6 +196,62 @@ class RuntimeConfigMutator:
             applied += 1
         return applied
 
+    # ── 신호 기반 자가조정 (retry 경계 자동 제안) ────────────────
+    def propose_from_retry_signals(
+        self,
+        *,
+        score: Optional[float],
+        threshold: Optional[float],
+        feedback: str = "",
+        retry_count: int = 0,
+    ) -> int:
+        """judge 미달로 retry 직전, **신호로부터** 보수적 config 변경을 제안·적용.
+
+        하드코딩된 config 값을 박지 않는다. "어떤 knob 을 어느 방향으로" 는 신호가
+        정하고, "실제 값" 은 algebra 의 적응형 이웃 생성기(_gen_candidates)가 현재값
+        기준으로 뽑는다(타입-안전 경계 안에서). 게이트/적용/저널은 기존 _mutate 경유:
+          - mode="off"     → 아무것도 안 함(모든 하위 호출 no-op).
+          - mode="observe" → 제안만 proposals 에 기록.
+          - mode="act"     → legality 통과분만 라이브 적용 + inverse 저널.
+
+        신호→방향 매핑(보수적, 신호 없으면 아무 제안 안 함):
+          1. score 가 threshold 미달 → temperature 를 **현재값보다 낮은** 이웃으로
+             (더 결정적인 재시도). 후보 중 현재값 미만이 있을 때만.
+          2. 매 재시도 정체(score 정보 유무 무관, retry_count>=1) → validation_threshold
+             를 **현재값보다 낮은** 이웃으로 한 칸(무한 retry 완화 — 통과 문턱 낮춤).
+        반환 = 제안/적용된 move 수.
+        """
+        # off 모드면 후보 계산 자체를 건너뛴다(관측 가능한 부작용 0).
+        if self._mode == "off":
+            return 0
+
+        view = self._view()
+        proposed = 0
+
+        def _lower_neighbor(key: str) -> Any:
+            """현재값보다 낮은 가장 가까운 적응형 후보(없으면 None)."""
+            cur = view.get(key)
+            if not isinstance(cur, (int, float)):
+                return None
+            from ..forge.algebra import _gen_candidates
+            lowers = [c for c in _gen_candidates(key, cur) if isinstance(c, (int, float)) and c < cur]
+            return max(lowers) if lowers else None
+
+        below = (
+            isinstance(score, (int, float))
+            and isinstance(threshold, (int, float))
+            and score < threshold
+        )
+        if below:
+            t = _lower_neighbor("temperature")
+            if t is not None and self.set_scalar("temperature", t):
+                proposed += 1
+        if retry_count >= 1:
+            vt = _lower_neighbor("validation_threshold")
+            if vt is not None and self.set_scalar("validation_threshold", vt):
+                proposed += 1
+        return proposed
+
     # ── 롤백 (Inertia-Brake 동형) ────────────────────────────────
     def rollback(self) -> int:
         """저널의 inverse 를 역순 적용 → config 를 변이 이전으로 복원. 반환 = 되돌린 수."""

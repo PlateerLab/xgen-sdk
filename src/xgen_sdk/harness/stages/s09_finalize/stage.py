@@ -134,6 +134,13 @@ class FinalizeStage(Stage):
         else:
             state.final_output = formatter(state)
 
+        # ── 정책 차단 집행 (BUG-1 fix) ──────────────────────────────────
+        # Policy Gate(s05)가 block severity 위반을 탐지하면 state.policy_block_reason
+        # 과 state.policy_block_severity 를 세팅한다. content block 은 PipelineAbortError
+        # 를 던지지 않아 egress 가 그대로 진행되므로, 여기서 최종 출력을 억제해야 위반
+        # 텍스트(PII/금지패턴 포함)가 유출되지 않는다. severity=="warn" 이면 통과.
+        self._enforce_policy_block(state)
+
         # ── 빈 출력 fallback (v1.18.3) — retry 소진/마지막 턴 실패(provider 에러 등)로
         #   last_assistant_text 까지 비면 그대로 "" 를 확정해 다운스트림이 빈값을 받았다.
         #   런 중 만들어진 마지막 유효 산출물(직전 assistant 텍스트 → 마지막 도구 제출
@@ -182,6 +189,44 @@ class FinalizeStage(Stage):
             result["memory_extracted"] = await self._extract_memory(state)
 
         return result
+
+    # 정책 차단 시 최종 출력을 대체할 메시지의 단 하나의 default.
+    # stage_param `block_message` 로 override 가능 (매직 스트링 하드코딩 아님 —
+    # 값은 config 우선, 없을 때만 이 default 사용).
+    _DEFAULT_BLOCK_MESSAGE = (
+        "요청하신 응답이 콘텐츠 정책에 의해 차단되었습니다."
+    )
+
+    def _enforce_policy_block(self, state: PipelineState) -> None:
+        """Policy Gate 가 세팅한 block 신호를 소비해 최종 출력을 억제.
+
+        - severity=="block" 이면: state.final_output 을 config 의 block_message 로 대체.
+        - severity=="warn"/미차단이면: no-op (통과, 로그는 s05 에서 이미 남김).
+        차단 메시지는 stage_param `block_message` 에서 오며, 없으면 default 하나만 사용.
+        """
+        reason = getattr(state, "policy_block_reason", "") or ""
+        if not reason:
+            return
+        severity = (getattr(state, "policy_block_severity", "") or "").strip().lower()
+        # severity 신호가 명시됐고 block 이 아니면 통과 (warn/info).
+        if severity and severity != "block":
+            return
+
+        guard = getattr(state, "policy_block_guard", "") or ""
+        # 차단 메시지 = config 우선(override 가능), 없으면 default 하나.
+        block_message = self.get_param("block_message", state, self._DEFAULT_BLOCK_MESSAGE)
+        if not isinstance(block_message, str) or not block_message.strip():
+            block_message = self._DEFAULT_BLOCK_MESSAGE
+
+        suppressed_len = len(state.final_output or "")
+        state.final_output = block_message
+
+        # 무엇을(reason=패턴/PII 종류) · 어느 가드 · severity · 출력 억제됨 을 명시 로그.
+        logger.warning(
+            "[Finalize] 정책 차단 집행 — guard=%s, severity=%s, reason=%s "
+            "→ 최종 출력 억제(원본 %d자 폐기, block_message 대체)",
+            guard or "?", severity or "block", reason, suppressed_len,
+        )
 
     async def _extract_memory(self, state):
         try:

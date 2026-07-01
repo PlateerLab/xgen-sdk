@@ -122,7 +122,7 @@ class FakeProvider(LLMProvider):
 
     async def chat(self, messages, system=None, tools=None, temperature=0.7,
                    max_tokens=8192, stream=True, thinking=None,
-                   tool_choice=None) -> AsyncGenerator[ProviderEvent, None]:
+                   tool_choice=None, response_format=None) -> AsyncGenerator[ProviderEvent, None]:
         blob = f"{system or ''} {messages}"
         is_eval = self._judge is not None and ("criteria" in blob.lower() or "overall" in blob.lower())
         text = (f'{{"overall": {self._judge}, "scores": {{}}, "feedback": "ok"}}'

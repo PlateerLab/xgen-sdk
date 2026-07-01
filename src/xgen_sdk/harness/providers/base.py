@@ -61,6 +61,7 @@ class LLMProvider(ABC):
         stream: bool = True,
         thinking: Optional[dict] = None,
         tool_choice: Optional[str] = None,
+        response_format: Optional[dict] = None,
     ) -> AsyncGenerator[ProviderEvent, None]:
         """
         LLM API 호출. ProviderEvent를 스트리밍으로 yield.
@@ -73,6 +74,9 @@ class LLMProvider(ABC):
             max_tokens: 최대 토큰
             stream: 스트리밍 여부
             thinking: Extended thinking 설정 {"type": "enabled", "budget_tokens": N}
+            response_format: OpenAI-호환 structured output 강제 (예:
+                {"type": "json_schema", "json_schema": {...}}). supports_response_format()
+                가 True 인 provider 만 실제 적용. 미지원 provider 는 무시(soft 폴백).
         """
         ...
         yield  # type: ignore  # make it a generator
@@ -84,6 +88,13 @@ class LLMProvider(ABC):
     @abstractmethod
     def supports_thinking(self) -> bool:
         ...
+
+    # 출력 스키마 하드 강제 capability — OpenAI Chat Completions 의 response_format
+    # (json_schema/json_object) 를 지원하는 provider 만 True override. 기본 False =
+    # response_format 인자를 받아도 무시(system_prompt soft 지시만 유효). 호출부는
+    # 모델명이 아니라 이 capability 로 분기 → 하드코딩 없이 provider 종류로 판별.
+    def supports_response_format(self) -> bool:
+        return False
 
     # v0.11.22 — output_tokens 보정 확장점.
     # 일부 OpenAI 호환 프록시 / vLLM / LangChain adapter 조합에서는 stream 응답의 usage 가

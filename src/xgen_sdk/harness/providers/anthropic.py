@@ -58,7 +58,11 @@ class AnthropicProvider(LLMProvider):
         stream: bool = True,
         thinking: Optional[dict] = None,
         tool_choice: Optional[str] = None,
+        response_format: Optional[dict] = None,
     ) -> AsyncGenerator[ProviderEvent, None]:
+        # response_format: Anthropic Messages API 는 OpenAI 식 response_format 를
+        # 받지 않는다(supports_response_format()=False). 인자는 시그니처 정합/TypeError
+        # 방지용으로만 수용하고 무시 — 출력 스키마 강제는 system_prompt soft 지시로 폴백.
         body: dict[str, Any] = {
             "model": self._model,
             "messages": messages,

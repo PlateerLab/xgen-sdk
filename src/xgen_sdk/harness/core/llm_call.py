@@ -263,6 +263,17 @@ async def _single_call(
     elif (state.metadata or {}).get("force_tool_choice"):
         logger.warning("[LLM] force_tool_choice set but no tool_definitions — ignored")
 
+    # 출력 스키마 하드 강제 — 연결된 output_schema(config → stage_params.response_format)를
+    # OpenAI-호환 provider 의 response_format 으로 전달. capability 로 분기(모델명 하드코딩 X):
+    # 미지원 provider(예: Anthropic)는 None 으로 두어 system_prompt soft 지시로 폴백.
+    _response_format = _param("response_format", None)
+    if _response_format and not provider.supports_response_format():
+        logger.info(
+            "[LLM] response_format 설정됐으나 provider=%s 미지원 → system_prompt soft 폴백",
+            getattr(provider, "provider_name", "?"),
+        )
+        _response_format = None
+
     async for event in provider.chat(
         messages=state.messages,
         system=state.system_prompt or None,
@@ -272,6 +283,7 @@ async def _single_call(
         stream=stream,
         thinking=thinking,
         tool_choice=_tool_choice,
+        response_format=_response_format,
     ):
         if event.type == ProviderEventType.TEXT_DELTA:
             text_parts.append(event.text)

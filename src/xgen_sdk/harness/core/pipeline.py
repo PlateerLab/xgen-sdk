@@ -275,6 +275,12 @@ class Pipeline:
                             attempt=state.retry_count,
                             max_attempts=self.config.max_retries,
                         ))
+                        # v1.24 — 자가설정 seam 결선: judge 미달로 재시도 직전에
+                        # RuntimeConfigMutator 를 신호(judge 점수·threshold·retry 정체)로
+                        # 호출해 config 를 자가조정. 게이트는 config.runtime_self_govern:
+                        # off=no-op / observe=제안+로그만 / act=적용+저널. (planner dead
+                        # code 를 되살리지 않고 루프 retry 경계에 직접 결선.)
+                        await self._self_govern_on_retry(state)
 
             # v1.11.4 (2026-05-17) — synthesis_kick 전면 폐기.
             #
@@ -562,6 +568,51 @@ class Pipeline:
             if _pending:
                 state.system_prompt = _sp_orig
                 state.fetched_pending = []
+
+    async def _self_govern_on_retry(self, state: PipelineState) -> None:
+        """v1.24 — retry 경계 자가설정 결선. RuntimeConfigMutator 를 신호로 호출.
+
+        BUG-3 근본원인 수정: config 자가변경 엔진(RuntimeConfigMutator)의 유일 런타임
+        트리거였던 s00 planner 가 v1.1.0 에서 dead code 로 죽어, runtime_self_govern="act"
+        여도 self-forge 가 호출될 경로가 없었다. 여기서 루프의 retry 경계(judge 미달 →
+        재시도 직전)에 mutator 를 **직접** 결선한다.
+
+        하드코딩 없음: 변경 방향은 신호(validation_score vs threshold, retry_count)가
+        정하고, 실제 값은 mutator→algebra 의 적응형 이웃 생성기가 현재 config 기준으로
+        뽑는다. 게이트/적용/저널은 mutator 내부(runtime_self_govern):
+          off=no-op / observe=제안+로그만 / act=legality 통과분 적용+inverse 저널.
+
+        자가변경은 EventLog(PlanningEvent, source="runtime_self_govern")로 흐르게 하고,
+        mutator 핸들을 metadata 로 노출(이식측 SSE 중계가 config_diff 로 캔버스에 push).
+        """
+        mutator = state.get_config_mutator()
+        if mutator.mode == "off":
+            return
+
+        threshold = getattr(self.config, "validation_threshold", None)
+        n = mutator.propose_from_retry_signals(
+            score=state.validation_score,
+            threshold=threshold,
+            feedback=state.validation_feedback,
+            retry_count=state.retry_count,
+        )
+        if n <= 0:
+            return
+
+        diff = mutator.diff()
+        logger.info(
+            "[Pipeline] runtime_self_govern mode=%s — retry 경계 자가조정 %d건: %s",
+            mutator.mode, n, diff,
+        )
+        # 이식측 SSE 중계가 config_diff 이벤트로 캔버스에 push 하도록 핸들 노출.
+        state.metadata["config_mutator"] = mutator
+        # 자가변경을 이벤트 스트림에 남김 (무엇을·왜·어떻게 before→after 는 diff 문자열에).
+        from ..events.types import PlanningEvent
+        await state.emit_verbose(PlanningEvent(
+            reasoning="; ".join(diff),
+            source="runtime_self_govern",
+            iteration=state.retry_count,
+        ))
 
     def _find_loop_s00(self) -> Optional[Stage]:
         """v0.16.6 — Planner(role="orchestrator_planner") 인스턴스 조회.

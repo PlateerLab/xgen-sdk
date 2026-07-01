@@ -162,6 +162,9 @@ class PipelineState:
     # Policy Gate 가 차단한 경우 이유/Guard 이름. ThresholdDecide 가 이 신호로 loop 종료.
     policy_block_reason: str = ""
     policy_block_guard: str = ""
+    # 차단을 건 Guard 의 severity ("block"/"warn"/"info"). s09_finalize 가 이 신호를
+    # 소비해 block 이면 최종 출력을 억제. 값·동작은 Guard config(severity)에서 나옴.
+    policy_block_severity: str = ""
 
     # --- HITL (Human-In-The-Loop) 승인 큐 — v0.24.0 ---
     # approval_id → Future. HITLGuard 가 `await_approval(id, timeout)` 으로 대기,

@@ -412,17 +412,23 @@ class ContentGuard(Guard):
         "credit_card": re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"),
     }
 
+    # 위반 시 severity — 조립부(bridge)가 hard_block→"block", 아니면 "warn" 를
+    # params 로 넘긴다. 미지정 시 이 default 하나만 사용(override 가능).
+    _DEFAULT_SEVERITY = "block"
+
     def __init__(
         self,
         blocked_patterns: Optional[list[str]] = None,
         detect_pii: bool = False,
         check_target: str = "both",
+        severity: str = "",
     ):
         self._patterns: list[re.Pattern] = [
             re.compile(p, re.IGNORECASE) for p in (blocked_patterns or [])
         ]
         self._detect_pii = detect_pii
         self._check_target = check_target if check_target in ("input", "output", "both") else "both"
+        self._severity = severity if severity in ("block", "warn", "info") else self._DEFAULT_SEVERITY
 
     @property
     def name(self) -> str:
@@ -457,6 +463,12 @@ class ContentGuard(Guard):
                 options=["input", "output", "both"],
                 default="both",
             ),
+            FieldSchema(
+                id="severity",
+                type="select",
+                options=["block", "warn", "info"],
+                default=cls._DEFAULT_SEVERITY,
+            ),
         ]
 
     def configure(self, config: dict[str, Any]) -> None:
@@ -469,6 +481,10 @@ class ContentGuard(Guard):
             target = str(config["check_target"])
             if target in ("input", "output", "both"):
                 self._check_target = target
+        if "severity" in config:
+            sev = str(config["severity"])
+            if sev in ("block", "warn", "info"):
+                self._severity = sev
 
     def check(self, state: Any, context: HookContext) -> GuardResult:
         if not self._patterns and not self._detect_pii:
@@ -506,7 +522,7 @@ class ContentGuard(Guard):
                         passed=False,
                         guard_name=self.name,
                         reason=f"금지 패턴 감지 ({target}): {snippet!r}",
-                        severity="block",
+                        severity=self._severity,
                     )
             if self._detect_pii:
                 for pii_type, p in self._PII_PATTERNS.items():
@@ -515,7 +531,7 @@ class ContentGuard(Guard):
                             passed=False,
                             guard_name=self.name,
                             reason=f"PII 감지 ({target}/{pii_type})",
-                            severity="block",
+                            severity=self._severity,
                         )
         return GuardResult(passed=True, guard_name=self.name)
 

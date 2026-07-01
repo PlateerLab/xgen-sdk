@@ -168,6 +168,8 @@ class PolicyGateStage(Stage):
         if blocked:
             state.policy_block_reason = blocked.reason
             state.policy_block_guard = blocked.guard_name
+            # severity 는 Guard config 에서 왔다(하드코딩 아님). s09_finalize 가 소비.
+            state.policy_block_severity = getattr(blocked, "severity", "block") or "block"
             logger.warning(
                 "[PolicyGate] %s 차단 @ %s — %s",
                 blocked.guard_name, hook.value, blocked.reason,
@@ -175,6 +177,15 @@ class PolicyGateStage(Stage):
             if hook == HookPoint.LOOP_BOUNDARY:
                 state.loop_decision = "complete"
             await self._emit_policy_blocked(state, blocked, hook)
+        else:
+            # warn severity 위반은 통과시키되 감사 로그 + 이벤트로 남긴다(조용히 삼키지 않음).
+            for r in results:
+                if not r.passed and r.severity == "warn":
+                    logger.warning(
+                        "[PolicyGate] %s 경고 @ %s — %s (통과)",
+                        r.guard_name, hook.value, r.reason,
+                    )
+                    await self._emit_policy_blocked(state, r, hook)
         return {
             "hook": hook.value,
             "guards_checked": len(chain.guards),

@@ -110,6 +110,11 @@ class OpenAIProvider(LLMProvider):
     def supports_thinking(self) -> bool:
         return False
 
+    def supports_response_format(self) -> bool:
+        # OpenAI Chat Completions 계열(및 vLLM/Qwen 등 OpenAI-호환 endpoint)은
+        # response_format(json_schema/json_object)로 출력 스키마를 하드 강제 가능.
+        return True
+
     # v0.11.22 — stream_options 를 수신하지 못하는 프록시/호환 엔드포인트에서
     # output_tokens=0 이 고정되는 문제를 tiktoken 으로 보정. tiktoken 미설치 환경은
     # base class 의 chars/3 휴리스틱으로 fallback.
@@ -140,6 +145,7 @@ class OpenAIProvider(LLMProvider):
         stream: bool = True,
         thinking: Optional[dict] = None,
         tool_choice: Optional[str] = None,
+        response_format: Optional[dict] = None,
     ) -> AsyncGenerator[ProviderEvent, None]:
         # Anthropic 메시지 포맷 → OpenAI 포맷 변환
         oai_messages = _convert_messages(messages, system)
@@ -152,6 +158,13 @@ class OpenAIProvider(LLMProvider):
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        # 출력 스키마 하드 강제 — 연결된 output_schema(config)에서 온 JSON Schema.
+        # {"type":"json_schema", "json_schema":{...}} 또는 {"type":"json_object"}.
+        # 소스에서 온 dict 를 그대로 전달(스키마 값 하드코딩 없음).
+        if response_format:
+            body["response_format"] = response_format
+            logger.info("[openai] 출력스키마 하드강제(response_format) 적용: type=%s",
+                        response_format.get("type") if isinstance(response_format, dict) else "?")
         if oai_tools:
             body["tools"] = oai_tools
             # v0.11.19 — tool_choice 전달 (auto/required/none 또는 {"type":"function","function":{"name":...}})
