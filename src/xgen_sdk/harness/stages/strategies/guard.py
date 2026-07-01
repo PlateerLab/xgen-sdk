@@ -848,9 +848,19 @@ def _discover_guards_once() -> None:
 
     for ep in eps:
         try:
+            # 이중패키지 방어: 이 그룹 이름("xgen_harness.guards")은 플러그인 계약이라
+            # 유지하지만, 런타임에 standalone `xgen_harness` 배포가 co-install 돼 있으면
+            # 같은 그룹에 자기 Guard(base=xgen_harness...Guard)를 등록한다. 그 클래스는
+            # 여기의 Guard(base=xgen_sdk...Guard) 서브클래스가 아니라 issubclass 실패 →
+            # 매 부팅 WARNING 폭탄. 타겟 모듈이 이 vendored 트리(xgen_sdk.)가 아니면
+            # 로드 전 조용히 skip 한다. (외부 3rd-party Guard 는 아래 issubclass 로 통과.)
+            target = ep.value or ""
+            if target.startswith("xgen_harness.") or target.startswith("xgen_harness:"):
+                logger.debug("[guards] stale sibling entry skip: %s", target)
+                continue
             cls = ep.load()
             if not isinstance(cls, type) or not issubclass(cls, Guard):
-                logger.warning("[guards] %s 는 Guard 서브클래스가 아님 — skip", ep.value)
+                logger.debug("[guards] %s 는 Guard 서브클래스가 아님 — skip", ep.value)
                 continue
             key = ep.name
             if key in _DISCOVERED and _DISCOVERED[key] is not cls:
