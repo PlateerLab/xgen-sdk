@@ -141,18 +141,31 @@ class FinalizeStage(Stage):
         # 텍스트(PII/금지패턴 포함)가 유출되지 않는다. severity=="warn" 이면 통과.
         self._enforce_policy_block(state)
 
-        # ── 빈 출력 fallback (v1.18.3) — retry 소진/마지막 턴 실패(provider 에러 등)로
-        #   last_assistant_text 까지 비면 그대로 "" 를 확정해 다운스트림이 빈값을 받았다.
-        #   런 중 만들어진 마지막 유효 산출물(직전 assistant 텍스트 → 마지막 도구 제출
-        #   payload)로 폴백해, 부분 결과라도 보존한다. 유효 출력이 있으면 동작 불변.
+        # ── 빈 출력 처리 (v1.18.3 → 합성 우선 v1.x) ──────────────────────────
+        #   에이전트가 마지막 턴에 텍스트 합성 없이 도구호출로만 끝나면 final_output 이
+        #   빈값이 된다(약모델 실패모드: 도구수집만 하고 최종답 합성 안 함).
+        #   ① 먼저 aux LLM 로 "대화·도구결과 근거로 최종답을 지금 작성" 을 1회 합성한다
+        #      (finalize 의 자연스러운 책임 — 원시 도구제출 보존보다 항상 나음).
+        #   ② 합성이 실패/빈값일 때만 기존 _fallback_output(마지막 유효 응답/제출 payload)로.
+        #   합성은 stage_param `finalize_synthesize`(기본 True) 로 on/off (하드코딩 아님).
         if not (state.final_output or "").strip():
-            _fb = self._fallback_output(state)
-            if _fb:
-                state.final_output = _fb
-                logger.warning(
-                    "[Finalize] 최종 출력 빈값 → fallback 보존(len=%d) — "
-                    "마지막 유효 응답/제출 payload 사용", len(_fb),
+            synthesized = ""
+            if bool(self.get_param("finalize_synthesize", state, True)):
+                synthesized = await self._synthesize_final_output(state)
+            if synthesized:
+                state.final_output = synthesized
+                logger.info(
+                    "[Finalize] 최종 출력 빈값 → aux 합성으로 최종답 생성(len=%d) — "
+                    "에이전트가 텍스트 없이 도구호출로 종료됨", len(synthesized),
                 )
+            else:
+                _fb = self._fallback_output(state)
+                if _fb:
+                    state.final_output = _fb
+                    logger.warning(
+                        "[Finalize] 최종 출력 빈값 → fallback 보존(len=%d) — "
+                        "합성 미수행/실패, 마지막 유효 응답/제출 payload 사용", len(_fb),
+                    )
 
         # 2. 메트릭스 이벤트
         metrics = self._build_metrics(state)
@@ -242,6 +255,98 @@ class FinalizeStage(Stage):
         except Exception as e:
             logger.warning("[Finalize] memory_extract 실패 (graceful skip): %s", e)
             return None
+
+    # 합성 프롬프트 default — stage_param `finalize_synthesize_instruction` 로 override 가능.
+    _DEFAULT_SYNTHESIZE_INSTRUCTION = (
+        "Based on the conversation and tool results above, write the complete final "
+        "answer for the user now. Do not call any tools; produce the finished answer "
+        "text only."
+    )
+
+    async def _synthesize_final_output(self, state: PipelineState) -> str:
+        """빈 최종출력 시 aux LLM 로 최종답을 1회 합성.
+
+        에이전트가 도구수집만 하고 텍스트 합성 없이 끝난 경우, 대화·도구결과를 근거로
+        사용자에게 줄 완결된 최종답을 aux_call 로 만든다. 도구 없이 순수 텍스트 요청(재귀
+        금지, 1회만). 실패/빈값이면 "" 반환 → 호출부가 기존 fallback 으로 넘어감.
+        """
+        try:
+            from ...core.llm_call import aux_call
+            from ...core.runtime_defaults import resolve_with_default
+
+            transcript = self._render_transcript(state)
+            if not transcript.strip():
+                return ""
+            instruction = self.get_param(
+                "finalize_synthesize_instruction", state, self._DEFAULT_SYNTHESIZE_INSTRUCTION,
+            )
+            if not isinstance(instruction, str) or not instruction.strip():
+                instruction = self._DEFAULT_SYNTHESIZE_INSTRUCTION
+            prompt = f"{transcript}\n\n{instruction}"
+
+            # 최종답은 완결 텍스트라 aux floor(500)가 아니라 본문 응답 예산(config.max_tokens)을
+            # 존중한다. config sentinel(None)은 runtime default 로 폴백.
+            cfg = state.config
+            max_tokens = int(resolve_with_default(
+                cfg.max_tokens if cfg else None, "max_tokens",
+            ))
+
+            return await aux_call(
+                state,
+                stage_id=f"{self.stage_id}.synthesize",
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Finalize] 최종답 합성 실패 (graceful → fallback): %s", e)
+            return ""
+
+    @staticmethod
+    def _render_transcript(state: PipelineState) -> str:
+        """state.messages(대화 + 도구결과)를 합성 프롬프트용 텍스트로 평탄화.
+
+        aux_call 은 단일 prompt 문자열만 받으므로 구조화 메시지를 role 라벨 텍스트로 편다.
+        assistant 텍스트 · tool_use(도구호출) · tool_result(도구결과) · user 텍스트 보존.
+        """
+        import json as _json
+
+        lines: list[str] = []
+        for m in getattr(state, "messages", None) or []:
+            role = (m.get("role") if isinstance(m, dict) else getattr(m, "role", "")) or ""
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            if isinstance(content, str):
+                if content.strip():
+                    lines.append(f"{role}: {content.strip()}")
+                continue
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    txt = str(block or "").strip()
+                    if txt:
+                        lines.append(f"{role}: {txt}")
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    txt = str(block.get("text", "")).strip()
+                    if txt:
+                        lines.append(f"{role}: {txt}")
+                elif btype == "tool_use":
+                    name = block.get("name", "")
+                    inp = block.get("input", "")
+                    body = inp if isinstance(inp, str) else _json.dumps(inp, ensure_ascii=False)
+                    lines.append(f"{role} [tool_call {name}]: {body}")
+                elif btype == "tool_result":
+                    inner = block.get("content", "")
+                    if isinstance(inner, list):
+                        inner = "".join(
+                            b.get("text", "") for b in inner
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    body = inner if isinstance(inner, str) else _json.dumps(inner, ensure_ascii=False)
+                    if str(body).strip():
+                        lines.append(f"[tool_result]: {str(body).strip()}")
+        return "\n".join(lines)
 
     @staticmethod
     def _fallback_output(state: PipelineState) -> str:
