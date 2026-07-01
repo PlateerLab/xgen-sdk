@@ -9,9 +9,10 @@ S07 Act — 도구 실행 (v0.14.0 번호 시프트: s08_act → s07_act)
 """
 
 import asyncio
+import json
 import logging
 import traceback
-from typing import Any
+from typing import Any, Optional
 
 from ...core.stage import Stage, StrategyInfo
 from ...core.state import PipelineState
@@ -22,6 +23,12 @@ logger = logging.getLogger("harness.stage.execute")
 
 TOOL_TIMEOUT_DEFAULT = 60.0
 RESULT_BUDGET_DEFAULT = 50_000
+# dedup 캐시 항목당 저장 상한(chars) — stage_param `tool_dedup_cache_max_chars` 로 override.
+DEDUP_CACHE_ENTRY_MAX_CHARS = 8_000
+# dedup 제외 메타도구 — 카탈로그/PD 스토어가 런 중 변해 동일입력≠동일결과 (promote-on-search),
+# fetch_pd 는 truncate 저장 시 원본 재접근 목적이 깨짐.
+DEDUP_EXEMPT_TOOLS = frozenset({"search_tools", "discover_tools", "fetch_pd"})
+DEDUP_CACHED_PREFIX = "(cached: identical call already executed this run)\n"
 
 
 class ExecuteStage(Stage):
@@ -188,6 +195,35 @@ class ExecuteStage(Stage):
             # ParameterResolver로 누락된 필수 파라미터를 context에서 채움
             tool_input = await self._enrich_with_capability(tool_name, tool_input, state)
 
+            # duplicate tool-call short-circuit — 같은 런에서 완전 동일 (tool_name, 정규화
+            # JSON input) 재호출이면 실행 없이 캐시 반환. 비멱등 도구도 동일입력 재호출은
+            # 이중실행(예: 같은 메일 2번 발송) 방지라 오히려 안전. gate: `tool_dedup` (기본 True).
+            # parallel_read 동일 배치 내 경쟁은 miss 허용 (교차 라운드 반복이 주 타깃).
+            dedup_key = self._dedup_key(tool_name, tool_input, state)
+            if dedup_key is not None:
+                _cached = state.metadata.get("tool_dedup_cache", {}).get(dedup_key)
+                if _cached is not None:
+                    cached_text = DEDUP_CACHED_PREFIX + _cached
+                    state.add_tool_result(tool_use_id, cached_text, is_error=False)
+                    if state.event_emitter:
+                        _src = (state.metadata.get("tool_source_of") or {}).get(tool_name, "")
+                        await state.event_emitter.emit(ToolResultEvent(
+                            tool_use_id=tool_use_id,
+                            tool_name=tool_name,
+                            result=cached_text[:500],
+                            is_error=False,
+                            tool_source=_src,
+                        ))
+                    await state.emit_verbose(StageSubstepEvent(
+                        stage_id=self.stage_id, substep="tool_call_cached",
+                        meta={"tool_name": tool_name, "chars": len(cached_text)},
+                    ))
+                    logger.info("[Execute] dedup hit — %s served from cache (no re-execution)", tool_name)
+                    return {
+                        "tool_name": tool_name, "success": True,
+                        "chars": len(cached_text), "cached": True,
+                    }, len(cached_text)
+
             await state.emit_verbose(StageSubstepEvent(
                 stage_id=self.stage_id, substep="tool_call_start",
                 meta={"tool_name": tool_name, "tool_use_id": tool_use_id},
@@ -269,6 +305,14 @@ class ExecuteStage(Stage):
             except Exception as _se:
                 logger.debug("[Execute] auto-load skill skip for %s: %s", tool_name, _se)
 
+            # dedup 캐시 저장 — 성공 결과만 (실패는 일시 오류 재시도 여지 + streak 가이드가 담당).
+            # 누적 트림 전 시점 저장: 다른 라운드의 예산 상태가 replay 에 새지 않게.
+            if dedup_key is not None:
+                _cap = int(self.get_param(
+                    "tool_dedup_cache_max_chars", state, DEDUP_CACHE_ENTRY_MAX_CHARS,
+                ))
+                state.metadata.setdefault("tool_dedup_cache", {})[dedup_key] = result_text[:_cap]
+
             # 누적 예산 초과 시 2 차 방어 (여러 작은 결과 합이 큰 경우) — 기존 하드 트림 유지.
             chars = len(result_text)
             if current_chars + chars > result_budget:
@@ -349,6 +393,23 @@ class ExecuteStage(Stage):
                 f"and note the limitation.]"
             )
         return error_msg
+
+    def _dedup_key(
+        self, tool_name: str, tool_input: dict, state: PipelineState,
+    ) -> Optional[str]:
+        """dedup 캐시 키 (tool_name + 정규화 JSON input). None=dedup 비대상."""
+        gate = self.get_param("tool_dedup", state, None)
+        if gate is None:
+            gate = getattr(getattr(state, "config", None), "tool_dedup", None)
+        if gate is not None and not bool(gate):
+            return None
+        if tool_name in DEDUP_EXEMPT_TOOLS:
+            return None
+        try:
+            canon = json.dumps(tool_input or {}, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            return None
+        return f"{tool_name}\n{canon}"
 
     def _resolve_read_only_hint(
         self, tool_name: str, state: PipelineState, tool_registry: dict,

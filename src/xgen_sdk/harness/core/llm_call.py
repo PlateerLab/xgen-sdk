@@ -30,6 +30,18 @@ RETRY_DELAYS = {
 }
 DEFAULT_MAX_RETRIES = 3
 
+# Loop budget hint — 본문 호출마다 system suffix 로 현재/최대 라운드 고지 (per-call 계산,
+# 비축적 — state.system_prompt 불변). gate: stage_params["s00_harness"]["loop_budget_hint"]
+# 또는 config.loop_budget_hint (기본 True). LLM-facing 텍스트라 영어.
+LOOP_BUDGET_HINT_TEMPLATE = (
+    "[Tool-use round {current} of {max}. If you already have enough information, "
+    "stop calling tools and write the complete final answer now.]"
+)
+LOOP_BUDGET_HINT_FINAL_TEMPLATE = (
+    "[Tool-use round {current} of {max}. This is the final round — do not call any "
+    "more tools. You must write the complete final answer now.]"
+)
+
 
 async def call_main_llm_streaming(
     state: PipelineState,
@@ -187,6 +199,35 @@ async def _call_with_retry(
     raise last_error or PipelineAbortError("LLM call failed after retries", stage_id)
 
 
+def _resolve_effective_max_iterations(state: PipelineState) -> int:
+    """Pipeline Phase B 의 effective_max_iter 와 동일 규칙 (orchestrator override → runtime floor)."""
+    from .orchestrator_registry import get_orchestrator
+    from .runtime_defaults import resolve_with_default
+
+    orch_hint = ((state.metadata or {}).get("orchestrator_hint") or "").strip().lower()
+    orch_spec = get_orchestrator(orch_hint) or get_orchestrator("iterative")
+    if orch_spec and orch_spec.max_iterations_override is not None:
+        return int(orch_spec.max_iterations_override)
+    cfg_max = state.config.max_iterations if state.config else None
+    return int(resolve_with_default(cfg_max, "max_iterations"))
+
+
+def _loop_budget_hint(state: PipelineState, *, enabled: bool, tool_choice: Any) -> Optional[str]:
+    """이번 호출에 붙일 loop budget hint. None=붙이지 않음 (게이트 OFF / 도구 없음 / 루프 밖)."""
+    if not enabled or not state.tool_definitions:
+        return None
+    if tool_choice not in (None, "auto"):
+        return None  # 강제 tool_choice(discovery_first 등)와 "지금 답하라" 는 모순
+    current = int(getattr(state, "loop_iteration", 0) or 0)
+    if current < 1:
+        return None
+    max_iter = _resolve_effective_max_iterations(state)
+    if max_iter < 1:
+        return None
+    template = LOOP_BUDGET_HINT_FINAL_TEMPLATE if current >= max_iter else LOOP_BUDGET_HINT_TEMPLATE
+    return template.format(current=current, max=max_iter)
+
+
 async def _single_call(
     state: PipelineState,
     *,
@@ -274,9 +315,22 @@ async def _single_call(
         )
         _response_format = None
 
+    # loop budget hint — per-call suffix, 원본 state.system_prompt 비변경 (비축적)
+    _hint_gate = _param(
+        "loop_budget_hint", getattr(config, "loop_budget_hint", None) if config else None,
+    )
+    _budget_hint = _loop_budget_hint(
+        state,
+        enabled=True if _hint_gate is None else bool(_hint_gate),
+        tool_choice=_tool_choice,
+    )
+    _system = state.system_prompt or None
+    if _budget_hint:
+        _system = f"{_system}\n\n{_budget_hint}" if _system else _budget_hint
+
     async for event in provider.chat(
         messages=state.messages,
-        system=state.system_prompt or None,
+        system=_system,
         tools=state.tool_definitions or None,
         temperature=temperature,
         max_tokens=max_tokens,
