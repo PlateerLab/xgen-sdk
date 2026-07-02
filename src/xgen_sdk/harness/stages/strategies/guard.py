@@ -26,7 +26,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ..interfaces import Strategy
 
@@ -403,6 +403,13 @@ class ContentGuard(Guard):
 
     hook_points: PRE_MAIN (입력 검사) / POST_RESPONSE (출력 검사).
     check_target 파라미터로 input / output / both 선택.
+
+    pii_allowlist — 워크플로우가 정당하게 설정한 운영 식별자(예: send_email
+    수신/발신 이메일)를 PII 차단 예외로 둔다. PII 패턴에 매치되더라도 매치값이
+    전부 allowlist 에 있으면 통과, allowlist 밖 매치가 하나라도 있으면 차단
+    (진짜 제3자 PII 는 계속 차단). blocked_patterns 는 예외 대상 아님(명시 금지어).
+    allowlist 소스 두 경로: configure(params["pii_allowlist"]) + 런타임
+    state.metadata["pii_allowlist"] (이식측 동적 주입). 대소문자 무시.
     """
 
     _PII_PATTERNS: dict[str, re.Pattern] = {
@@ -422,6 +429,7 @@ class ContentGuard(Guard):
         detect_pii: bool = False,
         check_target: str = "both",
         severity: str = "",
+        pii_allowlist: Optional[Iterable[str]] = None,
     ):
         self._patterns: list[re.Pattern] = [
             re.compile(p, re.IGNORECASE) for p in (blocked_patterns or [])
@@ -429,6 +437,11 @@ class ContentGuard(Guard):
         self._detect_pii = detect_pii
         self._check_target = check_target if check_target in ("input", "output", "both") else "both"
         self._severity = severity if severity in ("block", "warn", "info") else self._DEFAULT_SEVERITY
+        self._pii_allowlist: set[str] = self._normalize_allowlist(pii_allowlist)
+
+    @staticmethod
+    def _normalize_allowlist(values: Optional[Iterable[str]]) -> set[str]:
+        return {str(v).strip().lower() for v in (values or []) if v is not None and str(v).strip()}
 
     @property
     def name(self) -> str:
@@ -469,6 +482,11 @@ class ContentGuard(Guard):
                 options=["block", "warn", "info"],
                 default=cls._DEFAULT_SEVERITY,
             ),
+            FieldSchema(
+                id="pii_allowlist",
+                type="tag_input",
+                default=[],
+            ),
         ]
 
     def configure(self, config: dict[str, Any]) -> None:
@@ -485,6 +503,17 @@ class ContentGuard(Guard):
             sev = str(config["severity"])
             if sev in ("block", "warn", "info"):
                 self._severity = sev
+        if "pii_allowlist" in config:
+            self._pii_allowlist = self._normalize_allowlist(config.get("pii_allowlist"))
+
+    def _effective_pii_allowlist(self, state: Any) -> set[str]:
+        """configure() 로 받은 allowlist + 런타임 state.metadata["pii_allowlist"] 병합."""
+        allow = set(self._pii_allowlist)
+        meta = getattr(state, "metadata", None) or {}
+        runtime = meta.get("pii_allowlist") if isinstance(meta, dict) else None
+        if runtime:
+            allow |= self._normalize_allowlist(runtime)
+        return allow
 
     def check(self, state: Any, context: HookContext) -> GuardResult:
         if not self._patterns and not self._detect_pii:
@@ -525,8 +554,11 @@ class ContentGuard(Guard):
                         severity=self._severity,
                     )
             if self._detect_pii:
+                allow = self._effective_pii_allowlist(state)
                 for pii_type, p in self._PII_PATTERNS.items():
-                    if p.search(text):
+                    for m in p.finditer(text):
+                        if m.group(0).strip().lower() in allow:
+                            continue
                         return GuardResult(
                             passed=False,
                             guard_name=self.name,
