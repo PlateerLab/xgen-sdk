@@ -228,26 +228,32 @@ class RuntimeConfigMutator:
         view = self._view()
         proposed = 0
 
-        def _lower_neighbor(key: str) -> Any:
-            """현재값보다 낮은 가장 가까운 적응형 후보(없으면 None)."""
-            cur = view.get(key)
-            if not isinstance(cur, (int, float)):
+        def _num(v: Any) -> Optional[float]:
+            try:
+                return float(v) if v is not None and v != "" else None
+            except (TypeError, ValueError):
+                return None
+
+        def _lower_neighbor(key: str, fallback: Any = None) -> Any:
+            """유효 현재값(config 값, sentinel 이면 fallback)보다 낮은 가장 가까운 적응형 후보."""
+            cur = _num(view.get(key))
+            if cur is None:
+                cur = _num(fallback)
+            if cur is None:
                 return None
             from ..forge.algebra import _gen_candidates
             lowers = [c for c in _gen_candidates(key, cur) if isinstance(c, (int, float)) and c < cur]
             return max(lowers) if lowers else None
 
-        below = (
-            isinstance(score, (int, float))
-            and isinstance(threshold, (int, float))
-            and score < threshold
-        )
-        if below:
-            t = _lower_neighbor("temperature")
+        _score = _num(score)
+        _threshold = _num(threshold)
+        if _score is not None and _threshold is not None and _score < _threshold:
+            from .runtime_defaults import resolve_with_default
+            t = _lower_neighbor("temperature", resolve_with_default(None, "temperature", 0.7))
             if t is not None and self.set_scalar("temperature", t):
                 proposed += 1
         if retry_count >= 1:
-            vt = _lower_neighbor("validation_threshold")
+            vt = _lower_neighbor("validation_threshold", _threshold)
             if vt is not None and self.set_scalar("validation_threshold", vt):
                 proposed += 1
         return proposed
