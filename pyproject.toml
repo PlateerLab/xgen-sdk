@@ -1,6 +1,6 @@
 [project]
 name = "xgen-sdk"
-version = "1.27.8"
+version = "1.27.9"
 description = "XGen Platform Shared SDK — unified DB, Config, Storage, Auth, Quota, Notification, and LLM Catalog for agent and RAG services"
 readme = "README.md"
 requires-python = ">=3.11"

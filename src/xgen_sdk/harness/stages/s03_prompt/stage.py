@@ -307,9 +307,15 @@ class SystemPromptStage(Stage):
             files_attached = list(
                 state.metadata.get("files") or []
             )
+        # 출력 채널 — result 하류 종단(자동 발송/출력 sink). 이식측이 state.metadata 에
+        # output_channels(+_meta) 를 박으면 다른 자원과 동일 경로로 노출(입력 자원과 대칭).
+        output_channels_attached = list(
+            state.metadata.get("output_channels") or []
+        )
 
         if (rag_collections_attached or ontology_collections_attached
-                or db_connections_attached or files_attached):
+                or db_connections_attached or files_attached
+                or output_channels_attached):
             # v1.6 — Anthropic Skills frontmatter Level 1 패턴 isomorphic.
             # 메타 (지도) 만 노출 — name + description + total_documents 등.
             # 도구 이름 / 호출 가이던스는 박지 않음 — 도구는 system_prompt 의 <available_tools>
@@ -456,6 +462,21 @@ class SystemPromptStage(Stage):
                         line += f" ({tool_count} tools)"
                     if when:
                         line += f": {when[:80]}"
+                    lines.append(line)
+            # 출력 채널 — files 와 대칭(입력은 자동 주입, 출력은 자동 전달). 사실만 노출,
+            # 행동 강제 톤 없음. 모든 output_channel 에 동일 적용되는 일반 한 줄.
+            if output_channels_attached:
+                lines.append(
+                    "- Output channels (your finished answer is delivered here automatically — "
+                    "no tool call needed):"
+                )
+                oc_meta = state.metadata.get("output_channels_meta") or {}
+                for ch in output_channels_attached:
+                    m = oc_meta.get(ch, {}) if isinstance(oc_meta.get(ch), dict) else {}
+                    desc = (m.get("description") or "").strip()
+                    line = f"  · {ch}"
+                    if desc:
+                        line += f": {desc}"
                     lines.append(line)
             lines.append("</active_resources>")
             ref_section = "\n".join(lines)
