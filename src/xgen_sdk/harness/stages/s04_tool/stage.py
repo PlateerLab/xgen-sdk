@@ -105,6 +105,12 @@ class ToolIndexStage(Stage):
         tool_source_filters: dict[str, dict] = (
             self.get_param("tool_source_filters", state, {}) or {}
         )
+        # v1.27.8 — per-run source gate. None = 모든 소스(기존 동작). list 면 그 source_id 만
+        # 카탈로그 나열. 게이트된 소스도 selected_tools 로 이름 명시된 도구는 통과(선택 의도 보존).
+        _allow_raw = self.get_param("source_allowlist", state, None)
+        source_allowlist: Optional[set[str]] = None
+        if isinstance(_allow_raw, (list, tuple, set)):
+            source_allowlist = {str(s) for s in _allow_raw}
         # 도구별 description 오버라이드 — 사용자가 s04 UI 에서 도구 설명을 직접 고침.
         # { tool_name: "설명" }. LLM 이 도구를 고를 때 읽는 텍스트를 사람이 손본다.
         # 빈 값/미설정이면 소스가 준 원본 description 을 그대로 쓴다. eager / deferred /
@@ -162,7 +168,11 @@ class ToolIndexStage(Stage):
         sources = list(get_tool_sources()) + list(getattr(state, "extra_tool_sources", None) or [])
         await state.emit_verbose(StageSubstepEvent(
             stage_id=self.stage_id, substep="sources_discover_start",
-            meta={"source_count": len(sources), "explicit_selection": has_explicit_selection},
+            meta={
+                "source_count": len(sources), "explicit_selection": has_explicit_selection,
+                "source_allowlist": (sorted(source_allowlist)
+                                     if source_allowlist is not None else None),
+            },
         ))
 
         for src in sources:
@@ -171,6 +181,11 @@ class ToolIndexStage(Stage):
             # 빈 리스트 = 그 source 자체를 카탈로그에서 완전 제외 (eager 도 deferred 도 X)
             if sub_allow is not None and len(sub_allow) == 0:
                 continue
+            # source_allowlist 게이트 — 명시 이름(selected_tools) 없는 게이트 소스는 스킵.
+            _gated = source_allowlist is not None and sid not in source_allowlist
+            _explicit_pass = set(sub_allow or []) | set(global_allow or ())
+            if _gated and not _explicit_pass:
+                continue
             filter_params = tool_source_filters.get(sid)
 
             try:
@@ -178,6 +193,9 @@ class ToolIndexStage(Stage):
             except Exception as e:
                 logger.debug("[Tool Index] list_tools failed for %s: %s", sid, e)
                 continue
+            if _gated:
+                listed = [t for t in (listed or [])
+                          if isinstance(t, dict) and t.get("name") in _explicit_pass]
 
             before = collected
             for t in listed or []:
