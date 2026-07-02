@@ -225,7 +225,7 @@ class RAGSearchTool(Tool):
         if self._doc_service is None or not hasattr(self._doc_service, "search"):
             raise ToolError(
                 "DocumentService is not available. RAG search is unavailable — "
-                "호스트가 ResourceRegistry 에 documents 서비스를 주입해야 합니다.",
+                "the host must inject a documents service into the ResourceRegistry.",
                 tool_name="rag_search",
             )
 
@@ -359,8 +359,8 @@ class RAGSearchTool(Tool):
             return ""
         lines.append("")
         lines.append(
-            "(본문이 필요하면 fetch_pd(kind='rag', id='<위 id>') 호출. "
-            f"예: fetch_pd(kind='rag', id='{collection_name}#1'))"
+            "(For a full body, call fetch_pd(kind='rag', id='<id above>'). "
+            f"e.g. fetch_pd(kind='rag', id='{collection_name}#1'))"
         )
         return "\n".join(lines)
 

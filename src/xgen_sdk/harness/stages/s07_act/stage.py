@@ -247,8 +247,8 @@ class ExecuteStage(Stage):
             if preview_threshold > 0 and preview_size > 0 and original_chars > preview_threshold:
                 preview_body = result_text[:preview_size]
                 hint = (
-                    f"\n\n... [PD: 원본 {original_chars:,}자 — preview {preview_size:,}자만 표시. "
-                    f"전체 보려면 fetch_pd(kind='tool_result', id='{tool_use_id}') 호출]"
+                    f"\n\n... [PD: original {original_chars:,} chars — showing {preview_size:,}-char preview. "
+                    f"Call fetch_pd(kind='tool_result', id='{tool_use_id}') for the full body]"
                 )
                 state.pd_store(
                     kind="tool_result",
@@ -294,7 +294,7 @@ class ExecuteStage(Stage):
                                 # 환경으로 노출하고, 활용 여부는 LLM 자율.
                                 _sp = _sp + (
                                     f"\n\n{_marker_open}\n"
-                                    f"이번 session 에서 호출한 도구의 자동 로드 가이드 본문."
+                                    f"Auto-loaded usage guides for tools called in this session."
                                     f"{_skill_block}\n{_marker_close}"
                                 )
                             state.system_prompt = _sp
@@ -317,7 +317,7 @@ class ExecuteStage(Stage):
             chars = len(result_text)
             if current_chars + chars > result_budget:
                 remaining = max(0, result_budget - current_chars)
-                result_text = result_text[:remaining] + f"\n... (축약됨, 원본 {chars}자)"
+                result_text = result_text[:remaining] + f"\n... (truncated, original {chars} chars)"
                 chars = len(result_text)
 
             state.add_tool_result(tool_use_id, result_text, is_error=False)

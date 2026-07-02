@@ -160,13 +160,15 @@ class RuleBasedEvaluation(EvaluationStrategy):
         # 길이 체크
         if len(assistant_response) < self._min_length:
             score -= 0.3
-            feedback_parts.append(f"응답이 짧음 ({len(assistant_response)}자 < {self._min_length}자)")
+            feedback_parts.append(
+                f"Response too short ({len(assistant_response)} chars < {self._min_length} chars)"
+            )
 
         # 에러 패턴 감지
         error_patterns = ["I cannot", "I'm sorry", "Error:", "I don't have access"]
         if any(p.lower() in assistant_response.lower() for p in error_patterns):
             score -= 0.2
-            feedback_parts.append("에러/거부 패턴 감지됨")
+            feedback_parts.append("Error/refusal pattern detected in response")
 
         # 입력 키워드 반영 체크 (간단 heuristic)
         input_words = set(user_input.lower().split())
@@ -174,14 +176,14 @@ class RuleBasedEvaluation(EvaluationStrategy):
         overlap = len(input_words & response_words) / max(len(input_words), 1)
         if overlap < 0.1:
             score -= 0.2
-            feedback_parts.append("입력 키워드 반영 부족")
+            feedback_parts.append("Response barely reflects the input keywords")
 
         score = max(0.0, min(1.0, score))
         verdict = "pass" if score >= self._threshold else "retry"
         return EvaluationResult(
             passed=score >= self._threshold,
             score=score,
-            feedback="; ".join(feedback_parts) if feedback_parts else "규칙 기반 평가 통과",
+            feedback="; ".join(feedback_parts) if feedback_parts else "Rule-based evaluation passed",
             verdict=verdict,
         )
 

@@ -92,10 +92,10 @@ _MAX_SUBPIPELINE_DEPTH = 4
 def _env_missing_msg(tool_name: str, missing: list[str], how: str = "") -> str:
     """도구 호출에 필요한 env 미설정 안내 — 외부 실행자가 무엇을 설정해야 하는지 명시."""
     names = ", ".join(missing)
-    msg = f"도구 '{tool_name}' 실행에 필요한 환경변수가 설정되지 않았습니다: {names}."
+    msg = f"Environment variables required to run tool '{tool_name}' are not set: {names}."
     if how:
         msg += f" {how}"
-    msg += " 외부 실행 환경(또는 MCP 클라이언트 설정의 env 항목)에 이 값을 지정한 뒤 다시 시도하세요."
+    msg += " Set these values in the external runtime (or the env section of your MCP client config) and retry."
     return msg
 
 
@@ -171,7 +171,7 @@ class FrozenToolSource:
     async def call_tool(self, name: str, args: dict) -> dict:
         td = self._defs.get(name)
         if td is None:
-            return {"content": f"도구 '{name}' 미정의", "is_error": True}
+            return {"content": f"Tool '{name}' is not defined", "is_error": True}
         kind = str(td.get("call_kind") or "noop")
         args = args or {}
         try:
@@ -188,7 +188,7 @@ class FrozenToolSource:
             return {"content": "(noop)", "is_error": False}
         except Exception as e:  # 방어 — 어떤 dispatch 도 파이프라인을 죽이지 않음
             logger.warning("[frozen] tool=%s dispatch 예외: %s", name, e)
-            return {"content": f"{name} 실행 오류: {e}", "is_error": True}
+            return {"content": f"{name} execution error: {e}", "is_error": True}
 
     # ── http ─────────────────────────────────────────────────────────
     async def _dispatch_http(self, td: dict, args: dict) -> dict:
@@ -196,7 +196,7 @@ class FrozenToolSource:
         name = td.get("name", "")
         url = str(spec.get("url") or "")
         if not url:
-            return {"content": "http call_spec.url 누락", "is_error": True}
+            return {"content": "http call_spec.url is missing", "is_error": True}
         method = str(spec.get("method") or "POST").upper()
         headers: dict[str, str] = dict(spec.get("headers") or {})
 
@@ -274,13 +274,13 @@ class FrozenToolSource:
         # spec.allow_internal=True 면 우회(운영자 내부 API 의도), block_private_hosts=True 면 RFC1918 도.
         _parsed = urlparse(final_url)
         if _parsed.scheme not in ("http", "https"):
-            return {"content": f"차단된 scheme: {_parsed.scheme or '(none)'}", "is_error": True}
+            return {"content": f"Blocked scheme: {_parsed.scheme or '(none)'}", "is_error": True}
         if not bool(spec.get("allow_internal")) and _host_is_blocked(
             _parsed.hostname or "", block_private=bool(spec.get("block_private_hosts"))
         ):
             return {
-                "content": f"SSRF 차단: 내부/링크로컬 호스트 '{_parsed.hostname}' "
-                           f"(허용하려면 call_spec.allow_internal=true)",
+                "content": f"SSRF blocked: internal/link-local host '{_parsed.hostname}' "
+                           f"(set call_spec.allow_internal=true to allow)",
                 "is_error": True,
             }
 
@@ -354,9 +354,9 @@ class FrozenToolSource:
             return {
                 "content": _env_missing_msg(
                     tool_name, [qdrant_url_env, "HARNESS_RAG_ENDPOINT"],
-                    how="RAG 검색은 (a) 외부 Qdrant 직접 호출용 "
-                        f"{qdrant_url_env}(+임베더 키) 또는 (b) RAG 검색 endpoint "
-                        "HARNESS_RAG_ENDPOINT 중 하나가 필요합니다.",
+                    how=f"RAG search needs either (a) {qdrant_url_env} for direct external "
+                        "Qdrant calls (+ embedder key) or (b) a RAG search endpoint "
+                        "HARNESS_RAG_ENDPOINT.",
                 ),
                 "is_error": True,
             }
@@ -405,7 +405,7 @@ class FrozenToolSource:
         name = td.get("name", "")
         sid = str(spec.get("session_id") or "")
         if not sid:
-            return {"content": "session_id 누락", "is_error": True}
+            return {"content": "session_id is missing", "is_error": True}
 
         # 1) 외부 자족 — spawn.server_command 있으면 stdio 직접 spawn
         spawn = spec.get("spawn")
@@ -419,7 +419,7 @@ class FrozenToolSource:
                 return {
                     "content": _env_missing_msg(
                         name, missing,
-                        how=f"MCP 서버 '{spawn.get('server_command')}' 구동에 필요한 값입니다.",
+                        how=f"Required to launch MCP server '{spawn.get('server_command')}'.",
                     ),
                     "is_error": True,
                 }
@@ -447,8 +447,8 @@ class FrozenToolSource:
             return {
                 "content": _env_missing_msg(
                     name, ["MCP_STATION_BASE_URL"],
-                    how="MCP 도구는 (a) freeze 시 박힌 stdio spawn 메타 또는 "
-                        "(b) MCP Station 프록시 주소 MCP_STATION_BASE_URL 가 필요합니다.",
+                    how="MCP tools need either (a) stdio spawn metadata frozen at compile time or "
+                        "(b) the MCP Station proxy address MCP_STATION_BASE_URL.",
                 ),
                 "is_error": True,
             }
@@ -523,7 +523,7 @@ class FrozenToolSource:
         name = td.get("name", "")
         sub_config = spec.get("config")
         if not isinstance(sub_config, dict) or not sub_config:
-            return {"content": f"subpipeline '{name}': call_spec.config 누락", "is_error": True}
+            return {"content": f"subpipeline '{name}': call_spec.config is missing", "is_error": True}
         sub_tool_defs = spec.get("tool_definitions") or []
         sub_meta = spec.get("metadata") or self._metadata or {}
 
@@ -537,7 +537,7 @@ class FrozenToolSource:
         depth = _SUBPIPELINE_DEPTH.get()
         if depth >= _MAX_SUBPIPELINE_DEPTH:
             return {
-                "content": f"subpipeline 최대 재귀 깊이({_MAX_SUBPIPELINE_DEPTH}) 초과 — '{name}' 중단",
+                "content": f"subpipeline max recursion depth ({_MAX_SUBPIPELINE_DEPTH}) exceeded — '{name}' aborted",
                 "is_error": True,
             }
         token = _SUBPIPELINE_DEPTH.set(depth + 1)
@@ -546,7 +546,7 @@ class FrozenToolSource:
             return {"content": out or "", "is_error": False}
         except Exception as e:
             logger.warning("[frozen] subpipeline '%s' 실행 실패: %s", name, e)
-            return {"content": f"{name} subpipeline 실행 오류: {e}", "is_error": True}
+            return {"content": f"{name} subpipeline execution error: {e}", "is_error": True}
         finally:
             _SUBPIPELINE_DEPTH.reset(token)
 
@@ -557,7 +557,7 @@ class FrozenToolSource:
         name = td.get("name", "")
         graph = spec.get("graph")
         if not isinstance(graph, dict) or not graph.get("nodes"):
-            return {"content": f"canvas '{name}': call_spec.graph 누락/비어있음", "is_error": True}
+            return {"content": f"canvas '{name}': call_spec.graph is missing/empty", "is_error": True}
         meta = spec.get("metadata") or self._metadata or {}
         user_input = ""
         if isinstance(args, dict):
@@ -567,14 +567,14 @@ class FrozenToolSource:
 
         depth = _SUBPIPELINE_DEPTH.get()
         if depth >= _MAX_SUBPIPELINE_DEPTH:
-            return {"content": f"canvas 최대 재귀 깊이({_MAX_SUBPIPELINE_DEPTH}) 초과 — '{name}' 중단", "is_error": True}
+            return {"content": f"canvas max recursion depth ({_MAX_SUBPIPELINE_DEPTH}) exceeded — '{name}' aborted", "is_error": True}
         token = _SUBPIPELINE_DEPTH.set(depth + 1)
         try:
             out = await _run_canvas_graph(graph, meta, user_input)
             return {"content": out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str), "is_error": False}
         except Exception as e:
             logger.warning("[frozen] canvas '%s' 실행 실패: %s", name, e)
-            return {"content": f"{name} canvas 실행 오류: {e}", "is_error": True}
+            return {"content": f"{name} canvas execution error: {e}", "is_error": True}
         finally:
             _SUBPIPELINE_DEPTH.reset(token)
 

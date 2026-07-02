@@ -113,8 +113,8 @@ class CascadeCompactionMixin:
                 if isinstance(original, dict) and original.get("type") == "tool_result":
                     has_pd = state.pd_fetch("tool_result", tid) is not None
                     placeholder_text = (
-                        f"[Microcompact — 오래된 tool_result. "
-                        f"fetch_pd(kind='tool_result', id='{tid}') 로 조회]"
+                        f"[Microcompact — old tool_result. "
+                        f"Retrieve via fetch_pd(kind='tool_result', id='{tid}')]"
                         if has_pd else
                         f"[Microcompact — tool_result omitted (id={tid})]"
                     )
@@ -179,11 +179,11 @@ class CascadeCompactionMixin:
         overlay = {
             "role": "user",
             "content": (
-                f"[Context Collapse Overlay — {len(old)}개 중간 메시지가 접힘. "
-                f"원본은 pd_stores['history'] 에 보존. "
-                f"필요하면 fetch_pd(kind='history', id='<위 id>') 호출. "
-                f"첫/마지막 {keep_tail} 개는 보존. "
-                f"접힌 id 목록: {preserved_ids[:10]}" +
+                f"[Context Collapse Overlay — {len(old)} middle messages collapsed. "
+                f"Originals preserved in pd_stores['history']. "
+                f"Call fetch_pd(kind='history', id='<id below>') if needed. "
+                f"First/last {keep_tail} messages kept. "
+                f"Collapsed ids: {preserved_ids[:10]}" +
                 (f"... (+{len(preserved_ids) - 10})" if len(preserved_ids) > 10 else "") +
                 f"]"
             ),
@@ -247,8 +247,8 @@ class CascadeCompactionMixin:
                 "role": "user",
                 "content": (
                     "[Autocompact Summary — child agent 9-section:]\n" + summary_text +
-                    f"\n\n[원본 {len(preserved_ids)}개는 pd_stores['history'] 에 보존. "
-                    f"필요시 fetch_pd(kind='history', id='auto_<iter>_<idx>')]"
+                    f"\n\n[{len(preserved_ids)} originals preserved in pd_stores['history']. "
+                    f"If needed: fetch_pd(kind='history', id='auto_<iter>_<idx>')]"
                 ),
             }
             state.messages = [head, summary_msg] + tail
@@ -294,12 +294,13 @@ class CascadeCompactionMixin:
         conversation = "\n".join(lines)
 
         prompt = (
-            "아래 대화 이력을 9 섹션 구조로 요약하라. 한국어 응답, 각 섹션 1~3 줄.\n\n"
+            "Summarize the conversation history below into the 9-section structure. "
+            "Answer in the same language as the conversation, 1-3 lines per section.\n\n"
             "## Primary Request\n## Key Decisions\n## Tools Used\n## Errors/Fixes\n"
             "## Files Touched\n## Data Mentioned\n## User Preferences\n## Open Issues\n## Next Steps\n\n"
-            "--- 대화 시작 ---\n"
+            "--- conversation start ---\n"
             f"{conversation}\n"
-            "--- 대화 끝 ---"
+            "--- conversation end ---"
         )
 
         provider = getattr(state, "provider", None)
@@ -307,9 +308,9 @@ class CascadeCompactionMixin:
             # Fallback: 규칙 기반 초간단 summary
             roles = [m.get("role", "?") for m in old_messages if isinstance(m, dict)]
             return (
-                "## Primary Request\n(child LLM 미사용 — rule-based fallback)\n"
-                f"## Messages\n총 {len(old_messages)}개 ({dict((r, roles.count(r)) for r in set(roles))})\n"
-                "## Note\nprovider 초기화 안 된 상태에서 L5 발동. 정확한 요약은 재실행 권장."
+                "## Primary Request\n(child LLM unavailable — rule-based fallback)\n"
+                f"## Messages\n{len(old_messages)} total ({dict((r, roles.count(r)) for r in set(roles))})\n"
+                "## Note\nL5 triggered before provider initialization. Re-run for an accurate summary."
             )
 
         # v0.26.11 — _aux_call 통합 (max_tokens 단일 진실 소스 = config.aux_max_tokens).

@@ -52,7 +52,7 @@ class SequentialToolExecutor(ToolExecutor):
                 if total_chars + len(result.content) > self._budget:
                     remaining = max(0, self._budget - total_chars)
                     result = ToolResult(
-                        content=result.content[:remaining] + f"\n... (축약됨, 원본 {len(result.content)}자)",
+                        content=result.content[:remaining] + f"\n... (truncated, original {len(result.content)} chars)",
                         is_error=result.is_error,
                         metadata=result.metadata,
                     )

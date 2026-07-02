@@ -45,17 +45,17 @@ SECTION_PRIORITIES = {
 # PD 정신: LLM 이 자기가 어느 환경 슬롯에 있는지 인지 → 자율 결정.
 # 행동 강제 X, fact 만.
 STAGE_TOPOLOGY: list[dict[str, str]] = [
-    {"id": "s00_harness", "label": "Harness", "desc": "하네스 진입/종료. Planner orchestrator role."},
-    {"id": "s01_input", "label": "Input", "desc": "사용자 입력 + external_inputs 결합."},
-    {"id": "s02_history", "label": "History", "desc": "대화 이력 + memory_collection."},
-    {"id": "s03_prompt", "label": "Prompt", "desc": "system_prompt 조립 (이 stage)."},
-    {"id": "s04_tool", "label": "Tool", "desc": "도구 카탈로그 indexing + capability binding + PD builtin 합류."},
-    {"id": "s05_policy", "label": "Policy", "desc": "policy_pack 적용."},
-    {"id": "s06_context", "label": "Context", "desc": "맥락 관리 — RAG/Ontology 자동 search 폐기, 도구로 위임."},
-    {"id": "s07_act", "label": "Act", "desc": "도구 디스패치 (sequential / parallel_read / strict_no_error)."},
-    {"id": "s08_decide", "label": "Decide", "desc": "loop 결정 (judge)."},
-    {"id": "s09_judge", "label": "Judge", "desc": "응답 평가 / loop 종료 판단."},
-    {"id": "s10_finalize", "label": "Finalize", "desc": "egress + done event."},
+    {"id": "s00_harness", "label": "Harness", "desc": "Harness entry/exit. Planner orchestrator role."},
+    {"id": "s01_input", "label": "Input", "desc": "User input + external_inputs merge."},
+    {"id": "s02_history", "label": "History", "desc": "Conversation history + memory_collection."},
+    {"id": "s03_prompt", "label": "Prompt", "desc": "system_prompt assembly (this stage)."},
+    {"id": "s04_tool", "label": "Tool", "desc": "Tool catalog indexing + capability binding + PD builtins."},
+    {"id": "s05_policy", "label": "Policy", "desc": "policy_pack enforcement."},
+    {"id": "s06_context", "label": "Context", "desc": "Context management — no automatic RAG/Ontology search; delegated to tools."},
+    {"id": "s07_act", "label": "Act", "desc": "Tool dispatch (sequential / parallel_read / strict_no_error)."},
+    {"id": "s08_decide", "label": "Decide", "desc": "Loop decision (judge)."},
+    {"id": "s09_judge", "label": "Judge", "desc": "Response evaluation / loop termination."},
+    {"id": "s10_finalize", "label": "Finalize", "desc": "Egress + done event."},
 ]
 
 
@@ -342,7 +342,7 @@ class SystemPromptStage(Stage):
                 "Each item below pairs with → the tool that operates on it."
             )
             if rag_collections_attached:
-                lines.append("- 문서 (의미적 유사도 검색 → `rag_search(query, collection_name)`):")
+                lines.append("- Documents (semantic similarity search → `rag_search(query, collection_name)`):")
                 # v1.7.2 — description 빈 칸인 컬렉션 추적 → 가이드 라인 끝에 추가.
                 missing_desc_count = 0
                 for col in rag_collections_attached:
@@ -367,11 +367,11 @@ class SystemPromptStage(Stage):
                 # 노출. "직접 검색해 확인하세요" 같은 행동 지시는 폐기.
                 if missing_desc_count > 0:
                     lines.append(
-                        f"  ※ {missing_desc_count} 컬렉션은 description 메타 없음."
+                        f"  * {missing_desc_count} collection(s) have no description metadata."
                     )
             if ontology_collections_attached:
                 lines.append(
-                    "- 지식 그래프 (관계·계층 검색 → `query_graph(question, collection)`):"
+                    "- Knowledge graphs (relation/hierarchy search → `query_graph(question, collection)`):"
                 )
                 for col in ontology_collections_attached:
                     m = onto_meta.get(col, {}) if isinstance(onto_meta.get(col), dict) else {}
@@ -385,8 +385,8 @@ class SystemPromptStage(Stage):
                     lines.append(line)
             if db_connections_attached:
                 lines.append(
-                    "- DB 연결 (SQL 쿼리 → `mcp_DatabaseLoader` / `mcp_DatabaseReader` / "
-                    "`mcp_postgresql_mcp` 등; deferred 면 `search_tools(query='database')` 로 발견 후 호출):"
+                    "- DB connections (SQL query → `mcp_DatabaseLoader` / `mcp_DatabaseReader` / "
+                    "`mcp_postgresql_mcp` etc.; if deferred, discover via `search_tools(query='database')` then call):"
                 )
                 for conn in db_connections_attached:
                     if isinstance(conn, dict):
@@ -409,8 +409,8 @@ class SystemPromptStage(Stage):
                     lines.append(line)
             if files_attached:
                 lines.append(
-                    "- 파일 (자동 컨텍스트 주입 — 별도 도구 호출 X; 표/CSV 는 "
-                    "`file_system_table_data_mcp`, 일반 read/write 는 `file_system_filesystem_storage`):"
+                    "- Files (auto-injected into context — no tool call needed; tables/CSV via "
+                    "`file_system_table_data_mcp`, generic read/write via `file_system_filesystem_storage`):"
                 )
                 for fname in files_attached:
                     if isinstance(fname, dict):
@@ -443,8 +443,8 @@ class SystemPromptStage(Stage):
             mcp_meta = state.metadata.get("mcp_sessions_meta") or {}
             if mcp_meta:
                 lines.append(
-                    "- MCP 세션 (각 세션의 도구는 deferred — `search_tools(query=...)` 로 발견 후 "
-                    "`ToolSearch(names=[...])` 으로 승격):"
+                    "- MCP sessions (each session's tools are deferred — discover via "
+                    "`search_tools(query=...)` then promote via `ToolSearch(names=[...])`):"
                 )
                 for sname, m in mcp_meta.items():
                     if not isinstance(m, dict):
@@ -453,7 +453,7 @@ class SystemPromptStage(Stage):
                     when = m.get("when_to_use") or m.get("description") or ""
                     line = f"  · {sname}"
                     if tool_count:
-                        line += f" ({tool_count} 도구)"
+                        line += f" ({tool_count} tools)"
                     if when:
                         line += f": {when[:80]}"
                     lines.append(line)
@@ -496,9 +496,9 @@ class SystemPromptStage(Stage):
             if any_template:
                 tpl_section = (
                     "<available_prompt_templates>\n"
-                    "사용자가 박은 prompt 가 본문이고, 아래는 추가 참조 가능한 등록된 template "
-                    "목록입니다. 적합한 게 있으면 discover_prompt(template_type=..., name=...) "
-                    "로 본문을 lazy fetch 하세요.\n"
+                    "The user-provided prompt is the main body; below are additionally "
+                    "available registered templates. If one fits, lazy-fetch its body via "
+                    "discover_prompt(template_type=..., name=...).\n"
                     + "\n".join(tpl_lines)
                     + "\n</available_prompt_templates>"
                 )
@@ -516,9 +516,9 @@ class SystemPromptStage(Stage):
             if loaded:
                 skill_lines = ["<loaded_skills>"]
                 skill_lines.append(
-                    "다음은 이번 session 에서 Skill('이름') 으로 lazy load 한 메타 도구 "
-                    "사용 가이드입니다. 이미 system_prompt 에 박혀있으므로 같은 skill 을 "
-                    "재호출하지 마세요."
+                    "Below are meta-tool usage guides lazy-loaded via Skill('name') in this "
+                    "session. They are already embedded in the system prompt — do not call "
+                    "the same skill again."
                 )
                 for sname, sbody in loaded.items():
                     skill_lines.append(f"\n### {sname}\n")
@@ -874,7 +874,7 @@ class SystemPromptStage(Stage):
                 continue
             lines.append(f"- {stage_id}: {', '.join(tools)}")
         if unmapped:
-            lines.append(f"- 기타: {', '.join(unmapped)}")
+            lines.append(f"- other: {', '.join(unmapped)}")
         lines.append("</meta_tools_by_stage>")
         return "\n".join(lines)
 

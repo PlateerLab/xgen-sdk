@@ -133,11 +133,11 @@ class ToolPreconditionGuard(Guard):
                     continue
                 observed = sum(1 for h in history if h.get("tool_name") == req_tool)
                 if observed < min_count:
-                    missing.append(f"{req_tool}≥{min_count} (실측 {observed})")
+                    missing.append(f"{req_tool}≥{min_count} (observed {observed})")
 
             if missing:
                 message = rule.get("message") or (
-                    f"'{tool_name}' 호출 전 선행 조건 미충족: {', '.join(missing)}"
+                    f"Preconditions not met before calling '{tool_name}': {', '.join(missing)}"
                 )
                 return GuardResult(
                     passed=False,

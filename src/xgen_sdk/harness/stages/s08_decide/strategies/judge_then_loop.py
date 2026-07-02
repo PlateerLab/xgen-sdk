@@ -367,11 +367,11 @@ def _parse_evaluation(eval_text: str, selected_criteria: list[str],
         ]
         if hard_failed:
             overall = 0.0
-            feedback = (str(feedback) + f" [hard 제약 실패: {', '.join(hard_failed)}]").strip()
+            feedback = (str(feedback) + f" [hard constraint failed: {', '.join(hard_failed)}]").strip()
 
         verdict = "pass" if overall >= threshold else "retry"
         return overall, feedback, verdict
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         # fail-open 금지 — 가짜 pass 로 gate 를 무력화하지 않는다. bypass(루프도 회피).
         logger.warning("[judge] parse 실패 — gate bypass(fake-pass/loop 회피): %s", e)
-        return None, f"judge parse 실패: {e}", "bypass"
+        return None, f"judge parse failed: {e}", "bypass"

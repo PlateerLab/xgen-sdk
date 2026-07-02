@@ -229,8 +229,8 @@ class ResourceRegistry:
         if resolver is None:
             return (
                 f"Error: xgen node resolver is not registered "
-                f"(cannot execute '{spec_id}'). 호스트 어댑터가 "
-                f"register_xgen_node_resolver() 를 호출하지 않은 환경입니다."
+                f"(cannot execute '{spec_id}'). The host adapter has not called "
+                f"register_xgen_node_resolver() in this environment."
             )
 
         try:
@@ -363,21 +363,21 @@ class ResourceRegistry:
             spec = CapabilitySpec(
                 name=cap_name,
                 category="retrieval",
-                description=rag_info.description or f"RAG 검색 — 컬렉션 '{col_name}'",
+                description=rag_info.description or f"RAG search — collection '{col_name}'",
                 tags=["rag", "document", "retrieval", col_name],
                 aliases=[col_name, f"rag_{col_name}"],
                 params=[
                     ParamSpec(
                         name="query",
                         type_hint="str",
-                        description="검색 질의",
+                        description="Search query",
                         required=True,
                         source_hint="user_input",
                     ),
                     ParamSpec(
                         name="top_k",
                         type_hint="int",
-                        description="결과 청크 개수",
+                        description="Number of result chunks",
                         required=False,
                         default=5,
                     ),
@@ -832,8 +832,8 @@ class _RAGCollectionTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "검색 질의"},
-                "top_k": {"type": "integer", "description": "결과 청크 수"},
+                "query": {"type": "string", "description": "Search query"},
+                "top_k": {"type": "integer", "description": "Number of result chunks"},
             },
             "required": ["query"],
         }

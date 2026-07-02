@@ -81,21 +81,21 @@ def _register_builtins() -> None:
     """v1.5.5 의 빌트인 4 종을 register API 로 통합 (정신 정합)."""
     def _max_iterations(config) -> str | None:
         v = getattr(config, "max_iterations", None)
-        return f"- 도구 호출 최대 {v}회" if v else None
+        return f"- max tool-call rounds: {v}" if v else None
 
     def _cost_budget(config) -> str | None:
         v = getattr(config, "cost_budget_usd", None)
-        return f"- 비용 예산 ${v:.2f}" if v else None
+        return f"- cost budget: ${v:.2f}" if v else None
 
     def _context_window(config) -> str | None:
         v = getattr(config, "context_window", None)
-        return f"- 컨텍스트 윈도우 {v:,} tokens" if v else None
+        return f"- context window: {v:,} tokens" if v else None
 
     def _s05_guards(config) -> str | None:
         sp = getattr(config, "stage_params", None) or {}
         guards = (sp.get("s05_policy") or {}).get("guards") or []
         names = [g.get("name") for g in guards if isinstance(g, dict) and g.get("name")]
-        return f"- 활성 가드: {', '.join(names)}" if names else None
+        return f"- active guards: {', '.join(names)}" if names else None
 
     register_active_policy_renderer("max_iterations", _max_iterations)
     register_active_policy_renderer("cost_budget_usd", _cost_budget)

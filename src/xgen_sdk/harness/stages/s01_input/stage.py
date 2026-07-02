@@ -145,7 +145,7 @@ class InputStage(Stage):
                 if file_text:
                     content_blocks.append({
                         "type": "text",
-                        "text": f"[파일: {f.get('name', 'unknown')}]\n{file_text}",
+                        "text": f"[File: {f.get('name', 'unknown')}]\n{file_text}",
                     })
 
         content_blocks.append({"type": "text", "text": state.user_input})

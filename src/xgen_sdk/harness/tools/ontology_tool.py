@@ -118,7 +118,7 @@ class QueryGraphTool(Tool):
         if self._doc_service is None or not hasattr(self._doc_service, "ontology_query"):
             raise ToolError(
                 "DocumentService.ontology_query is not available. "
-                "호스트가 ResourceRegistry 에 documents 서비스를 주입해야 합니다.",
+                "The host must inject a documents service into the ResourceRegistry.",
                 tool_name="query_graph",
             )
 
@@ -165,6 +165,6 @@ class QueryGraphTool(Tool):
         text = (
             f"[graph:{collection}] id={rid} · {len(body)} chars\n"
             f"{snippet}\n\n"
-            f"(전체 본문 fetch_pd(kind='graph', id='{rid}') 로 조회)"
+            f"(Full body via fetch_pd(kind='graph', id='{rid}'))"
         )
         return ToolResult.success(text, collection=collection, chars=len(body), id=rid)

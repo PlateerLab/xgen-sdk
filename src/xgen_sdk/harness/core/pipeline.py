@@ -534,7 +534,7 @@ class Pipeline:
             # 슬롯이며, 활용 여부는 LLM 자율.
             _injection_lines = ["<recently_fetched>"]
             _injection_lines.append(
-                "이번 turn 에 호출한 fetch_pd 본문. 다음 turn 에는 노출되지 않음."
+                "Bodies fetched via fetch_pd this turn. Not exposed on the next turn."
             )
             for entry in _pending:
                 _kind = entry.get("kind", "?")

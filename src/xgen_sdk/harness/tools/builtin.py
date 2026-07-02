@@ -1330,8 +1330,8 @@ class CheckPolicyTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "description": "호출하려는 도구 이름"},
-                "args": {"type": "object", "description": "호출 인자 (정책 검증용)"},
+                "action": {"type": "string", "description": "Name of the tool you intend to call"},
+                "args": {"type": "object", "description": "Call arguments (for policy validation)"},
             },
             "required": ["action"],
         }
@@ -1481,9 +1481,9 @@ class DiscoverPromptTool(Tool):
                 "template_type": {
                     "type": "string",
                     "enum": ["identity", "rules", "thinking_mode"],
-                    "description": "어떤 종류의 template",
+                    "description": "Kind of template",
                 },
-                "name": {"type": "string", "description": "template 이름. 비워두면 list."},
+                "name": {"type": "string", "description": "Template name. Leave empty to list."},
             },
             "required": ["template_type"],
         }
@@ -1546,8 +1546,8 @@ class DiscoverPromptTool(Tool):
                     "length": len(v) if isinstance(v, str) else 0,
                 })
             return ToolResult.success(
-                f"{len(reg)} {ttype} templates — discover_prompt(template_type='{ttype}', "
-                f"name=...) 로 본문 fetch",
+                f"{len(reg)} {ttype} templates — fetch a body via "
+                f"discover_prompt(template_type='{ttype}', name=...)",
                 templates=entries,
             )
 
@@ -1600,10 +1600,10 @@ class DiscoverCollectionTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "컬렉션 이름"},
+                "name": {"type": "string", "description": "Collection name"},
                 "sample_size": {
                     "type": "integer",
-                    "description": "sample 개수 (default 3, max 10)",
+                    "description": "Number of samples (default 3, max 10)",
                     "default": 3,
                 },
             },
@@ -1629,13 +1629,13 @@ class DiscoverCollectionTool(Tool):
     async def execute(self, input_data: dict) -> ToolResult:
         name = (input_data.get("name") or "").strip()
         if not name:
-            return ToolResult.error("name 필수")
+            return ToolResult.error("'name' is required")
         sample_size = max(1, min(int(input_data.get("sample_size") or 3), 10))
 
         services = self._state.metadata.get("services") if hasattr(self._state, "metadata") else None
         doc_service = getattr(services, "documents", None) if services else None
         if not doc_service:
-            return ToolResult.error("DocumentService 미주입")
+            return ToolResult.error("DocumentService is not injected")
 
         # 메타 cache 우선
         meta = (self._state.metadata.get("rag_collections_meta") or {}).get(name) if hasattr(self._state, "metadata") else None
