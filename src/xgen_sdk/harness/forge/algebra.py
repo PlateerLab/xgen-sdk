@@ -32,6 +32,9 @@ _SCALAR_SPECS: dict[str, dict[str, Any]] = {
     "max_retries":          {"lo": 0,   "hi": 8,   "step": 1,   "kind": "int"},
     "max_iterations":       {"lo": 1,   "hi": 20,  "step": 2,   "kind": "int"},
     "temperature":          {"lo": 0.0, "hi": 1.5, "step": 0.2, "kind": "float"},
+    # 연결된 RAG 검색 폭 — retrieval breadth 자가조정(환경 지배). s04_tool.rag_top_k
+    # stage_param 으로 적용되고, 이식 pipeline 이 라이브 검색 도구에 전파한다(s04 는 ingress).
+    "rag_top_k":            {"lo": 1,   "hi": 40,    "step": 4,    "kind": "int"},
     # stateful loop — forge 가 state 설정까지 자가튜닝(HarnessConfig 정식 필드).
     "state_max_lessons":    {"lo": 1,   "hi": 20,    "step": 1,    "kind": "int"},
     "state_max_refined":    {"lo": 1,   "hi": 20,    "step": 2,    "kind": "int"},

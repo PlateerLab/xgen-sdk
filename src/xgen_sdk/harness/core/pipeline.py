@@ -595,6 +595,7 @@ class Pipeline:
             threshold=threshold,
             feedback=state.validation_feedback,
             retry_count=state.retry_count,
+            rag_top_k=state.metadata.get("rag_top_k"),
         )
         if n <= 0:
             return
@@ -606,6 +607,32 @@ class Pipeline:
         )
         # 이식측 SSE 중계가 config_diff 이벤트로 캔버스에 push 하도록 핸들 노출.
         state.metadata["config_mutator"] = mutator
+        # v1.28 — 환경(연결 RAG 노드) 지배: 자가조정이 검색 stage 의 rag_top_k 를 올렸으면
+        # 루프가 실제로 쓰는 라이브 채널에 전파한다. s04(검색 stage)는 ingress 라 재실행되지
+        # 않으므로, 등록된 rag_search 도구 인스턴스의 default_top_k 와 metadata 를 직접 갱신해야
+        # 다음 재시도의 검색이 넓어진다(s07_act 가 매 iter 이 인스턴스를 재실행).
+        _sp = getattr(self.config, "stage_params", None) or {}
+        _rtk_new = (_sp.get("s04_tool") or {}).get("rag_top_k")
+        try:
+            _rtk_new = int(_rtk_new) if _rtk_new is not None else None
+        except (TypeError, ValueError):
+            _rtk_new = None
+        if _rtk_new is not None and _rtk_new != state.metadata.get("rag_top_k"):
+            _old_rtk = state.metadata.get("rag_top_k")
+            state.metadata["rag_top_k"] = _rtk_new
+            _rag_tool = (state.metadata.get("tool_registry") or {}).get("rag_search")
+            if _rag_tool is not None:
+                try:
+                    # default_top_k = LLM 이 top_k 를 생략할 때의 기본값 상향.
+                    # _min_top_k = LLM 이 명시 top_k 를 낮게 박아도 못 내려가는 하한(지배).
+                    _rag_tool._default_top_k = _rtk_new
+                    _rag_tool._min_top_k = _rtk_new
+                except Exception as _pe:
+                    logger.debug("[self-govern] rag_search top_k 패치 보류: %s", _pe)
+            logger.info(
+                "[Pipeline] runtime_self_govern — 검색 폭 확장: rag_top_k %s→%s (연결 RAG 도구 라이브 재조정)",
+                _old_rtk, _rtk_new,
+            )
         # 자가변경을 이벤트 스트림에 남김 (무엇을·왜·어떻게 before→after 는 diff 문자열에).
         from ..events.types import PlanningEvent
         await state.emit_verbose(PlanningEvent(

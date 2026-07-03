@@ -26,7 +26,7 @@ Quick Start:
     config = xgen.config   # RedisConfigManager 또는 LocalConfigManager
 """
 
-__version__ = "1.27.10"
+__version__ = "1.28.0"
 
 from xgen_sdk.app import XgenApp
 

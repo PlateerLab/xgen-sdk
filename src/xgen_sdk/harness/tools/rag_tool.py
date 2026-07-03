@@ -116,6 +116,10 @@ class RAGSearchTool(Tool):
         self._default_filter = merged_filter or None
         self._default_reranker = default_reranker
         self._default_rerank_top_k = default_rerank_top_k
+        # v1.28 — self-govern 이 실행 중 되쓰는 검색 폭 하한(floor). 0=하한 없음(기본).
+        # 자가조정이 근거 부족으로 넓히면 이 값이 올라가고, execute 가 요청 top_k 를 이 하한
+        # 아래로 못 내려가게 강제한다(연결 RAG 노드 "환경 지배").
+        self._min_top_k = 0
 
     @property
     def name(self) -> str:
@@ -184,6 +188,17 @@ class RAGSearchTool(Tool):
 
         collection_name = input_data.get("collection_name", self._collections[0])
         top_k = input_data.get("top_k", self._default_top_k)
+        # v1.28 — self-govern 검색 폭 하한 강제. 에이전트가 더 넓게 요청하는 건 허용하되,
+        # 자가조정이 근거 부족으로 올린 하한 아래로는 못 내려간다(연결 RAG 노드 지배).
+        _floor = getattr(self, "_min_top_k", 0) or 0
+        try:
+            _tk = int(top_k)
+        except (TypeError, ValueError):
+            _tk = int(self._default_top_k)
+        if _floor and _tk < _floor:
+            logger.info("[RAG Tool] self-govern 검색 폭 하한 적용: top_k %s→%s", _tk, _floor)
+            _tk = _floor
+        top_k = _tk
 
         # 유효한 컬렉션인지 확인
         if collection_name not in self._collections:

@@ -30,6 +30,8 @@ logger = logging.getLogger("harness.runtime_config")
 # algebra 가 다루는 config dict view 에 실어야 하는 scalar 필드 (HarnessConfig 실 필드).
 _SCALAR_FIELDS = ("validation_threshold", "max_retries", "max_iterations", "temperature")
 _VALID_MODES = ("off", "observe", "act")
+# 검색 폭 자가조정이 쓰는 retrieval stage id — s04 가 rag_top_k 를 읽는 stage_params 키.
+_RETRIEVAL_STAGE = "s04_tool"
 
 
 class RuntimeConfigMutator:
@@ -204,6 +206,7 @@ class RuntimeConfigMutator:
         threshold: Optional[float],
         feedback: str = "",
         retry_count: int = 0,
+        rag_top_k: Optional[int] = None,
     ) -> int:
         """judge 미달로 retry 직전, **신호로부터** 보수적 config 변경을 제안·적용.
 
@@ -217,8 +220,13 @@ class RuntimeConfigMutator:
         신호→방향 매핑(보수적, 신호 없으면 아무 제안 안 함):
           1. score 가 threshold 미달 → temperature 를 **현재값보다 낮은** 이웃으로
              (더 결정적인 재시도). 후보 중 현재값 미만이 있을 때만.
-          2. 매 재시도 정체(score 정보 유무 무관, retry_count>=1) → validation_threshold
-             를 **현재값보다 낮은** 이웃으로 한 칸(무한 retry 완화 — 통과 문턱 낮춤).
+          2. **환경 지배** — 연결된 RAG 검색이 활성(rag_top_k 신호 존재)이고 근거 부족
+             (판정 미달 또는 재시도 정체)이면 rag_top_k 를 **현재값보다 높은** 이웃으로
+             한 칸(검색 폭 확장). 문턱을 낮춰 통과시키는 대신 실제 근거를 더 확보하는
+             방향. s04_tool.rag_top_k stage_param 으로 적용(journaled·gated).
+          3. 재시도 정체(retry_count>=1) → validation_threshold 를 **현재값보다 낮은**
+             이웃으로 한 칸(무한 retry 완화). 단 이번 회차에 검색 폭을 넓혔으면(품질 개선
+             시도 중) 문턱은 낮추지 않는다 — 확장 여지가 없을 때(rag_top_k 상한)만 완화.
         반환 = 제안/적용된 move 수.
         """
         # off 모드면 후보 계산 자체를 건너뛴다(관측 가능한 부작용 0).
@@ -245,14 +253,35 @@ class RuntimeConfigMutator:
             lowers = [c for c in _gen_candidates(key, cur) if isinstance(c, (int, float)) and c < cur]
             return max(lowers) if lowers else None
 
+        def _raise_neighbor(key: str, cur: Any) -> Any:
+            """유효 현재값보다 높은 가장 가까운 적응형 후보(상한 클램프). 없으면 None."""
+            c = _num(cur)
+            if c is None:
+                return None
+            from ..forge.algebra import _gen_candidates
+            highers = [x for x in _gen_candidates(key, c) if isinstance(x, (int, float)) and x > c]
+            return min(highers) if highers else None
+
         _score = _num(score)
         _threshold = _num(threshold)
-        if _score is not None and _threshold is not None and _score < _threshold:
+        _insufficient = _score is not None and _threshold is not None and _score < _threshold
+        # 1. 판정 미달 → temperature 낮춤(더 결정적 재시도).
+        if _insufficient:
             from .runtime_defaults import resolve_with_default
             t = _lower_neighbor("temperature", resolve_with_default(None, "temperature", 0.7))
             if t is not None and self.set_scalar("temperature", t):
                 proposed += 1
-        if retry_count >= 1:
+        # 2. 환경 지배 — 검색 활성 + 근거 부족이면 검색 폭(rag_top_k) 확장.
+        _broadened = False
+        _cur_rtk = _num(rag_top_k)
+        if _cur_rtk is not None and (_insufficient or retry_count >= 1):
+            rk = _raise_neighbor("rag_top_k", _cur_rtk)
+            if rk is not None and self.set_stage_param(_RETRIEVAL_STAGE, "rag_top_k", int(rk)):
+                proposed += 1
+                _broadened = True
+        # 3. 재시도 정체 → validation_threshold 낮춤. 단 검색 폭을 넓혔으면 이번엔 완화 안 함
+        #    (품질을 올려 통과 우선, 문턱 완화는 확장 불가 시 최후수단).
+        if retry_count >= 1 and not _broadened:
             vt = _lower_neighbor("validation_threshold", _threshold)
             if vt is not None and self.set_scalar("validation_threshold", vt):
                 proposed += 1
