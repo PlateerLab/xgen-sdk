@@ -118,6 +118,10 @@ EVALUATION_PROMPT_TEMPLATES: dict[str, str] = {
         "{criteria_block}\n\n"
         "User's question: {user_input}\n\n"
         "Assistant's response: {assistant_response}\n\n"
+        "Score each criterion on a graded 0.0-1.0 scale with partial credit — proportional to how "
+        "much of its requirement is met (e.g., 4 of 8 required items -> ~0.5), not pass/fail. "
+        "Set \"overall\" to the weighted average of the per-criterion scores (a MUST-PASS criterion "
+        "that fails forces overall 0).\n"
         "Respond with ONLY a JSON object (no markdown, no explanation):\n"
         "{{{criteria_json_fields}, \"overall\": 0.0, \"feedback\": \"brief feedback\"}}"
     ),

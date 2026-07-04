@@ -27,6 +27,7 @@ class MemoryStateProvider:
         *,
         recall: _RecallSrc = None,
         refined: _RefinedSrc = None,
+        prior_lessons: _RefinedSrc = None,
         max_recall: int = 8,
         max_refined: int = 5,
         max_lessons: int = 3,
@@ -35,6 +36,9 @@ class MemoryStateProvider:
     ) -> None:
         self._recall = recall
         self._refined = refined
+        # 런간 학습: 과거 실행에서 persist 된 실패 교훈(cross-run). 이번 런 loop_lessons 로 슬롯을
+        # 못 채운 만큼만 보강 → 같은 실수를 실행을 넘어 반복하지 않는다. RefinedMemory 형상.
+        self._prior_lessons = prior_lessons
         self.max_recall = max_recall
         self.max_refined = max_refined
         self.max_lessons = max_lessons
@@ -44,14 +48,30 @@ class MemoryStateProvider:
 
     def get_state_view(self, state) -> Optional[str]:
         parts: list[str] = []
-        # Reflexion: 이번 런의 최근 실패 교훈(in-run, bounded) — 같은 실수 반복 회피.
-        lessons = (getattr(state, "metadata", None) or {}).get("loop_lessons") or []
-        if lessons:
+        # Reflexion: 최근 실패 교훈 — 이번 런(in-run) 우선 + 과거 런(cross-run resume)으로 슬롯 보강.
+        # in-run loop_lessons 는 dict, prior_lessons 는 RefinedMemory — 둘 다 intent/outcome/memory_id.
+        inrun = (getattr(state, "metadata", None) or {}).get("loop_lessons") or []
+        prior = self._resolve(self._prior_lessons, state) or []
+
+        def _f(x, k):
+            return (x.get(k) if isinstance(x, dict) else getattr(x, k, None)) or ""
+
+        merged: list[tuple[str, str]] = []
+        seen: set = set()
+        for l in list(inrun)[-self.max_lessons:] + list(prior):
+            if len(merged) >= self.max_lessons:
+                break
+            key = _f(l, "memory_id") or _f(l, "intent")
+            if key and key in seen:
+                continue
+            seen.add(key)
+            merged.append((_f(l, "intent"), _f(l, "outcome")))
+        if merged:
             parts.append("### Recent attempt lessons (avoid repeating mistakes)")
-            for l in list(lessons)[-self.max_lessons:]:
-                line = f"- {l.get('intent', '')}".rstrip()
-                if l.get("outcome"):
-                    line += f" → {l['outcome']}"
+            for _intent, _outcome in merged:
+                line = f"- {_intent}".rstrip()
+                if _outcome:
+                    line += f" → {_outcome}"
                 parts.append(line)
         refined = self._resolve(self._refined, state) or []
         if refined:
