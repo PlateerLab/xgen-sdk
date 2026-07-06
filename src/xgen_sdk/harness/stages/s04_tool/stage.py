@@ -166,6 +166,11 @@ class ToolIndexStage(Stage):
 
         # 전역 등록 소스 + 이 실행에만 주입된 상태 범위 소스 (nested subpipeline 격리).
         sources = list(get_tool_sources()) + list(getattr(state, "extra_tool_sources", None) or [])
+        # 캔버스 명시 연결 소스 — 연결 도구는 deferred 여도 s03 이 이름 노출(지도).
+        _connected_source_ids = {
+            (getattr(s, "source_id", None) or type(s).__name__)
+            for s in (getattr(state, "extra_tool_sources", None) or [])
+        }
         await state.emit_verbose(StageSubstepEvent(
             stage_id=self.stage_id, substep="sources_discover_start",
             meta={
@@ -181,8 +186,9 @@ class ToolIndexStage(Stage):
             # 빈 리스트 = 그 source 자체를 카탈로그에서 완전 제외 (eager 도 deferred 도 X)
             if sub_allow is not None and len(sub_allow) == 0:
                 continue
-            # source_allowlist 게이트 — 명시 이름(selected_tools) 없는 게이트 소스는 스킵.
-            _gated = source_allowlist is not None and sid not in source_allowlist
+            # source_allowlist 게이트 — 플랫폼 대량 소스용. 캔버스 명시 연결 소스는 예외(지도에 올림).
+            _gated = (source_allowlist is not None and sid not in source_allowlist
+                      and sid not in _connected_source_ids)
             _explicit_pass = set(sub_allow or []) | set(global_allow or ())
             if _gated and not _explicit_pass:
                 continue
@@ -241,6 +247,7 @@ class ToolIndexStage(Stage):
                 from ..strategies.discovery import _get_default_tool_strategy
                 _default_mode = _get_default_tool_strategy()
                 _is_meta_tool = bool(set(tags or []) & {"builtin", "pd", "system"})
+                _connected = sid in _connected_source_ids
 
                 if has_explicit_selection:
                     # 명시 워크플로우 — 명시한 것만 eager / 나머지 deferred.
@@ -254,9 +261,8 @@ class ToolIndexStage(Stage):
                     is_eager = True
                     skip_completely = False
                 elif _default_mode == "strict":
-                    # 메타 도구만 eager, 그 외 카탈로그 완전 제외.
                     is_eager = _is_meta_tool
-                    skip_completely = not _is_meta_tool
+                    skip_completely = not (_is_meta_tool or _connected)  # 연결 도구는 지도에 남김
                 else:  # "deferred_default"
                     is_eager = False
                     skip_completely = False
@@ -279,7 +285,8 @@ class ToolIndexStage(Stage):
                     state.deferred_tools.append({
                         "name": nm,
                         "description": short_desc,
-                        "category": "deferred",
+                        # 연결=이름 노출(connected), 전역 대량=익명(deferred). 둘 다 자율 발견.
+                        "category": "connected" if _connected else "deferred",
                     })
                     deferred_added += 1
 
