@@ -89,7 +89,6 @@ async def _call_main_llm(
     state.turn_usages.append(usage)
     state.cost_usd += _estimate_cost(usage, state.provider.model_name)
 
-    # 항상 이번 호출 기준 동기화 — 도구호출-only 턴에 직전 답이 남으면 judge 가 스테일 답을 재채점한다
     state.last_assistant_text = result_text or ""
 
     # 도구 호출 감지

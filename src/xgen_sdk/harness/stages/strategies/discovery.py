@@ -132,7 +132,6 @@ class ProgressiveDiscovery(ToolDiscoveryStrategy):
         if hasattr(state, "metadata"):
             state.metadata.setdefault("tool_registry", {})["discover_tools"] = discover
 
-        # 명시 opt-in(stage_params.s04_tool.builtin_tools)이면 임계 미만이어도 등록 — 설정이 휴리스틱에 우선
         try:
             _sp = getattr(getattr(state, "config", None), "stage_params", None) or {}
             _sel_builtins = list((_sp.get("s04_tool") or {}).get("builtin_tools") or [])
