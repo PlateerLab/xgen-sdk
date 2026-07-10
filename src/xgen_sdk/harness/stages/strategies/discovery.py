@@ -132,7 +132,13 @@ class ProgressiveDiscovery(ToolDiscoveryStrategy):
         if hasattr(state, "metadata"):
             state.metadata.setdefault("tool_registry", {})["discover_tools"] = discover
 
-        if len(all_known) >= _SEARCH_TOOLS_THRESHOLD:
+        # 명시 opt-in(stage_params.s04_tool.builtin_tools)이면 임계 미만이어도 등록 — 설정이 휴리스틱에 우선
+        try:
+            _sp = getattr(getattr(state, "config", None), "stage_params", None) or {}
+            _sel_builtins = list((_sp.get("s04_tool") or {}).get("builtin_tools") or [])
+        except Exception:
+            _sel_builtins = []
+        if len(all_known) >= _SEARCH_TOOLS_THRESHOLD or "search_tools" in _sel_builtins:
             # state_ref 전달 — execute 시 state.tool_schemas(live)를 보게 해, discover 이후
             # s04 가 등록하는 연결 자원(rag_search/query_graph)도 search_tools 가 발견.
             search = SearchToolsTool(all_known, state_ref=state)
