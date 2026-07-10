@@ -143,8 +143,10 @@ class MemoryStateRecorder:
         )
         self._persist("activity", ev.to_dict())
         if decision == "retry":  # Reflexion: 실패 회차를 교훈으로 정제(다음 회차 반영)
+            # 교훈의 본체 = 미달 사유(s08 validation_feedback). 실패 답변을 담으면 고칠 정보 없이 오답만 재주입된다.
+            fb = (getattr(state, "validation_feedback", "") or "").strip()
             lesson = refine_message(
-                self._last_user(state), self._last_assistant(state),
+                self._last_user(state), fb or self._last_assistant(state),
                 memory_id=f"lesson-{ref.get('run_id', 'run')}-{self._seq}",
                 provenance={**ref, "kind": "lesson", "iteration": self._seq},
             )
