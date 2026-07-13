@@ -34,9 +34,11 @@ from xgen_sdk.storage.crypto import (
     Aes256GcmCipher,
     DEFAULT_ALGORITHM,
     # 전역 토글 (쓰기 측 — 읽기는 항상 자동 sniff)
+    # 판정 우선순위: 서비스 설정 resolver(app_config) > env
     DEFAULT_ENABLED_ENV,
     encryption_enabled,
     resolve_encrypt_flag,
+    set_encryption_enabled_resolver,
     # 키 관리
     DEFAULT_KEY_ENV,
     generate_key,
@@ -95,6 +97,7 @@ __all__ = [
     "DEFAULT_ENABLED_ENV",
     "encryption_enabled",
     "resolve_encrypt_flag",
+    "set_encryption_enabled_resolver",
     "DEFAULT_KEY_ENV",
     "generate_key",
     "decode_key",

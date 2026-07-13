@@ -73,16 +73,78 @@ DEFAULT_ENABLED_ENV = "XGEN_STORAGE_ENCRYPTION_ENABLED"
 KEY_LEN = 32                        # AES-256
 
 
+# ── 토글 resolver (app_config 연동 지점) ─────────────────────────────
+# 서비스가 자체 설정 시스템(xgen-core persistent_configs / ConfigClient 등)으로
+# 토글을 제어하도록 등록하는 훅. 등록되면 resolver 판단이 env 보다 우선하며,
+# resolver 가 None(판단 불가/미설정)을 반환하거나 예외를 던지면 env 로 fallback.
+# resolver 는 encryption_enabled() 호출마다 평가되므로 admin UI 에서 설정을
+# 바꾸면 재시작 없이 즉시 반영된다 (설정 조회 비용은 resolver 구현이 책임).
+_ENABLED_RESOLVER = None
+
+
+def set_encryption_enabled_resolver(resolver) -> None:
+    """저장소 암호화 토글의 외부 설정 resolver 등록.
+
+    Args:
+        resolver: 인자 없는 callable. 반환 계약:
+            - True/False  → 그 값으로 결정 (env 무시)
+            - None        → 판단 불가 — env XGEN_STORAGE_ENCRYPTION_ENABLED fallback
+            - str/int 도 허용 ("true"/"false"/"1"/"0" 등 — SDK 가 강제변환)
+            예외 발생 시 warning 로그 후 env fallback (실행을 깨뜨리지 않는다).
+        None 을 전달하면 등록 해제.
+
+    사용 예 (서비스 부트 시):
+        from xgen_sdk.storage import set_encryption_enabled_resolver
+        set_encryption_enabled_resolver(
+            lambda: config_composer.get_config_by_name(
+                "XGEN_STORAGE_ENCRYPTION_ENABLED").value
+        )
+    """
+    global _ENABLED_RESOLVER
+    if resolver is not None and not callable(resolver):
+        raise TypeError("resolver 는 callable 또는 None 이어야 합니다.")
+    _ENABLED_RESOLVER = resolver
+
+
+def _coerce_flag(v) -> Optional[bool]:
+    """resolver/설정 값의 관대한 bool 변환. 판단 불가 타입/빈 문자열 → None."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if not s:
+            return None
+        return s in {"1", "true", "yes", "on"}
+    return None
+
+
 def encryption_enabled() -> bool:
-    """저장소 암호화 전역 토글 (env XGEN_STORAGE_ENCRYPTION_ENABLED).
+    """저장소 암호화 전역 토글.
+
+    판정 우선순위:
+        1. set_encryption_enabled_resolver() 로 등록된 서비스 설정
+           (xgen-core app_config: XGEN_STORAGE_ENCRYPTION_ENABLED — admin UI 제어)
+        2. env XGEN_STORAGE_ENCRYPTION_ENABLED (resolver 미등록/판단불가 시)
 
     - 기본 **off** — 토글을 켜기 전까지 모든 동작은 기존과 100% 동일.
     - 이 토글은 **쓰기(암호화) 측에만** 적용된다. 읽기(복호화)는 토글과 무관하게
       객체의 매직 헤더를 보고 항상 자동 판별 — 암호화 도입 전/후 객체가 혼재해도
       안전하다 (safe rollout: 모든 서비스가 복호화 가능 상태로 먼저 배포된 뒤
-      환경별로 토글을 켠다).
+      설정을 켠다).
     """
-    return (os.getenv(DEFAULT_ENABLED_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+    if _ENABLED_RESOLVER is not None:
+        try:
+            resolved = _coerce_flag(_ENABLED_RESOLVER())
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("[storage.crypto] 토글 resolver 평가 실패 — env fallback: %s", e)
+            resolved = None
+        if resolved is not None:
+            return resolved
+    return _coerce_flag(os.getenv(DEFAULT_ENABLED_ENV)) or False
 
 
 def resolve_encrypt_flag(explicit: Optional[bool]) -> bool:
@@ -757,9 +819,11 @@ def stream_object_decrypted(
     fd, tmp_path = tempfile.mkstemp(prefix=".xse_stream_")
     os.close(fd)
     try:
-        # download_file 은 자동 복호화를 포함하므로 여기서는 저수준 fget 이 아니라
-        # 그대로 재사용한다 (평문/암호문 모두 tmp_path 에 평문으로 준비됨).
-        _download(client, object_name, tmp_path, bucket_name=bucket_name)
+        # 원문을 받아 명시 key 로 복호화 (key=None 이면 env) — download_file 의
+        # 내장 자동복호화는 env 키만 쓰므로, key 인자를 존중하기 위해 decrypt=False
+        # 로 받고 여기서 sniff+복호화한다 (평문 객체는 no-op).
+        _download(client, object_name, tmp_path, bucket_name=bucket_name, decrypt=False)
+        decrypt_file_inplace(tmp_path, key=key)
         with open(tmp_path, "rb") as f:
             while True:
                 chunk = f.read(chunk_size)

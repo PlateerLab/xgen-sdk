@@ -603,6 +603,88 @@ def test_toggle_on_without_key_fails_loud():
         assert not os.path.exists(c._path("b", "o.bin")), "실패했는데 객체가 생김"
 
 
+def test_enabled_resolver_precedence():
+    """app_config resolver 가 env 보다 우선, None/예외는 env fallback."""
+    from xgen_sdk.storage.crypto import set_encryption_enabled_resolver
+
+    try:
+        # 1) resolver True — env off 여도 on
+        with _env(**{DEFAULT_ENABLED_ENV: None}):
+            set_encryption_enabled_resolver(lambda: True)
+            assert encryption_enabled() is True
+            # 2) resolver False — env on 이어도 off (설정이 명시적으로 껐다)
+            with _env(**{DEFAULT_ENABLED_ENV: "true"}):
+                set_encryption_enabled_resolver(lambda: False)
+                assert encryption_enabled() is False
+                # 3) resolver None — env fallback (on)
+                set_encryption_enabled_resolver(lambda: None)
+                assert encryption_enabled() is True
+                # 4) resolver 예외 — env fallback (on)
+                def _boom():
+                    raise RuntimeError("config down")
+                set_encryption_enabled_resolver(_boom)
+                assert encryption_enabled() is True
+            # 5) 문자열 값 강제변환 ("false" → off, "1" → on, "" → env fallback)
+            set_encryption_enabled_resolver(lambda: "false")
+            assert encryption_enabled() is False
+            set_encryption_enabled_resolver(lambda: "1")
+            assert encryption_enabled() is True
+            set_encryption_enabled_resolver(lambda: "")
+            assert encryption_enabled() is False  # env 미설정 → 기본 off
+        # 6) 등록 해제 → env 만
+        set_encryption_enabled_resolver(None)
+        with _env(**{DEFAULT_ENABLED_ENV: "yes"}):
+            assert encryption_enabled() is True
+        # 7) non-callable 거부
+        try:
+            set_encryption_enabled_resolver("notcallable")
+            raise AssertionError("non-callable resolver 통과")
+        except TypeError:
+            pass
+    finally:
+        set_encryption_enabled_resolver(None)
+
+
+def test_resolver_drives_transparent_upload():
+    """resolver on + env off 상태에서 SDK upload_file 이 암호화하는지."""
+    from xgen_sdk.storage.crypto import set_encryption_enabled_resolver
+
+    try:
+        with _env(**{DEFAULT_ENABLED_ENV: None, DEFAULT_KEY_ENV: _KEY_B64}), \
+                tempfile.TemporaryDirectory() as d:
+            set_encryption_enabled_resolver(lambda: True)
+            c = _FakeMinioClient(d)
+            src = os.path.join(d, "s.bin")
+            with open(src, "wb") as f:
+                f.write(b"resolver-driven")
+            sdk_upload_file(c, src, "o.bin", bucket_name="b")
+            assert is_encrypted_file(c._path("b", "o.bin")), "resolver on 인데 평문 업로드"
+            out = os.path.join(d, "out.bin")
+            sdk_download_file(c, "o.bin", out, bucket_name="b")
+            with open(out, "rb") as f:
+                assert f.read() == b"resolver-driven"
+    finally:
+        set_encryption_enabled_resolver(None)
+
+
+def test_stream_object_decrypted_explicit_key():
+    """stream_object_decrypted 가 명시 key 인자를 실제로 사용하는지 (env 키 없이)."""
+    with _env(**{DEFAULT_ENABLED_ENV: None, DEFAULT_KEY_ENV: None}), \
+            tempfile.TemporaryDirectory() as d:
+        c = _FakeMinioClient(d)
+        payload = os.urandom(10_000)
+        # 명시 key 로 암호화해 저장
+        src = os.path.join(d, "p.bin")
+        enc = os.path.join(d, "e.bin")
+        with open(src, "wb") as f:
+            f.write(payload)
+        encrypt_file(src, enc, key=KEY)
+        shutil.copyfile(enc, c._path("b", "o.bin"))
+        # env 키가 없어도 명시 key 로 복호화 스트림 성공해야 함
+        got = b"".join(stream_object_decrypted(c, "o.bin", bucket_name="b", key=KEY))
+        assert got == payload
+
+
 def test_primitives_bytes_and_stream():
     """직접 구현부용 프리미티브: put/get bytes + 스트림 복호화 + inplace."""
     with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: _KEY_B64}), \
