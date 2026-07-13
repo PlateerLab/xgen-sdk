@@ -39,11 +39,12 @@ from xgen_sdk.storage.crypto import (
     encryption_enabled,
     resolve_encrypt_flag,
     set_encryption_enabled_resolver,
-    # 키 관리
+    # 키 관리 (resolver: app_config > env)
     DEFAULT_KEY_ENV,
     generate_key,
     decode_key,
     load_key_from_env,
+    set_encryption_key_resolver,
     # 암복호화 (복호화는 알고리즘 자동 식별)
     encrypt_bytes,
     decrypt_bytes,
@@ -102,6 +103,7 @@ __all__ = [
     "generate_key",
     "decode_key",
     "load_key_from_env",
+    "set_encryption_key_resolver",
     "encrypt_bytes",
     "decrypt_bytes",
     "encrypt_file",

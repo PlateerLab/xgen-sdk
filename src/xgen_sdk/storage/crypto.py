@@ -212,24 +212,93 @@ def decode_key(value: str) -> bytes:
     )
 
 
-def load_key_from_env(env_var: str = DEFAULT_KEY_ENV) -> bytes:
-    """환경변수에서 키를 로드. 미설정 시 EncryptionKeyError."""
+def load_key_from_env(env_var: str = DEFAULT_KEY_ENV) -> Optional[bytes]:
+    """환경변수에서 키를 로드. 미설정 시 None (fallback 을 위해 예외 아님)."""
     raw = os.getenv(env_var)
     if not raw:
-        raise EncryptionKeyError(
-            f"환경변수 {env_var} 가 설정되어 있지 않습니다. "
-            "generate_key() 로 키를 만들어 배포 시크릿으로 주입하세요."
-        )
+        return None
     return decode_key(raw)
 
 
+# ── 키 resolver (app_config 연동 지점) ───────────────────────────────
+# 서비스가 자체 설정 시스템(xgen-core persistent_configs)으로 키를 공급하도록
+# 등록하는 훅. 등록되면 env 보다 우선. resolver 는 base64/hex 문자열 또는
+# 32바이트 bytes 또는 None(미설정) 을 반환할 수 있다.
+_KEY_RESOLVER = None
+
+
+def set_encryption_key_resolver(resolver) -> None:
+    """암호화 키의 외부 설정 resolver 등록.
+
+    Args:
+        resolver: 인자 없는 callable. 반환 계약:
+            - 32바이트 bytes            → 그대로 사용
+            - base64/hex 문자열(32B)     → decode 후 사용
+            - None/빈 문자열             → 미설정 — env(XGEN_STORAGE_ENCRYPTION_KEY) fallback
+            예외 발생 시 warning 로그 후 env fallback.
+        None 을 전달하면 등록 해제.
+
+    사용 예 (서비스 부트 시):
+        set_encryption_key_resolver(
+            lambda: config_composer.get_config_by_name(
+                "XGEN_STORAGE_ENCRYPTION_KEY").value
+        )
+    """
+    global _KEY_RESOLVER
+    if resolver is not None and not callable(resolver):
+        raise TypeError("resolver 는 callable 또는 None 이어야 합니다.")
+    _KEY_RESOLVER = resolver
+
+
+def _coerce_key(value) -> Optional[bytes]:
+    """resolver/설정 값을 32바이트 키로 정규화. 미설정(None/빈) → None."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) == KEY_LEN:
+            return bytes(value)
+        raise EncryptionKeyError(f"키 bytes 길이 오류: {len(value)} (필요 {KEY_LEN}).")
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        return decode_key(value)
+    raise EncryptionKeyError(f"키 타입 오류: {type(value).__name__}")
+
+
 def _resolve_key(key: Optional[bytes]) -> bytes:
-    """명시 키 우선, 없으면 환경변수. 길이 검증 포함."""
+    """키 결정. 우선순위: 명시 인자 > resolver(app_config) > env.
+
+    어느 경로에서도 키를 얻지 못하면 EncryptionKeyError (평문 조용히 업로드 방지).
+    """
     if key is not None:
         if not isinstance(key, (bytes, bytearray)) or len(key) != KEY_LEN:
-            raise EncryptionKeyError(f"키는 {KEY_LEN}바이트 bytes 여야 합니다 (len={len(key) if isinstance(key, (bytes, bytearray)) else 'N/A'}).")
+            raise EncryptionKeyError(
+                f"키는 {KEY_LEN}바이트 bytes 여야 합니다 "
+                f"(len={len(key) if isinstance(key, (bytes, bytearray)) else 'N/A'})."
+            )
         return bytes(key)
-    return load_key_from_env()
+
+    # resolver (서비스 app_config)
+    if _KEY_RESOLVER is not None:
+        try:
+            resolved = _coerce_key(_KEY_RESOLVER())
+        except EncryptionKeyError:
+            raise
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("[storage.crypto] 키 resolver 평가 실패 — env fallback: %s", e)
+            resolved = None
+        if resolved is not None:
+            return resolved
+
+    # env fallback
+    env_key = load_key_from_env()
+    if env_key is not None:
+        return env_key
+
+    raise EncryptionKeyError(
+        "암호화 키가 없습니다 — app_config(XGEN_STORAGE_ENCRYPTION_KEY) 설정 또는 "
+        f"환경변수 {DEFAULT_KEY_ENV} 를 주입하세요. generate_key() 로 키를 만들 수 있습니다."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

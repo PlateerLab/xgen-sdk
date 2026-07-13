@@ -245,10 +245,13 @@ def test_env_key_loading():
         enc = encrypt_bytes(b"env-key-data")
         assert decrypt_bytes(enc) == b"env-key-data"
 
+        # 새 계약: load_key_from_env 는 미설정 시 None (예외 아님 — fallback 용)
         del os.environ[DEFAULT_KEY_ENV]
+        assert load_key_from_env() is None
+        # 하지만 실제 암복호화는 키 없으면 EncryptionKeyError (fail-loud)
         try:
-            load_key_from_env()
-            raise AssertionError("env 미설정인데 키 로드 성공")
+            encrypt_bytes(b"x")
+            raise AssertionError("키 없이 암호화 성공")
         except EncryptionKeyError:
             pass
     finally:
@@ -256,6 +259,58 @@ def test_env_key_loading():
             os.environ[DEFAULT_KEY_ENV] = prev
         else:
             os.environ.pop(DEFAULT_KEY_ENV, None)
+
+
+def test_key_resolver_precedence():
+    """키 resolver(app_config) 가 env 보다 우선, None/예외는 env fallback."""
+    from xgen_sdk.storage.crypto import set_encryption_key_resolver
+
+    KEY_A = bytes(range(32))
+    KEY_B = bytes(range(32, 64))
+    try:
+        with _env(**{DEFAULT_KEY_ENV: None}):
+            # 1) resolver bytes — env 없이도 동작
+            set_encryption_key_resolver(lambda: KEY_A)
+            enc = encrypt_bytes(b"resolver-key")
+            assert decrypt_bytes(enc) == b"resolver-key"
+            # 2) resolver base64 문자열도 허용
+            import base64
+            set_encryption_key_resolver(lambda: base64.b64encode(KEY_B).decode())
+            enc2 = encrypt_bytes(b"str-key")
+            # KEY_B 로 암호화됐으니 KEY_B 로만 복호화
+            assert decrypt_bytes(enc2, key=KEY_B) == b"str-key"
+        # 3) resolver None + env 설정 → env fallback
+        with _env(**{DEFAULT_KEY_ENV: base64_b64(KEY_A)}):
+            set_encryption_key_resolver(lambda: None)
+            enc3 = encrypt_bytes(b"env-fallback")
+            assert decrypt_bytes(enc3, key=KEY_A) == b"env-fallback"
+            # 4) resolver 예외 → env fallback
+            def _boom():
+                raise RuntimeError("config down")
+            set_encryption_key_resolver(_boom)
+            enc4 = encrypt_bytes(b"exc-fallback")
+            assert decrypt_bytes(enc4, key=KEY_A) == b"exc-fallback"
+        # 5) resolver None + env 없음 → EncryptionKeyError
+        with _env(**{DEFAULT_KEY_ENV: None}):
+            set_encryption_key_resolver(lambda: None)
+            try:
+                encrypt_bytes(b"nope")
+                raise AssertionError("키 전무인데 암호화 성공")
+            except EncryptionKeyError:
+                pass
+        # 6) non-callable 거부
+        try:
+            set_encryption_key_resolver(123)
+            raise AssertionError("non-callable 통과")
+        except TypeError:
+            pass
+    finally:
+        set_encryption_key_resolver(None)
+
+
+def base64_b64(b: bytes) -> str:
+    import base64
+    return base64.b64encode(b).decode()
 
 
 # ──────────────────────────────────────────────────────────────────────
