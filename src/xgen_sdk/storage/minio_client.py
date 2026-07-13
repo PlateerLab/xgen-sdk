@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import mimetypes
 import logging
 from functools import lru_cache
@@ -97,30 +98,61 @@ def upload_file(
         EncryptionKeyError — 평문이 조용히 올라가는 사고를 막는다.
     """
     from xgen_sdk.storage import crypto  # 지연 import (crypto ↔ minio_client 순환 회피)
+    from xgen_sdk.storage import audit
 
-    if crypto.resolve_encrypt_flag(encrypt):
-        fd, tmp_path = tempfile.mkstemp(prefix=".xse_up_")
-        os.close(fd)
-        try:
-            crypto.encrypt_file(source_path, tmp_path)
+    _t0 = time.monotonic()
+    do_encrypt = crypto.resolve_encrypt_flag(encrypt)
+    try:
+        plaintext_size = os.path.getsize(source_path)
+    except OSError:
+        plaintext_size = None
+
+    try:
+        if do_encrypt:
+            fd, tmp_path = tempfile.mkstemp(prefix=".xse_up_")
+            os.close(fd)
+            try:
+                crypto.encrypt_file(source_path, tmp_path)
+                try:
+                    stored_size = os.path.getsize(tmp_path)
+                except OSError:
+                    stored_size = None
+                client.fput_object(
+                    bucket_name=bucket_name,
+                    object_name=object_name,
+                    file_path=tmp_path,
+                    content_type="application/octet-stream",
+                )
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        else:
+            stored_size = plaintext_size
             client.fput_object(
                 bucket_name=bucket_name,
                 object_name=object_name,
-                file_path=tmp_path,
-                content_type="application/octet-stream",
+                file_path=source_path,
+                content_type=content_type or "application/octet-stream",
             )
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        return
+    except Exception as e:
+        audit.emit_storage_audit(
+            "upload", bucket_name, object_name,
+            plaintext_size_bytes=plaintext_size, encrypted=do_encrypt,
+            encryption_algorithm=(crypto.DEFAULT_ALGORITHM if do_encrypt else None),
+            content_type=content_type, status="error", error_message=str(e),
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+        )
+        raise
 
-    client.fput_object(
-        bucket_name=bucket_name,
-        object_name=object_name,
-        file_path=source_path,
-        content_type=content_type or "application/octet-stream",
+    audit.emit_storage_audit(
+        "upload", bucket_name, object_name,
+        size_bytes=stored_size, plaintext_size_bytes=plaintext_size,
+        encrypted=do_encrypt,
+        encryption_algorithm=(crypto.DEFAULT_ALGORITHM if do_encrypt else None),
+        content_type=("application/octet-stream" if do_encrypt else content_type),
+        status="success", duration_ms=int((time.monotonic() - _t0) * 1000),
     )
 
 def download_file(
@@ -142,14 +174,37 @@ def download_file(
                              평문인 척 넘기지 않는다).
         decrypt=False      → 원본 바이트 그대로 (암호문 원문이 필요한 특수 경우).
     """
-    client.fget_object(
-        bucket_name=bucket_name,
-        object_name=object_name,
-        file_path=destination_path,
+    from xgen_sdk.storage import audit
+    _t0 = time.monotonic()
+    was_encrypted = False
+    try:
+        client.fget_object(
+            bucket_name=bucket_name,
+            object_name=object_name,
+            file_path=destination_path,
+        )
+        if decrypt:
+            from xgen_sdk.storage import crypto  # 지연 import (순환 회피)
+            was_encrypted = bool(crypto.decrypt_file_inplace(destination_path))
+    except Exception as e:
+        audit.emit_storage_audit(
+            "download", bucket_name, object_name,
+            encrypted=was_encrypted, status="error", error_message=str(e),
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+        )
+        raise
+
+    try:
+        final_size = os.path.getsize(destination_path)
+    except OSError:
+        final_size = None
+    from xgen_sdk.storage import crypto as _crypto  # DEFAULT_ALGORITHM
+    audit.emit_storage_audit(
+        "download", bucket_name, object_name,
+        size_bytes=final_size, encrypted=was_encrypted,
+        encryption_algorithm=(_crypto.DEFAULT_ALGORITHM if was_encrypted else None),
+        status="success", duration_ms=int((time.monotonic() - _t0) * 1000),
     )
-    if decrypt:
-        from xgen_sdk.storage import crypto  # 지연 import (순환 회피)
-        crypto.decrypt_file_inplace(destination_path)
 
 
 def file_exists(

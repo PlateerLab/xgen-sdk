@@ -784,6 +784,131 @@ def test_primitives_bytes_and_stream():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 8. 감사(audit) 훅 — upload/download 이벤트 기록
+# ──────────────────────────────────────────────────────────────────────
+from xgen_sdk.storage.audit import (  # noqa: E402
+    set_storage_audit_logger,
+    storage_audit_context,
+)
+
+
+def test_audit_upload_download_events():
+    """upload_file/download_file 이 성공 시 audit event 를 방출하는지."""
+    events = []
+    set_storage_audit_logger(lambda e: events.append(e))
+    try:
+        with _env(**{DEFAULT_ENABLED_ENV: None}), tempfile.TemporaryDirectory() as d:
+            c = _FakeMinioClient(d)
+            src = os.path.join(d, "s.bin")
+            payload = os.urandom(1234)
+            with open(src, "wb") as f:
+                f.write(payload)
+
+            # 평문 업로드 → upload event (encrypted False)
+            with storage_audit_context(user_id=7, session_id="sess-1", source="test", service="unit"):
+                sdk_upload_file(c, src, "o.bin", bucket_name="b")
+            up = [e for e in events if e["operation"] == "upload"][-1]
+            assert up["encrypted"] is False
+            assert up["encryption_algorithm"] is None
+            assert up["object_path"] == "b/o.bin"
+            assert up["size_bytes"] == 1234
+            assert up["status"] == "success"
+            # 컨텍스트 병합 확인
+            assert up["user_id"] == 7 and up["session_id"] == "sess-1"
+            assert up["source"] == "test" and up["service"] == "unit"
+
+            # 다운로드 → download event
+            out = os.path.join(d, "out.bin")
+            sdk_download_file(c, "o.bin", out, bucket_name="b")
+            dn = [e for e in events if e["operation"] == "download"][-1]
+            assert dn["encrypted"] is False
+            assert dn["size_bytes"] == 1234
+            # 컨텍스트 밖이므로 user_id 없음
+            assert dn.get("user_id") is None
+    finally:
+        set_storage_audit_logger(None)
+
+
+def test_audit_encrypted_events_report_algorithm():
+    """암호화 업로드 event 는 encrypted=True + algorithm 을 보고."""
+    events = []
+    set_storage_audit_logger(lambda e: events.append(e))
+    try:
+        with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: _KEY_B64}), \
+                tempfile.TemporaryDirectory() as d:
+            c = _FakeMinioClient(d)
+            src = os.path.join(d, "s.bin")
+            payload = os.urandom(5000)
+            with open(src, "wb") as f:
+                f.write(payload)
+            sdk_upload_file(c, src, "o.bin", bucket_name="b")
+            up = [e for e in events if e["operation"] == "upload"][-1]
+            assert up["encrypted"] is True
+            assert up["encryption_algorithm"] == "aes256-gcm"
+            assert up["plaintext_size_bytes"] == 5000
+            assert up["size_bytes"] == 5000 + 36  # 엔벨로프 오버헤드
+            # 다운로드 → 복호화 event
+            out = os.path.join(d, "out.bin")
+            sdk_download_file(c, "o.bin", out, bucket_name="b")
+            dn = [e for e in events if e["operation"] == "download"][-1]
+            assert dn["encrypted"] is True
+            assert dn["encryption_algorithm"] == "aes256-gcm"
+            assert dn["size_bytes"] == 5000  # 복호화된 평문 크기
+    finally:
+        set_storage_audit_logger(None)
+
+
+def test_audit_bytes_primitives_events():
+    """put_bytes_encrypted / get_object_bytes_decrypted 도 event 방출."""
+    events = []
+    set_storage_audit_logger(lambda e: events.append(e))
+    try:
+        with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: _KEY_B64}), \
+                tempfile.TemporaryDirectory() as d:
+            c = _FakeMinioClient(d)
+            put_bytes_encrypted(c, b"hello-audit", "k.bin", bucket_name="b", content_type="text/plain")
+            up = [e for e in events if e["operation"] == "upload"][-1]
+            assert up["encrypted"] is True and up["encryption_algorithm"] == "aes256-gcm"
+            got = get_object_bytes_decrypted(c, "k.bin", bucket_name="b")
+            assert got == b"hello-audit"
+            dn = [e for e in events if e["operation"] == "download"][-1]
+            assert dn["encrypted"] is True and dn["size_bytes"] == len(b"hello-audit")
+    finally:
+        set_storage_audit_logger(None)
+
+
+def test_audit_logger_error_never_breaks_operation():
+    """로거가 예외를 던져도 storage 작업은 정상 완료."""
+    def _boom(_e):
+        raise RuntimeError("logger down")
+    set_storage_audit_logger(_boom)
+    try:
+        with _env(**{DEFAULT_ENABLED_ENV: None}), tempfile.TemporaryDirectory() as d:
+            c = _FakeMinioClient(d)
+            src = os.path.join(d, "s.bin")
+            with open(src, "wb") as f:
+                f.write(b"still works")
+            sdk_upload_file(c, src, "o.bin", bucket_name="b")  # 예외 나면 실패
+            out = os.path.join(d, "out.bin")
+            sdk_download_file(c, "o.bin", out, bucket_name="b")
+            with open(out, "rb") as f:
+                assert f.read() == b"still works"
+    finally:
+        set_storage_audit_logger(None)
+
+
+def test_audit_no_logger_is_noop():
+    """로거 미등록 시 완전 no-op (예외/부작용 없음)."""
+    set_storage_audit_logger(None)
+    with _env(**{DEFAULT_ENABLED_ENV: None}), tempfile.TemporaryDirectory() as d:
+        c = _FakeMinioClient(d)
+        src = os.path.join(d, "s.bin")
+        with open(src, "wb") as f:
+            f.write(b"x")
+        sdk_upload_file(c, src, "o.bin", bucket_name="b")  # 아무 일도 없어야
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 러너 (pytest 없이 직접 실행 가능)
 # ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

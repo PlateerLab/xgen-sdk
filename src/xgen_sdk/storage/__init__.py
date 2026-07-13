@@ -69,6 +69,13 @@ from xgen_sdk.storage.crypto import (
     UnsupportedAlgorithmError,
     DecryptionError,
 )
+from xgen_sdk.storage.audit import (
+    # 감사(audit) 훅 — 모든 upload/download 를 서비스 DB(minio_logs)에 기록
+    set_storage_audit_logger,
+    storage_audit_context,
+    audit_context_snapshot,
+    emit_storage_audit,
+)
 
 __all__ = [
     "get_minio_client",
@@ -123,4 +130,9 @@ __all__ = [
     "EncryptionKeyError",
     "UnsupportedAlgorithmError",
     "DecryptionError",
+    # audit
+    "set_storage_audit_logger",
+    "storage_audit_context",
+    "audit_context_snapshot",
+    "emit_storage_audit",
 ]

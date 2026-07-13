@@ -821,19 +821,41 @@ def put_bytes_encrypted(
 
     client.put_object 직접 호출 사이트의 drop-in 대체용.
     """
+    import time as _time
     from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME
+    from xgen_sdk.storage import audit
 
     if bucket_name is None:
         bucket_name = DEFAULT_BUCKET_NAME
+    _t0 = _time.monotonic()
     payload = encrypt_bytes_if_enabled(data, key=key, algorithm=algorithm, encrypt=encrypt)
-    if payload is not data:
+    did_encrypt = payload is not data
+    if did_encrypt:
         content_type = "application/octet-stream"  # 암호문의 정직한 타입
-    client.put_object(
-        bucket_name,
-        object_name,
-        BytesIO(payload),
-        length=len(payload),
-        content_type=content_type,
+    try:
+        client.put_object(
+            bucket_name,
+            object_name,
+            BytesIO(payload),
+            length=len(payload),
+            content_type=content_type,
+        )
+    except Exception as e:
+        audit.emit_storage_audit(
+            "upload", bucket_name, object_name,
+            plaintext_size_bytes=len(data), encrypted=did_encrypt,
+            encryption_algorithm=(algorithm if did_encrypt else None),
+            content_type=content_type, status="error", error_message=str(e),
+            duration_ms=int((_time.monotonic() - _t0) * 1000),
+        )
+        raise
+    audit.emit_storage_audit(
+        "upload", bucket_name, object_name,
+        size_bytes=len(payload), plaintext_size_bytes=len(data),
+        encrypted=did_encrypt,
+        encryption_algorithm=(algorithm if did_encrypt else None),
+        content_type=content_type, status="success",
+        duration_ms=int((_time.monotonic() - _t0) * 1000),
     )
 
 
@@ -847,20 +869,39 @@ def get_object_bytes_decrypted(
 
     client.get_object(...).read() 직접 호출 사이트의 drop-in 대체용.
     """
+    import time as _time
     from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME
+    from xgen_sdk.storage import audit
 
     if bucket_name is None:
         bucket_name = DEFAULT_BUCKET_NAME
-    response = client.get_object(bucket_name, object_name)
+    _t0 = _time.monotonic()
     try:
-        raw = response.read()
-    finally:
+        response = client.get_object(bucket_name, object_name)
         try:
-            response.close()
-            response.release_conn()
-        except Exception:  # pylint: disable=broad-except
-            pass
-    return decrypt_bytes_if_encrypted(raw, key=key)
+            raw = response.read()
+        finally:
+            try:
+                response.close()
+                response.release_conn()
+            except Exception:  # pylint: disable=broad-except
+                pass
+    except Exception as e:
+        audit.emit_storage_audit(
+            "download", bucket_name, object_name,
+            status="error", error_message=str(e),
+            duration_ms=int((_time.monotonic() - _t0) * 1000),
+        )
+        raise
+    was_encrypted = is_encrypted_data(raw)
+    result = decrypt_bytes_if_encrypted(raw, key=key)
+    audit.emit_storage_audit(
+        "download", bucket_name, object_name,
+        size_bytes=len(result), encrypted=was_encrypted,
+        encryption_algorithm=(DEFAULT_ALGORITHM if was_encrypted else None),
+        status="success", duration_ms=int((_time.monotonic() - _t0) * 1000),
+    )
+    return result
 
 
 def stream_object_decrypted(
