@@ -33,6 +33,10 @@ from xgen_sdk.storage.crypto import (
     # 기본 구현 (AES-256-GCM)
     Aes256GcmCipher,
     DEFAULT_ALGORITHM,
+    # 전역 토글 (쓰기 측 — 읽기는 항상 자동 sniff)
+    DEFAULT_ENABLED_ENV,
+    encryption_enabled,
+    resolve_encrypt_flag,
     # 키 관리
     DEFAULT_KEY_ENV,
     generate_key,
@@ -49,6 +53,13 @@ from xgen_sdk.storage.crypto import (
     # MinIO 결합 — 업로드 이전 암호화 / 다운로드 시 복호화
     upload_file_encrypted,
     download_file_decrypted,
+    # 직접 구현부(서비스 자체 client 호출)용 프리미티브
+    decrypt_file_inplace,
+    encrypt_bytes_if_enabled,
+    decrypt_bytes_if_encrypted,
+    put_bytes_encrypted,
+    get_object_bytes_decrypted,
+    stream_object_decrypted,
     # 예외
     StorageCryptoError,
     EncryptionKeyError,
@@ -81,6 +92,9 @@ __all__ = [
     "get_cipher",
     "Aes256GcmCipher",
     "DEFAULT_ALGORITHM",
+    "DEFAULT_ENABLED_ENV",
+    "encryption_enabled",
+    "resolve_encrypt_flag",
     "DEFAULT_KEY_ENV",
     "generate_key",
     "decode_key",
@@ -94,6 +108,12 @@ __all__ = [
     "is_encrypted_file",
     "upload_file_encrypted",
     "download_file_decrypted",
+    "decrypt_file_inplace",
+    "encrypt_bytes_if_enabled",
+    "decrypt_bytes_if_encrypted",
+    "put_bytes_encrypted",
+    "get_object_bytes_decrypted",
+    "stream_object_decrypted",
     "StorageCryptoError",
     "EncryptionKeyError",
     "UnsupportedAlgorithmError",

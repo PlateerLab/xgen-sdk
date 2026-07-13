@@ -69,7 +69,25 @@ _CHUNK_SIZE = 64 * 1024
 
 DEFAULT_ALGORITHM = "aes256-gcm"
 DEFAULT_KEY_ENV = "XGEN_STORAGE_ENCRYPTION_KEY"
+DEFAULT_ENABLED_ENV = "XGEN_STORAGE_ENCRYPTION_ENABLED"
 KEY_LEN = 32                        # AES-256
+
+
+def encryption_enabled() -> bool:
+    """저장소 암호화 전역 토글 (env XGEN_STORAGE_ENCRYPTION_ENABLED).
+
+    - 기본 **off** — 토글을 켜기 전까지 모든 동작은 기존과 100% 동일.
+    - 이 토글은 **쓰기(암호화) 측에만** 적용된다. 읽기(복호화)는 토글과 무관하게
+      객체의 매직 헤더를 보고 항상 자동 판별 — 암호화 도입 전/후 객체가 혼재해도
+      안전하다 (safe rollout: 모든 서비스가 복호화 가능 상태로 먼저 배포된 뒤
+      환경별로 토글을 켠다).
+    """
+    return (os.getenv(DEFAULT_ENABLED_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_encrypt_flag(explicit: Optional[bool]) -> bool:
+    """호출부 명시값 우선, None 이면 전역 토글."""
+    return encryption_enabled() if explicit is None else bool(explicit)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -589,6 +607,165 @@ def download_file_decrypted(
             "[storage.crypto] 복호화 다운로드 완료: %s/%s", bucket_name, object_name,
         )
         return True
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 직접 구현부(서비스 자체 client 호출 사이트)용 프리미티브
+# ──────────────────────────────────────────────────────────────────────
+# SDK 의 upload_file/download_file 을 거치지 않고 client.put_object/get_object/
+# fput_object/fget_object 를 직접 쓰는 서비스 코드가 최소 diff 로 암복호화를
+# 결합할 수 있게 하는 저수준 헬퍼들.
+#
+# 원칙 (safe rollout):
+#   - 읽기: 토글과 무관하게 **항상** 매직 헤더 sniff → 암호화면 복호화, 평문이면
+#     그대로. (모든 reader 가 먼저 복호화-가능 상태로 배포된 뒤 토글을 켠다)
+#   - 쓰기: encryption_enabled() 토글(또는 encrypt 명시 인자)을 따른다.
+
+def decrypt_file_inplace(path: str, key: Optional[bytes] = None) -> bool:
+    """다운로드된 파일이 암호화 포맷이면 같은 경로에 복호화 반영 (원자적).
+
+    평문 파일이면 아무 것도 하지 않는다 — 혼재기 하위 호환의 핵심 프리미티브.
+
+    Returns:
+        True = 복호화 수행됨, False = 평문(무변경)
+    """
+    if not is_encrypted_file(path):
+        return False
+    # decrypt_file 은 in-place 를 금지하므로: 원본을 .enc 임시로 비켜두고 복호화.
+    enc_tmp = path + ".xse_src_tmp"
+    os.replace(path, enc_tmp)
+    try:
+        decrypt_file(enc_tmp, path, key=key)
+        return True
+    except BaseException:
+        # 실패 시 원본(암호문)을 되돌려 호출부가 상황을 보존/진단할 수 있게 한다.
+        try:
+            if not os.path.exists(path):
+                os.replace(enc_tmp, path)
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            os.unlink(enc_tmp)
+        except OSError:
+            pass
+
+
+def encrypt_bytes_if_enabled(
+    data: bytes,
+    key: Optional[bytes] = None,
+    algorithm: str = DEFAULT_ALGORITHM,
+    encrypt: Optional[bool] = None,
+) -> bytes:
+    """토글(또는 encrypt 명시)에 따라 bytes 를 암호화. off 면 원본 그대로."""
+    if not resolve_encrypt_flag(encrypt):
+        return data
+    return encrypt_bytes(data, key=key, algorithm=algorithm)
+
+
+def decrypt_bytes_if_encrypted(data: bytes, key: Optional[bytes] = None) -> bytes:
+    """bytes 가 암호화 포맷이면 복호화, 평문이면 그대로 (읽기 측 sniff 규칙)."""
+    if not is_encrypted_data(data):
+        return data
+    return decrypt_bytes(data, key=key)
+
+
+def put_bytes_encrypted(
+    client,
+    data: bytes,
+    object_name: str,
+    bucket_name: Optional[str] = None,
+    content_type: str = "application/octet-stream",
+    key: Optional[bytes] = None,
+    algorithm: str = DEFAULT_ALGORITHM,
+    encrypt: Optional[bool] = None,
+) -> None:
+    """bytes 를 (토글에 따라 암호화 후) client.put_object 로 업로드.
+
+    client.put_object 직접 호출 사이트의 drop-in 대체용.
+    """
+    from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME
+
+    if bucket_name is None:
+        bucket_name = DEFAULT_BUCKET_NAME
+    payload = encrypt_bytes_if_enabled(data, key=key, algorithm=algorithm, encrypt=encrypt)
+    if payload is not data:
+        content_type = "application/octet-stream"  # 암호문의 정직한 타입
+    client.put_object(
+        bucket_name,
+        object_name,
+        BytesIO(payload),
+        length=len(payload),
+        content_type=content_type,
+    )
+
+
+def get_object_bytes_decrypted(
+    client,
+    object_name: str,
+    bucket_name: Optional[str] = None,
+    key: Optional[bytes] = None,
+) -> bytes:
+    """client.get_object 로 읽고, 암호화 포맷이면 복호화해 bytes 반환.
+
+    client.get_object(...).read() 직접 호출 사이트의 drop-in 대체용.
+    """
+    from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME
+
+    if bucket_name is None:
+        bucket_name = DEFAULT_BUCKET_NAME
+    response = client.get_object(bucket_name, object_name)
+    try:
+        raw = response.read()
+    finally:
+        try:
+            response.close()
+            response.release_conn()
+        except Exception:  # pylint: disable=broad-except
+            pass
+    return decrypt_bytes_if_encrypted(raw, key=key)
+
+
+def stream_object_decrypted(
+    client,
+    object_name: str,
+    bucket_name: Optional[str] = None,
+    key: Optional[bytes] = None,
+    chunk_size: int = _CHUNK_SIZE,
+):
+    """객체를 (필요 시 복호화하여) 평문 청크 이터레이터로 반환.
+
+    StreamingResponse 등 HTTP 청크 응답 사이트용 — 암호화 객체를 그대로
+    스트리밍하면 클라이언트가 암호문을 받게 되는 문제를 막는다.
+    무결성 검증(태그)이 끝난 뒤에만 yield 를 시작한다 (temp 복호화 후 스트림).
+
+    사용:
+        for chunk in stream_object_decrypted(client, obj, bucket):
+            yield chunk   # FastAPI StreamingResponse 등
+    """
+    from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME, download_file as _download
+
+    if bucket_name is None:
+        bucket_name = DEFAULT_BUCKET_NAME
+
+    fd, tmp_path = tempfile.mkstemp(prefix=".xse_stream_")
+    os.close(fd)
+    try:
+        # download_file 은 자동 복호화를 포함하므로 여기서는 저수준 fget 이 아니라
+        # 그대로 재사용한다 (평문/암호문 모두 tmp_path 에 평문으로 준비됨).
+        _download(client, object_name, tmp_path, bucket_name=bucket_name)
+        with open(tmp_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
     finally:
         try:
             os.unlink(tmp_path)

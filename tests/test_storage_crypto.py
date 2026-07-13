@@ -430,6 +430,223 @@ def test_minio_glue_plaintext_policy():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 7. SDK 공통 경로 투명 암복호화 (upload_file/download_file + env 토글)
+# ──────────────────────────────────────────────────────────────────────
+from xgen_sdk.storage.crypto import (  # noqa: E402
+    DEFAULT_ENABLED_ENV,
+    decrypt_file_inplace,
+    decrypt_bytes_if_encrypted,
+    encrypt_bytes_if_enabled,
+    encryption_enabled,
+    get_object_bytes_decrypted,
+    put_bytes_encrypted,
+    stream_object_decrypted,
+)
+from xgen_sdk.storage.minio_client import download_file as sdk_download_file  # noqa: E402
+from xgen_sdk.storage.minio_client import upload_file as sdk_upload_file  # noqa: E402
+
+
+class _FakeResponse:
+    def __init__(self, data: bytes):
+        self._d = data
+
+    def read(self):
+        return self._d
+
+    def close(self):
+        pass
+
+    def release_conn(self):
+        pass
+
+
+class _FakeMinioClient:
+    """fput/fget/put/get 을 로컬 디렉토리로 흉내내는 가짜 클라이언트."""
+
+    def __init__(self, store_dir: str):
+        self._dir = store_dir
+
+    def _path(self, bucket: str, name: str) -> str:
+        return os.path.join(self._dir, f"{bucket}__{name}".replace("/", "__"))
+
+    def fput_object(self, bucket_name, object_name, file_path, content_type=None):
+        shutil.copyfile(file_path, self._path(bucket_name, object_name))
+
+    def fget_object(self, bucket_name, object_name, file_path):
+        shutil.copyfile(self._path(bucket_name, object_name), file_path)
+
+    def put_object(self, bucket_name, object_name, data, length, content_type=None):
+        with open(self._path(bucket_name, object_name), "wb") as f:
+            f.write(data.read())
+
+    def get_object(self, bucket_name, object_name):
+        with open(self._path(bucket_name, object_name), "rb") as f:
+            return _FakeResponse(f.read())
+
+
+class _env:
+    """테스트용 env 임시 설정/복원."""
+
+    def __init__(self, **kv):
+        self._kv = kv
+        self._prev = {}
+
+    def __enter__(self):
+        for k, v in self._kv.items():
+            self._prev[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return self
+
+    def __exit__(self, *a):
+        for k, prev in self._prev.items():
+            if prev is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = prev
+
+
+_KEY_B64 = __import__("base64").b64encode(KEY).decode()
+
+
+def test_transparent_toggle_off_is_passthrough():
+    """토글 off(기본) — upload_file/download_file 은 기존과 100% 동일 (평문)."""
+    with _env(**{DEFAULT_ENABLED_ENV: None}), tempfile.TemporaryDirectory() as d:
+        assert not encryption_enabled()
+        c = _FakeMinioClient(d)
+        src = os.path.join(d, "s.bin")
+        payload = os.urandom(50_000)
+        with open(src, "wb") as f:
+            f.write(payload)
+        sdk_upload_file(c, src, "o.bin", bucket_name="b")
+        stored = c._path("b", "o.bin")
+        with open(stored, "rb") as f:
+            assert f.read() == payload, "토글 off 인데 객체가 변형됨"
+        out = os.path.join(d, "out.bin")
+        sdk_download_file(c, "o.bin", out, bucket_name="b")
+        with open(out, "rb") as f:
+            assert f.read() == payload
+
+
+def test_transparent_toggle_on_roundtrip():
+    """토글 on — 업로드는 암호문 저장, 다운로드는 자동 복호화."""
+    with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: _KEY_B64}), \
+            tempfile.TemporaryDirectory() as d:
+        assert encryption_enabled()
+        c = _FakeMinioClient(d)
+        src = os.path.join(d, "s.bin")
+        payload = os.urandom(200_000)
+        with open(src, "wb") as f:
+            f.write(payload)
+        sdk_upload_file(c, src, "o.bin", bucket_name="b")
+
+        stored = c._path("b", "o.bin")
+        assert is_encrypted_file(stored), "토글 on 인데 객체가 평문"
+        with open(stored, "rb") as f:
+            assert payload not in f.read(), "저장 객체에 평문 노출"
+
+        out = os.path.join(d, "out.bin")
+        sdk_download_file(c, "o.bin", out, bucket_name="b")
+        with open(out, "rb") as f:
+            assert f.read() == payload, "자동 복호화 실패"
+
+        # decrypt=False → 암호문 원문
+        raw = os.path.join(d, "raw.bin")
+        sdk_download_file(c, "o.bin", raw, bucket_name="b", decrypt=False)
+        assert is_encrypted_file(raw)
+
+
+def test_transparent_mixed_plaintext_read():
+    """토글 on 이어도 평문(레거시) 객체 다운로드는 그대로 통과 — 혼재 안전."""
+    with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: _KEY_B64}), \
+            tempfile.TemporaryDirectory() as d:
+        c = _FakeMinioClient(d)
+        with open(c._path("b", "legacy.txt"), "wb") as f:
+            f.write(b"legacy plaintext")
+        out = os.path.join(d, "out.txt")
+        sdk_download_file(c, "legacy.txt", out, bucket_name="b")
+        with open(out, "rb") as f:
+            assert f.read() == b"legacy plaintext"
+
+
+def test_transparent_explicit_encrypt_overrides_toggle():
+    """encrypt=True 명시 — 토글 off 여도 암호화."""
+    with _env(**{DEFAULT_ENABLED_ENV: None, DEFAULT_KEY_ENV: _KEY_B64}), \
+            tempfile.TemporaryDirectory() as d:
+        c = _FakeMinioClient(d)
+        src = os.path.join(d, "s.bin")
+        with open(src, "wb") as f:
+            f.write(b"force encrypt")
+        sdk_upload_file(c, src, "o.bin", bucket_name="b", encrypt=True)
+        assert is_encrypted_file(c._path("b", "o.bin"))
+        # encrypt=False 명시 — 토글 on 이어도 평문
+        with _env(**{DEFAULT_ENABLED_ENV: "1"}):
+            sdk_upload_file(c, src, "p.bin", bucket_name="b", encrypt=False)
+            assert not is_encrypted_file(c._path("b", "p.bin"))
+
+
+def test_toggle_on_without_key_fails_loud():
+    """토글 on + 키 미설정 → 평문이 조용히 올라가지 않고 EncryptionKeyError."""
+    with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: None}), \
+            tempfile.TemporaryDirectory() as d:
+        c = _FakeMinioClient(d)
+        src = os.path.join(d, "s.bin")
+        with open(src, "wb") as f:
+            f.write(b"x")
+        try:
+            sdk_upload_file(c, src, "o.bin", bucket_name="b")
+            raise AssertionError("키 없이 암호화 업로드가 통과")
+        except EncryptionKeyError:
+            pass
+        assert not os.path.exists(c._path("b", "o.bin")), "실패했는데 객체가 생김"
+
+
+def test_primitives_bytes_and_stream():
+    """직접 구현부용 프리미티브: put/get bytes + 스트림 복호화 + inplace."""
+    with _env(**{DEFAULT_ENABLED_ENV: "true", DEFAULT_KEY_ENV: _KEY_B64}), \
+            tempfile.TemporaryDirectory() as d:
+        c = _FakeMinioClient(d)
+        payload = os.urandom(150_000)
+
+        # put_bytes_encrypted (토글 on → 암호문 저장) / get_object_bytes_decrypted
+        put_bytes_encrypted(c, payload, "img.png", bucket_name="b", content_type="image/png")
+        assert is_encrypted_file(c._path("b", "img.png"))
+        assert get_object_bytes_decrypted(c, "img.png", bucket_name="b") == payload
+
+        # 평문 객체도 get_object_bytes_decrypted 는 그대로 통과
+        with open(c._path("b", "plain.bin"), "wb") as f:
+            f.write(b"plain")
+        assert get_object_bytes_decrypted(c, "plain.bin", bucket_name="b") == b"plain"
+
+        # stream_object_decrypted — 암호문/평문 모두 평문 청크
+        got = b"".join(stream_object_decrypted(c, "img.png", bucket_name="b"))
+        assert got == payload
+        got2 = b"".join(stream_object_decrypted(c, "plain.bin", bucket_name="b"))
+        assert got2 == b"plain"
+
+        # encrypt_bytes_if_enabled / decrypt_bytes_if_encrypted 대칭
+        enc = encrypt_bytes_if_enabled(b"abc")
+        assert is_encrypted_data(enc)
+        assert decrypt_bytes_if_encrypted(enc) == b"abc"
+        assert decrypt_bytes_if_encrypted(b"notmagic") == b"notmagic"
+
+        # decrypt_file_inplace — 평문 no-op / 암호문 복호화
+        p = os.path.join(d, "f.bin")
+        with open(p, "wb") as f:
+            f.write(b"plainfile")
+        assert decrypt_file_inplace(p) is False
+        encrypt_file_path = os.path.join(d, "f.enc")
+        encrypt_file(p, encrypt_file_path, key=KEY)
+        assert decrypt_file_inplace(encrypt_file_path, key=KEY) is True
+        with open(encrypt_file_path, "rb") as f:
+            assert f.read() == b"plainfile"
+        leftovers = [n for n in os.listdir(d) if ".xse_src_tmp" in n]
+        assert not leftovers, f"inplace temp 잔존: {leftovers}"
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 러너 (pytest 없이 직접 실행 가능)
 # ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

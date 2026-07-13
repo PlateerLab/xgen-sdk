@@ -82,10 +82,40 @@ def upload_file(
     object_name: str,
     bucket_name: str = DEFAULT_BUCKET_NAME,
     content_type: Optional[str] = None,
+    encrypt: Optional[bool] = None,
 ) -> None:
     """
     Upload a local file to MinIO under the requested object name.
+
+    암호화 (xgen_sdk.storage.crypto — SDK 공통 관리):
+        encrypt=None(기본)  → env XGEN_STORAGE_ENCRYPTION_ENABLED 토글을 따름.
+                              토글 off(기본)면 기존과 100% 동일한 평문 업로드.
+        encrypt=True/False  → 호출부 명시 강제.
+        암호화 시 저장 객체는 AES-256-GCM 암호문(엔벨로프 포맷)이며
+        content_type 은 application/octet-stream 으로 강제된다.
+        토글이 켜져 있는데 키(XGEN_STORAGE_ENCRYPTION_KEY)가 없으면
+        EncryptionKeyError — 평문이 조용히 올라가는 사고를 막는다.
     """
+    from xgen_sdk.storage import crypto  # 지연 import (crypto ↔ minio_client 순환 회피)
+
+    if crypto.resolve_encrypt_flag(encrypt):
+        fd, tmp_path = tempfile.mkstemp(prefix=".xse_up_")
+        os.close(fd)
+        try:
+            crypto.encrypt_file(source_path, tmp_path)
+            client.fput_object(
+                bucket_name=bucket_name,
+                object_name=object_name,
+                file_path=tmp_path,
+                content_type="application/octet-stream",
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return
+
     client.fput_object(
         bucket_name=bucket_name,
         object_name=object_name,
@@ -98,15 +128,28 @@ def download_file(
     object_name: str,
     destination_path: str,
     bucket_name: str = DEFAULT_BUCKET_NAME,
+    decrypt: bool = True,
 ) -> None:
     """
     Download a file from MinIO to a local path.
+
+    복호화 (xgen_sdk.storage.crypto — SDK 공통 관리):
+        decrypt=True(기본) → 받은 객체가 xgen 암호화 포맷(매직 헤더)이면 자동
+                             복호화해 destination 에 평문을 남긴다. 평문 객체는
+                             sniff 만 하고 그대로 — 암호화 도입 전/후 혼재 안전.
+                             암호화 객체인데 키가 없으면 EncryptionKeyError,
+                             변조/키불일치는 DecryptionError (암호문을 조용히
+                             평문인 척 넘기지 않는다).
+        decrypt=False      → 원본 바이트 그대로 (암호문 원문이 필요한 특수 경우).
     """
     client.fget_object(
         bucket_name=bucket_name,
         object_name=object_name,
         file_path=destination_path,
     )
+    if decrypt:
+        from xgen_sdk.storage import crypto  # 지연 import (순환 회피)
+        crypto.decrypt_file_inplace(destination_path)
 
 
 def file_exists(
@@ -354,6 +397,11 @@ def get_presigned_url(
     """
     외부에서 접근 가능한 presigned download URL 발급.
     MINIO_PUBLIC_ENDPOINT가 미설정이면 None 반환.
+
+    주의 — 암호화된 객체(upload_file encrypt / XGEN_STORAGE_ENCRYPTION_ENABLED)의
+    presigned URL 은 **암호문 그대로** 서빙된다 (URL 직접 다운로드에는 복호화
+    계층이 없음). 외부 공개가 필요한 객체는 평문 업로드(encrypt=False)하거나,
+    다운로드 후 복호화해 전달하는 경로를 쓸 것.
     """
     client = _get_public_minio_client()
     if client is None:
