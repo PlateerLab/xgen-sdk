@@ -2,6 +2,7 @@
 xgen_sdk.storage — 통합 MinIO Storage 모듈
 
 파일 업로드/다운로드, 목록 조회, 복사, presigned URL 등
++ 클라이언트측 암복호화 (crypto — 업로드 이전 암호화 / 다운로드 시 복호화)
 """
 
 from xgen_sdk.storage.minio_client import (
@@ -24,6 +25,36 @@ from xgen_sdk.storage.minio_client import (
     CACHE_DIR,
     IMAGE_EXTENSIONS,
 )
+from xgen_sdk.storage.crypto import (
+    # 추상 계약 / 확장 지점
+    FileCipher,
+    register_cipher,
+    get_cipher,
+    # 기본 구현 (AES-256-GCM)
+    Aes256GcmCipher,
+    DEFAULT_ALGORITHM,
+    # 키 관리
+    DEFAULT_KEY_ENV,
+    generate_key,
+    decode_key,
+    load_key_from_env,
+    # 암복호화 (복호화는 알고리즘 자동 식별)
+    encrypt_bytes,
+    decrypt_bytes,
+    encrypt_file,
+    decrypt_file,
+    decrypt_stream,
+    is_encrypted_data,
+    is_encrypted_file,
+    # MinIO 결합 — 업로드 이전 암호화 / 다운로드 시 복호화
+    upload_file_encrypted,
+    download_file_decrypted,
+    # 예외
+    StorageCryptoError,
+    EncryptionKeyError,
+    UnsupportedAlgorithmError,
+    DecryptionError,
+)
 
 __all__ = [
     "get_minio_client",
@@ -44,4 +75,27 @@ __all__ = [
     "GOVERNANCE_BUCKET",
     "CACHE_DIR",
     "IMAGE_EXTENSIONS",
+    # crypto
+    "FileCipher",
+    "register_cipher",
+    "get_cipher",
+    "Aes256GcmCipher",
+    "DEFAULT_ALGORITHM",
+    "DEFAULT_KEY_ENV",
+    "generate_key",
+    "decode_key",
+    "load_key_from_env",
+    "encrypt_bytes",
+    "decrypt_bytes",
+    "encrypt_file",
+    "decrypt_file",
+    "decrypt_stream",
+    "is_encrypted_data",
+    "is_encrypted_file",
+    "upload_file_encrypted",
+    "download_file_decrypted",
+    "StorageCryptoError",
+    "EncryptionKeyError",
+    "UnsupportedAlgorithmError",
+    "DecryptionError",
 ]
