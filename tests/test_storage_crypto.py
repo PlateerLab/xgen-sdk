@@ -897,6 +897,27 @@ def test_audit_logger_error_never_breaks_operation():
         set_storage_audit_logger(None)
 
 
+def test_audit_suppress_context():
+    """storage_audit_context(suppress=True) 안에서는 emit 이 no-op."""
+    events = []
+    set_storage_audit_logger(lambda e: events.append(e))
+    try:
+        with _env(**{DEFAULT_ENABLED_ENV: None}), tempfile.TemporaryDirectory() as d:
+            c = _FakeMinioClient(d)
+            src = os.path.join(d, "s.bin")
+            with open(src, "wb") as f:
+                f.write(b"suppress me")
+            # suppress=True → 이벤트 방출 안 됨
+            with storage_audit_context(user_id=1, source="x", suppress=True):
+                sdk_upload_file(c, src, "o.bin", bucket_name="b")
+            assert len(events) == 0, "suppress 인데 event 방출됨"
+            # suppress 밖 → 정상 방출
+            sdk_upload_file(c, src, "o2.bin", bucket_name="b")
+            assert len(events) == 1
+    finally:
+        set_storage_audit_logger(None)
+
+
 def test_audit_no_logger_is_noop():
     """로거 미등록 시 완전 no-op (예외/부작용 없음)."""
     set_storage_audit_logger(None)

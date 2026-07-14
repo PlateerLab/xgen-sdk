@@ -41,6 +41,9 @@ _AUDIT_CONTEXT: ContextVar[Dict[str, Any]] = ContextVar(
 # event 에 병합 허용되는 컨텍스트 키 (화이트리스트 — 예기치 않은 키 유입 차단).
 _CONTEXT_KEYS = ("user_id", "session_id", "interaction_id", "source", "service")
 
+# 내부 제어 키 (event 에 노출되지 않음).
+_SUPPRESS_KEY = "_suppress_audit"
+
 
 def set_storage_audit_logger(fn: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     """storage 감사 로거 등록. None 이면 해제.
@@ -56,11 +59,16 @@ def set_storage_audit_logger(fn: Optional[Callable[[Dict[str, Any]], None]]) -> 
 
 
 @contextlib.contextmanager
-def storage_audit_context(**fields: Any):
+def storage_audit_context(suppress: bool = False, **fields: Any):
     """이 블록 안 storage 작업의 audit event 에 서비스 컨텍스트를 병합.
 
     허용 키: user_id, session_id, interaction_id, source, service.
     None 값은 무시(기존 컨텍스트를 덮어쓰지 않음). 중첩 시 상위 컨텍스트에 누적.
+
+    Args:
+        suppress: True 면 이 블록 안 storage 작업의 emit 이 no-op 이 된다.
+            호출부가 minio_logs 를 **명시적으로** 기록할 때 SDK 훅의 중복 기록을
+            막기 위한 용도 (예: 문서 업로드 플로우가 async 컨텍스트에서 직접 write).
 
     예:
         with storage_audit_context(user_id=uid, session_id=sid, source="collection"):
@@ -70,6 +78,8 @@ def storage_audit_context(**fields: Any):
     for k, v in fields.items():
         if v is not None and k in _CONTEXT_KEYS:
             merged[k] = v
+    if suppress:
+        merged[_SUPPRESS_KEY] = True
     token = _AUDIT_CONTEXT.set(merged)
     try:
         yield
@@ -105,6 +115,8 @@ def emit_storage_audit(
         return
     try:
         ctx = _AUDIT_CONTEXT.get() or {}
+        if ctx.get(_SUPPRESS_KEY):
+            return  # 호출부가 명시적으로 기록 — SDK 훅 중복 방지
         event: Dict[str, Any] = {
             "operation": operation,
             "bucket_name": bucket_name,
