@@ -287,12 +287,28 @@ If a question needs entity relationships > pure semantic similarity → consider
 
 def get_skill_body(name: str) -> Optional[str]:
     """Skill body lookup. None 이면 등록 안 됨."""
-    return _BUILTIN_SKILL_BODIES.get(name)
+    body = _BUILTIN_SKILL_BODIES.get(name)
+    if body is not None:
+        return body
+    for source in _LEDGER_SOURCES:
+        try:
+            return source.view(name)
+        except KeyError:
+            continue
+        except Exception as e:
+            logger.warning("[skills] ledger source view(%s) 실패: %s", name, e)
+    return None
 
 
 def list_skill_names() -> list[str]:
     """등록된 skill 이름 list. discover 용."""
-    return sorted(_BUILTIN_SKILL_BODIES.keys())
+    names = set(_BUILTIN_SKILL_BODIES.keys())
+    for source in _LEDGER_SOURCES:
+        try:
+            names.update(item.name for item in source.list())
+        except Exception as e:
+            logger.warning("[skills] ledger source list 실패: %s", e)
+    return sorted(names)
 
 
 def register_skill_body(name: str, body: str) -> None:
@@ -305,6 +321,22 @@ def register_skill_body(name: str, body: str) -> None:
         return
     _BUILTIN_SKILL_BODIES[name] = body
     logger.debug("[skills] registered skill body: %s (%d chars)", name, len(body))
+
+
+_LEDGER_SOURCES: list = []
+
+
+def register_ledger_source(source) -> None:
+    """Jermes skill-forge 원장(spine 등)을 회상 소스로 주입 — 빌트인/코드등록/
+    entry_points 에 이은 4번째 소스.
+
+    source 계약 = ``xgen_sdk.harness.skill_forge.recall.LedgerSkillSource``:
+    list() -> 메타데이터(name/description), view(name) -> 본문(미존재시 KeyError).
+    staged(미검증) 스킬 노출 여부는 source 생성 시 정책으로 결정.
+    """
+    if source is not None and source not in _LEDGER_SOURCES:
+        _LEDGER_SOURCES.append(source)
+        logger.debug("[skills] ledger source registered: %r", type(source).__name__)
 
 
 def _discover_from_entry_points() -> None:
