@@ -1,0 +1,3 @@
+# KSIGN UDE 벤더 사본 — 전 파일 바이트 보존 (EOL 변환 금지). license/agent/.so 는
+# 바이너리이며 1바이트 변형도 손상이다.
+src/xgen_sdk/jeju_bank/storage/ude/PythonAPIForUDE/** -text

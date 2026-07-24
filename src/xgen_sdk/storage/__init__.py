@@ -33,10 +33,16 @@ from xgen_sdk.storage.crypto import (
     # 기본 구현 (AES-256-GCM)
     Aes256GcmCipher,
     DEFAULT_ALGORITHM,
-    # 전역 토글 (쓰기 측 — 읽기는 항상 자동 sniff)
+    # 전역 토글/모드 (쓰기 측 — 읽기는 항상 자동 sniff)
     # 판정 우선순위: 서비스 설정 resolver(app_config) > env
+    # 모드 3값: Disable / AES-256 / UDE (과거 bool 값 하위호환 해석)
     DEFAULT_ENABLED_ENV,
+    MODE_DISABLE,
+    MODE_AES,
+    MODE_UDE,
     encryption_enabled,
+    encryption_mode,
+    resolve_write_algorithm,
     resolve_encrypt_flag,
     set_encryption_enabled_resolver,
     # 키 관리 (resolver: app_config > env)
@@ -53,6 +59,7 @@ from xgen_sdk.storage.crypto import (
     decrypt_stream,
     is_encrypted_data,
     is_encrypted_file,
+    detect_algorithm_name,
     # MinIO 결합 — 업로드 이전 암호화 / 다운로드 시 복호화
     upload_file_encrypted,
     download_file_decrypted,
@@ -75,6 +82,15 @@ from xgen_sdk.storage.audit import (
     storage_audit_context,
     audit_context_snapshot,
     emit_storage_audit,
+)
+# jeju 전용 UDE (KSIGN) — cipher 등록은 crypto 모듈 로드 시 이미 완료.
+# 정책 resolver 는 다른 resolver 들과 같은 자리(xgen_sdk.storage)에서 쓰도록 재수출.
+from xgen_sdk.jeju_bank.storage.ude import (
+    DEFAULT_UDE_POLICY,
+    UDE_POLICY_ENV,
+    UdeAria256Cipher,
+    resolve_ude_policy,
+    set_ude_policy_resolver,
 )
 
 __all__ = [
@@ -103,7 +119,12 @@ __all__ = [
     "Aes256GcmCipher",
     "DEFAULT_ALGORITHM",
     "DEFAULT_ENABLED_ENV",
+    "MODE_DISABLE",
+    "MODE_AES",
+    "MODE_UDE",
     "encryption_enabled",
+    "encryption_mode",
+    "resolve_write_algorithm",
     "resolve_encrypt_flag",
     "set_encryption_enabled_resolver",
     "DEFAULT_KEY_ENV",
@@ -118,6 +139,7 @@ __all__ = [
     "decrypt_stream",
     "is_encrypted_data",
     "is_encrypted_file",
+    "detect_algorithm_name",
     "upload_file_encrypted",
     "download_file_decrypted",
     "decrypt_file_inplace",
@@ -135,4 +157,10 @@ __all__ = [
     "storage_audit_context",
     "audit_context_snapshot",
     "emit_storage_audit",
+    # jeju 전용 UDE (KSIGN)
+    "DEFAULT_UDE_POLICY",
+    "UDE_POLICY_ENV",
+    "UdeAria256Cipher",
+    "resolve_ude_policy",
+    "set_ude_policy_resolver",
 ]
