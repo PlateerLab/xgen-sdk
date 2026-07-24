@@ -72,6 +72,14 @@ DEFAULT_KEY_ENV = "XGEN_STORAGE_ENCRYPTION_KEY"
 DEFAULT_ENABLED_ENV = "XGEN_STORAGE_ENCRYPTION_ENABLED"
 KEY_LEN = 32                        # AES-256
 
+# ── 암호화 모드 (XGEN_STORAGE_ENCRYPTION_ENABLED 의 3값화) ───────────
+# 설정값은 "Disable" / "AES-256" / "UDE" (jeju). 내부 정규화 값은 아래 상수 —
+# AES/UDE 모드 값은 쓰기 시 사용할 algorithm_name 과 동일하게 두어 매핑을 없앤다.
+# 하위호환: 과거 bool(true/false) 값은 기존 의미(AES on/off)로 해석된다.
+MODE_DISABLE = "disable"
+MODE_AES = "aes256-gcm"
+MODE_UDE = "ude-aria256"
+
 
 # ── 토글 resolver (app_config 연동 지점) ─────────────────────────────
 # 서비스가 자체 설정 시스템(xgen-core persistent_configs / ConfigClient 등)으로
@@ -122,29 +130,74 @@ def _coerce_flag(v) -> Optional[bool]:
     return None
 
 
-def encryption_enabled() -> bool:
-    """저장소 암호화 전역 토글.
+def _coerce_mode(v) -> Optional[str]:
+    """설정/resolver 값 → 정규화 모드(MODE_*). 판단 불가 → None.
+
+    허용 입력 (대소문자 무시):
+        - "Disable"/"disabled"/"off"/"none"          → MODE_DISABLE
+        - "AES-256"/"aes256"/"aes"/"aes256-gcm"      → MODE_AES
+        - "UDE"/"ude-aria256"/"aria_256_ude"         → MODE_UDE
+        - 하위호환(bool 시절 값): True/"true"/"1"/"on"/"yes" → MODE_AES,
+          False/"false"/"0"/"no" → MODE_DISABLE
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return MODE_AES if v else MODE_DISABLE
+    if isinstance(v, (int, float)):
+        return MODE_AES if v else MODE_DISABLE
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if not s:
+            return None
+        if s in {"disable", "disabled", "off", "none", "false", "0", "no"}:
+            return MODE_DISABLE
+        if s in {"aes-256", "aes256", "aes", "aes256-gcm", "aes-256-gcm", "true", "1", "on", "yes"}:
+            return MODE_AES
+        if s in {"ude", "ude-aria256", "ude_aria256", "aria_256_ude", "aria-256-ude"}:
+            return MODE_UDE
+    return None
+
+
+def encryption_mode() -> str:
+    """저장소 암호화 모드 (쓰기 측 알고리즘 선택) — MODE_DISABLE/MODE_AES/MODE_UDE.
 
     판정 우선순위:
         1. set_encryption_enabled_resolver() 로 등록된 서비스 설정
-           (xgen-core app_config: XGEN_STORAGE_ENCRYPTION_ENABLED — admin UI 제어)
+           (xgen-core app_config: XGEN_STORAGE_ENCRYPTION_ENABLED —
+           이제 "Disable"/"AES-256"/"UDE" 3값. 과거 bool 값도 하위호환 해석)
         2. env XGEN_STORAGE_ENCRYPTION_ENABLED (resolver 미등록/판단불가 시)
 
-    - 기본 **off** — 토글을 켜기 전까지 모든 동작은 기존과 100% 동일.
+    기본 MODE_DISABLE. 읽기(복호화)는 모드와 무관하게 엔벨로프의 algorithm_id 로
+    항상 자동 판별 — AES/UDE/평문 객체가 혼재해도 안전하다.
+    """
+    if _ENABLED_RESOLVER is not None:
+        try:
+            resolved = _coerce_mode(_ENABLED_RESOLVER())
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("[storage.crypto] 모드 resolver 평가 실패 — env fallback: %s", e)
+            resolved = None
+        if resolved is not None:
+            return resolved
+    return _coerce_mode(os.getenv(DEFAULT_ENABLED_ENV)) or MODE_DISABLE
+
+
+def resolve_write_algorithm() -> Optional[str]:
+    """현재 모드의 쓰기 알고리즘 이름. 비활성이면 None."""
+    mode = encryption_mode()
+    return None if mode == MODE_DISABLE else mode
+
+
+def encryption_enabled() -> bool:
+    """저장소 암호화 전역 토글 (모드 != Disable).
+
+    - 기본 **off** — 켜기 전까지 모든 동작은 기존과 100% 동일.
     - 이 토글은 **쓰기(암호화) 측에만** 적용된다. 읽기(복호화)는 토글과 무관하게
       객체의 매직 헤더를 보고 항상 자동 판별 — 암호화 도입 전/후 객체가 혼재해도
       안전하다 (safe rollout: 모든 서비스가 복호화 가능 상태로 먼저 배포된 뒤
       설정을 켠다).
     """
-    if _ENABLED_RESOLVER is not None:
-        try:
-            resolved = _coerce_flag(_ENABLED_RESOLVER())
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning("[storage.crypto] 토글 resolver 평가 실패 — env fallback: %s", e)
-            resolved = None
-        if resolved is not None:
-            return resolved
-    return _coerce_flag(os.getenv(DEFAULT_ENABLED_ENV)) or False
+    return encryption_mode() != MODE_DISABLE
 
 
 def resolve_encrypt_flag(explicit: Optional[bool]) -> bool:
@@ -383,6 +436,9 @@ class FileCipher(ABC):
     algorithm_id: ClassVar[int]
     #: 알고리즘 이름 (get_cipher(name=...) 로 선택)
     algorithm_name: ClassVar[str]
+    #: SDK 키(_resolve_key) 필요 여부 — 외부 에이전트가 키를 관리하는 알고리즘
+    #: (예: UDE)은 False 로 두면 키 미설정 환경에서도 동작한다.
+    requires_key: ClassVar[bool] = True
 
     @classmethod
     def from_key(cls, key: bytes) -> "FileCipher":
@@ -545,16 +601,33 @@ def register_cipher(cls: Type[FileCipher]) -> Type[FileCipher]:
 
 
 def get_cipher(algorithm: str = DEFAULT_ALGORITHM, key: Optional[bytes] = None) -> FileCipher:
-    """알고리즘 이름으로 cipher 인스턴스를 생성. key 생략 시 환경변수 로드."""
+    """알고리즘 이름으로 cipher 인스턴스를 생성. key 생략 시 환경변수 로드.
+
+    requires_key=False 인 알고리즘(UDE 등 에이전트 키 관리)은 키 resolve 를
+    생략한다 — 키 미설정 환경에서도 사용 가능.
+    """
     cls = _REGISTRY_BY_NAME.get(algorithm)
     if cls is None:
         raise UnsupportedAlgorithmError(
             f"알 수 없는 알고리즘: '{algorithm}' (등록됨: {sorted(_REGISTRY_BY_NAME)})"
         )
-    return cls.from_key(_resolve_key(key))
+    return cls.from_key(_resolve_key(key) if cls.requires_key else None)
 
 
 register_cipher(Aes256GcmCipher)
+
+# ── jeju 전용 UDE cipher 등록 (algorithm_id=2) ────────────────────────
+# import 는 가볍다 — 네이티브 .so 로드는 최초 암복호화 시점까지 지연되므로
+# 모든 환경(Windows 개발기 포함)에서 안전하다. 등록해 두어야 UDE 로 암호화된
+# 객체(alg_id=2)를 어느 서비스든 자동 판별·복호화할 수 있다.
+try:
+    from xgen_sdk.jeju_bank.storage.ude.ude_cipher import UdeAria256Cipher
+
+    register_cipher(UdeAria256Cipher)
+except Exception as _ude_import_error:  # pylint: disable=broad-except
+    logger.warning(
+        "[storage.crypto] UDE cipher 등록 실패 — jeju UDE 모드 비활성: %s", _ude_import_error,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -580,8 +653,19 @@ def decrypt_stream(reader: BinaryIO, writer: BinaryIO, key: Optional[bytes] = No
         raise UnsupportedAlgorithmError(
             f"알 수 없는 algorithm_id={alg_id} — SDK 버전이 낮거나 커스텀 cipher 미등록."
         )
-    cipher = cls.from_key(_resolve_key(key))
+    cipher = cls.from_key(_resolve_key(key) if cls.requires_key else None)
     cipher._decrypt_body(reader, writer, alg_header, aad)  # pylint: disable=protected-access
+
+
+def detect_algorithm_name(data: bytes) -> Optional[str]:
+    """암호화 데이터의 알고리즘 이름을 엔벨로프 헤더에서 식별 (감사 기록용).
+
+    암호화 포맷이 아니거나 미등록 id 면 None.
+    """
+    if not is_encrypted_data(data) or len(data) < _FIXED_HEADER_LEN:
+        return None
+    cls = _REGISTRY_BY_ID.get(data[5])
+    return cls.algorithm_name if cls is not None else None
 
 
 def encrypt_file(
@@ -632,23 +716,26 @@ def upload_file_encrypted(
     object_name: str,
     bucket_name: Optional[str] = None,
     key: Optional[bytes] = None,
-    algorithm: str = DEFAULT_ALGORITHM,
+    algorithm: Optional[str] = None,
     content_type: Optional[str] = None,
 ) -> None:
     """파일을 **암호화한 뒤** MinIO 에 업로드.
 
     원본(source_path)은 건드리지 않는다. 임시 암호문 파일은 업로드 후 즉시 삭제.
     content_type 기본값은 application/octet-stream — 저장되는 객체는 암호문이다.
+    algorithm=None(기본) 이면 현재 모드의 알고리즘(AES-256/UDE)을 따른다.
 
     Args:
         client: xgen_sdk.storage.get_minio_client() 로 얻은 클라이언트
         bucket_name: 생략 시 DEFAULT_BUCKET_NAME (xgen_sdk.storage 와 동일 규칙)
-        key: 생략 시 환경변수 XGEN_STORAGE_ENCRYPTION_KEY
+        key: 생략 시 환경변수 XGEN_STORAGE_ENCRYPTION_KEY (AES-256 전용)
     """
     from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME, upload_file
 
     if bucket_name is None:
         bucket_name = DEFAULT_BUCKET_NAME
+    if algorithm is None:
+        algorithm = resolve_write_algorithm() or DEFAULT_ALGORITHM
 
     fd, tmp_path = tempfile.mkstemp(prefix=".xse_enc_")
     os.close(fd)
@@ -791,12 +878,17 @@ def decrypt_file_inplace(path: str, key: Optional[bytes] = None) -> bool:
 def encrypt_bytes_if_enabled(
     data: bytes,
     key: Optional[bytes] = None,
-    algorithm: str = DEFAULT_ALGORITHM,
+    algorithm: Optional[str] = None,
     encrypt: Optional[bool] = None,
 ) -> bytes:
-    """토글(또는 encrypt 명시)에 따라 bytes 를 암호화. off 면 원본 그대로."""
+    """토글(또는 encrypt 명시)에 따라 bytes 를 암호화. off 면 원본 그대로.
+
+    algorithm=None(기본) 이면 현재 모드의 알고리즘(AES-256/UDE)을 따른다.
+    """
     if not resolve_encrypt_flag(encrypt):
         return data
+    if algorithm is None:
+        algorithm = resolve_write_algorithm() or DEFAULT_ALGORITHM
     return encrypt_bytes(data, key=key, algorithm=algorithm)
 
 
@@ -814,12 +906,13 @@ def put_bytes_encrypted(
     bucket_name: Optional[str] = None,
     content_type: str = "application/octet-stream",
     key: Optional[bytes] = None,
-    algorithm: str = DEFAULT_ALGORITHM,
+    algorithm: Optional[str] = None,
     encrypt: Optional[bool] = None,
 ) -> None:
     """bytes 를 (토글에 따라 암호화 후) client.put_object 로 업로드.
 
     client.put_object 직접 호출 사이트의 drop-in 대체용.
+    algorithm=None(기본) 이면 현재 모드의 알고리즘(AES-256/UDE)을 따른다.
     """
     import time as _time
     from xgen_sdk.storage.minio_client import DEFAULT_BUCKET_NAME
@@ -827,6 +920,8 @@ def put_bytes_encrypted(
 
     if bucket_name is None:
         bucket_name = DEFAULT_BUCKET_NAME
+    if algorithm is None:
+        algorithm = resolve_write_algorithm() or DEFAULT_ALGORITHM
     _t0 = _time.monotonic()
     payload = encrypt_bytes_if_enabled(data, key=key, algorithm=algorithm, encrypt=encrypt)
     did_encrypt = payload is not data
@@ -894,11 +989,12 @@ def get_object_bytes_decrypted(
         )
         raise
     was_encrypted = is_encrypted_data(raw)
+    detected_alg = detect_algorithm_name(raw) if was_encrypted else None
     result = decrypt_bytes_if_encrypted(raw, key=key)
     audit.emit_storage_audit(
         "download", bucket_name, object_name,
         size_bytes=len(result), encrypted=was_encrypted,
-        encryption_algorithm=(DEFAULT_ALGORITHM if was_encrypted else None),
+        encryption_algorithm=(detected_alg or DEFAULT_ALGORITHM) if was_encrypted else None,
         status="success", duration_ms=int((_time.monotonic() - _t0) * 1000),
     )
     return result

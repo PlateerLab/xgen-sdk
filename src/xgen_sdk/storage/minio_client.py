@@ -89,12 +89,13 @@ def upload_file(
     Upload a local file to MinIO under the requested object name.
 
     암호화 (xgen_sdk.storage.crypto — SDK 공통 관리):
-        encrypt=None(기본)  → env XGEN_STORAGE_ENCRYPTION_ENABLED 토글을 따름.
-                              토글 off(기본)면 기존과 100% 동일한 평문 업로드.
-        encrypt=True/False  → 호출부 명시 강제.
-        암호화 시 저장 객체는 AES-256-GCM 암호문(엔벨로프 포맷)이며
+        encrypt=None(기본)  → 모드 설정(XGEN_STORAGE_ENCRYPTION_ENABLED —
+                              Disable/AES-256/UDE)을 따름.
+                              Disable(기본)이면 기존과 100% 동일한 평문 업로드.
+        encrypt=True/False  → 호출부 명시 강제 (True 강제 + 모드 Disable 이면 AES-256).
+        암호화 시 저장 객체는 모드 알고리즘의 암호문(엔벨로프 포맷)이며
         content_type 은 application/octet-stream 으로 강제된다.
-        토글이 켜져 있는데 키(XGEN_STORAGE_ENCRYPTION_KEY)가 없으면
+        AES-256 모드에서 키(XGEN_STORAGE_ENCRYPTION_KEY)가 없으면
         EncryptionKeyError — 평문이 조용히 올라가는 사고를 막는다.
     """
     from xgen_sdk.storage import crypto  # 지연 import (crypto ↔ minio_client 순환 회피)
@@ -102,6 +103,9 @@ def upload_file(
 
     _t0 = time.monotonic()
     do_encrypt = crypto.resolve_encrypt_flag(encrypt)
+    write_algorithm = (
+        (crypto.resolve_write_algorithm() or crypto.DEFAULT_ALGORITHM) if do_encrypt else None
+    )
     try:
         plaintext_size = os.path.getsize(source_path)
     except OSError:
@@ -112,7 +116,7 @@ def upload_file(
             fd, tmp_path = tempfile.mkstemp(prefix=".xse_up_")
             os.close(fd)
             try:
-                crypto.encrypt_file(source_path, tmp_path)
+                crypto.encrypt_file(source_path, tmp_path, algorithm=write_algorithm)
                 try:
                     stored_size = os.path.getsize(tmp_path)
                 except OSError:
@@ -140,7 +144,7 @@ def upload_file(
         audit.emit_storage_audit(
             "upload", bucket_name, object_name,
             plaintext_size_bytes=plaintext_size, encrypted=do_encrypt,
-            encryption_algorithm=(crypto.DEFAULT_ALGORITHM if do_encrypt else None),
+            encryption_algorithm=write_algorithm,
             content_type=content_type, status="error", error_message=str(e),
             duration_ms=int((time.monotonic() - _t0) * 1000),
         )
@@ -150,7 +154,7 @@ def upload_file(
         "upload", bucket_name, object_name,
         size_bytes=stored_size, plaintext_size_bytes=plaintext_size,
         encrypted=do_encrypt,
-        encryption_algorithm=(crypto.DEFAULT_ALGORITHM if do_encrypt else None),
+        encryption_algorithm=write_algorithm,
         content_type=("application/octet-stream" if do_encrypt else content_type),
         status="success", duration_ms=int((time.monotonic() - _t0) * 1000),
     )

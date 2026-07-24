@@ -1,6 +1,6 @@
 [project]
 name = "xgen-sdk"
-version = "1.31.0"
+version = "1.32.0"
 description = "XGen Platform Shared SDK — unified DB, Config, Storage, Auth, Quota, Notification, and LLM Catalog for agent and RAG services"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -95,3 +95,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["xgen_sdk*"]
+
+# jeju 전용 UDE (KSIGN) 동봉 자산 — PythonAPIForUDE/ 는 벤더 원본 완전 사본
+# (네이티브 .so + conf/license + 샘플). 파이썬 패키지가 아니므로 package-data 로 동봉.
+[tool.setuptools.package-data]
+"xgen_sdk.jeju_bank.storage.ude" = [
+    "PythonAPIForUDE/conf/*",
+    "PythonAPIForUDE/lib/*",
+    "PythonAPIForUDE/license/*",
+    "PythonAPIForUDE/sample/*.py",
+    "PythonAPIForUDE/sample/origin/*",
+]
