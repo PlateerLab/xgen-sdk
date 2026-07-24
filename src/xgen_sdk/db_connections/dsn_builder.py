@@ -344,22 +344,26 @@ def build_postgres_libpq_dsn(
 def build_oracle_easy_connect(
     hosts: List[Tuple[str, int]],
     service_name: str,
+    use_ssl: bool = False,
 ) -> str:
     """
     Easy Connect Plus dsn — "h1:p1,h2:p2/service"
 
     Risk #3-D/E 검증: oracledb thin mode 가 port 동일/다양 모두 인식.
+    use_ssl=True 면 "tcps://" 접두 (Oracle TCPS — thin mode 지원 구문).
     """
     if not hosts:
         raise InvalidHostsError("hosts 가 비어있음")
     host_csv = ",".join(f"{h}:{p}" for h, p in hosts)
-    return f"{host_csv}/{service_name}" if service_name else host_csv
+    dsn = f"{host_csv}/{service_name}" if service_name else host_csv
+    return f"tcps://{dsn}" if use_ssl else dsn
 
 
 def build_oracle_description_lb(
     hosts: List[Tuple[str, int]],
     service_name: str,
     load_balance: bool,
+    use_ssl: bool = False,
 ) -> str:
     """
     DESCRIPTION_LIST 풀 dsn — LOAD_BALANCE/FAILOVER 명시 제어.
@@ -369,8 +373,9 @@ def build_oracle_description_lb(
 
     Risk #3-F/G 검증.
     """
+    protocol = "TCPS" if use_ssl else "TCP"
     addresses = "".join(
-        f"(ADDRESS=(PROTOCOL=TCP)(HOST={h})(PORT={p}))" for h, p in hosts
+        f"(ADDRESS=(PROTOCOL={protocol})(HOST={h})(PORT={p}))" for h, p in hosts
     )
     lb = "ON" if load_balance else "OFF"
     return (
@@ -385,24 +390,29 @@ def build_oracle_dsn(
     hosts: List[Tuple[str, int]],
     service_name: str,
     options: Any = None,
+    use_ssl: bool = False,
 ) -> str:
     """
     Oracle dsn 통합:
     - 단일 host → Easy Connect "h:p/svc" (회귀 보존)
     - Multi-host failover → Easy Connect Plus "h1:p1,h2:p2/svc"
     - Multi-host load_balance → DESCRIPTION_LIST + LOAD_BALANCE=ON
+    - use_ssl=True → TCPS (Easy Connect 는 tcps:// 접두, DESCRIPTION 은 PROTOCOL=TCPS)
 
     oracledb.connect(dsn=...) 또는 SQLAlchemy connect_args={"dsn": ...} 로 전달.
     """
     if len(hosts) == 1:
         h, p = hosts[0]
-        return f"{h}:{p}/{service_name}" if service_name else f"{h}:{p}"
+        dsn = f"{h}:{p}/{service_name}" if service_name else f"{h}:{p}"
+        return f"tcps://{dsn}" if use_ssl else dsn
 
     if _is_load_balance(options):
-        return build_oracle_description_lb(hosts, service_name, load_balance=True)
+        return build_oracle_description_lb(
+            hosts, service_name, load_balance=True, use_ssl=use_ssl,
+        )
 
     # failover (기본)
-    return build_oracle_easy_connect(hosts, service_name)
+    return build_oracle_easy_connect(hosts, service_name, use_ssl=use_ssl)
 
 
 def build_oracle_sqlalchemy(
@@ -411,18 +421,28 @@ def build_oracle_sqlalchemy(
     username: str,
     password: str,
     options: Any = None,
+    use_ssl: bool = False,
+    ssl_mode: Optional[str] = None,
 ) -> Tuple[URL, Dict[str, Any]]:
     """
     Oracle SQLAlchemy URL + connect_args 생성.
 
-    단일 host:
+    단일 host (비 SSL):
         URL.create(host=h, port=p, query={"service_name": ...})  — 기존 회귀 보존
 
-    Multi-host:
+    Multi-host 또는 use_ssl=True:
         URL.create() 의 host/port 비우고 dsn 을 connect_args 로 전달
+        (TCPS 는 URL 문법으로 표현할 수 없어 dsn 경유가 유일하게 안전)
         Risk #1-G / #3 검증된 안전 패턴
+
+    ssl_mode "verify-ca"/"verify-full" 이면 서버 인증서 DN 검증
+    (python-oracledb thin: ssl_server_dn_match=True) 을 켠다.
     """
-    if len(hosts) == 1:
+    ssl_connect_args: Dict[str, Any] = {}
+    if use_ssl and (ssl_mode or "").lower() in {"verify-ca", "verify-full"}:
+        ssl_connect_args["ssl_server_dn_match"] = True
+
+    if len(hosts) == 1 and not use_ssl:
         h, p = hosts[0]
         url = URL.create(
             drivername="oracle+oracledb",
@@ -435,13 +455,13 @@ def build_oracle_sqlalchemy(
         )
         return url, {}
 
-    dsn = build_oracle_dsn(hosts, service_name, options=options)
+    dsn = build_oracle_dsn(hosts, service_name, options=options, use_ssl=use_ssl)
     url = URL.create(
         drivername="oracle+oracledb",
         username=username,
         password=password,
     )
-    return url, {"dsn": dsn}
+    return url, {"dsn": dsn, **ssl_connect_args}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -556,7 +576,10 @@ def build_sqlalchemy(
             hosts, db_name, username, password, ssl_mode, schema, options,
         )
     if db_type_norm == "oracle":
-        return build_oracle_sqlalchemy(hosts, db_name, username, password, options)
+        return build_oracle_sqlalchemy(
+            hosts, db_name, username, password, options,
+            use_ssl=use_ssl or bool(ssl_mode), ssl_mode=ssl_mode,
+        )
     if db_type_norm == "mysql":
         return build_mysql_sqlalchemy(hosts, db_name, username, password, use_ssl, options)
 
