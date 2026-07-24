@@ -94,11 +94,10 @@ def repetition(trace: RunTrace, prior_signatures: dict[str, int] | None = None,
                min_repeats: int = 3) -> list[SignalHit]:
     """Same tool-sequence signature seen across runs. The host passes the
     historical signature counts (e.g. aggregated from the spine)."""
-    prior = trace.events and (prior_signatures or trace.__dict__.get("_prior_signatures"))
-    if not prior:
+    if not trace.events or not prior_signatures:
         return []
     sig = trace.signature()
-    seen = prior.get(sig, 0)
+    seen = prior_signatures.get(sig, 0)
     if trace.success and seen + 1 >= min_repeats:
         return [
             SignalHit(

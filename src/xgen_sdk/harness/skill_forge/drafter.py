@@ -148,8 +148,11 @@ class LLMDrafter:
             items = _extract_json_array(repaired)
         return items
 
-    def draft(self, trace: RunTrace, hits: list[SignalHit]) -> list[SkillCandidate]:
+    def draft(self, trace: RunTrace, hits: list[SignalHit],
+              variant: str = "") -> list[SkillCandidate]:
         prompt = build_prompt(trace, hits, self.max_candidates)
+        if variant:
+            prompt += f"\n\nAttempt focus: {variant}"
         items: list = []
         feedback = ""
         for attempt in range(self.max_retries + 1):
@@ -200,6 +203,14 @@ class EnsembleDrafter:
     it deterministically, which is exactly what makes a weak drafter viable:
     breadth from sampling, quality from selection pressure."""
 
+    VARIANTS = (
+        "",
+        "propose a different angle than the most obvious one",
+        "focus on prevention and verification steps rather than the happy path",
+        "focus on what the user corrected or what almost went wrong",
+        "focus on ordering constraints between the tools used",
+    )
+
     def __init__(self, drafter: LLMDrafter, samples: int = 3,
                  max_candidates: int = 4) -> None:
         self.drafter = drafter
@@ -208,8 +219,9 @@ class EnsembleDrafter:
 
     def draft(self, trace: RunTrace, hits: list[SignalHit]) -> list[SkillCandidate]:
         pool: list[SkillCandidate] = []
-        for _ in range(self.samples):
-            pool.extend(self.drafter.draft(trace, hits))
+        for index in range(self.samples):
+            variant = self.VARIANTS[index % len(self.VARIANTS)]
+            pool.extend(self.drafter.draft(trace, hits, variant=variant))
         deduped: list[SkillCandidate] = []
         seen_names: set[str] = set()
         for candidate in pool:

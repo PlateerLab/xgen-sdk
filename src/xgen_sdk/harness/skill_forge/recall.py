@@ -51,6 +51,15 @@ class LedgerSkillSource:
         return sorted(listings, key=lambda item: (-item.rank, item.name))
 
     def view(self, name: str) -> str:
+        """Raw body only — this feeds the prompt-injection path (skill_registry
+        get_skill_body), so no annotation header may precede the frontmatter."""
+        record = self.ledger.get(name)
+        if record is None:
+            raise KeyError(f"unknown skill {name!r}")
+        return record.skill.body
+
+    def view_annotated(self, name: str) -> str:
+        """Human-facing variant with the verification label (console use)."""
         record = self.ledger.get(name)
         if record is None:
             raise KeyError(f"unknown skill {name!r}")

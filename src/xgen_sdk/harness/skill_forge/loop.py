@@ -81,9 +81,18 @@ class SkillForge:
                 skill.status = self.approval.on_promoted(skill)
                 self.ledger.commit(skill, note=f"promoted: {gate_result.reasons[0]}")
             elif gate_result.verdict == "staged":
-                skill.verified = False
-                skill.status = "staged"
-                self.ledger.commit(skill, note=f"staged: {'; '.join(gate_result.reasons)}")
+                existing = self.ledger.get(skill.name)
+                if (existing is not None and existing.skill.verified
+                        and existing.status == "active"):
+                    # never let an unverified redraft downgrade a verified
+                    # active skill — keep the proven version untouched
+                    gate_result.reasons.append(
+                        "kept existing verified active version; unverified draft dropped")
+                else:
+                    skill.verified = False
+                    skill.status = "staged"
+                    self.ledger.commit(
+                        skill, note=f"staged: {'; '.join(gate_result.reasons)}")
             # rejected candidates are journaled in the episode, not the ledger
             episode.results.append((skill, gate_result))
         return episode
