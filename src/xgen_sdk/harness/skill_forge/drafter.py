@@ -9,9 +9,12 @@ so the package stays dependency-free.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.request
 from typing import Callable
+
+logger = logging.getLogger("xgen_skill_forge.drafter")
 
 from .model import Provenance, RunTrace, SkillCandidate
 from .signals import SignalHit
@@ -144,8 +147,12 @@ class LLMDrafter:
         raw = self.complete(prompt)
         items = _extract_json_array(raw)
         if not items and self.repair and raw.strip() and raw.strip() != "[]":
+            logger.warning("[drafter] unparsable output, repairing. head=%r",
+                           raw[:200])
             repaired = self.complete(_REPAIR_PROMPT.format(raw=raw[:4000]))
             items = _extract_json_array(repaired)
+            if not items:
+                logger.warning("[drafter] repair failed. head=%r", repaired[:200])
         return items
 
     def draft(self, trace: RunTrace, hits: list[SignalHit],
@@ -160,7 +167,16 @@ class LLMDrafter:
                 prompt + _RETRY_SUFFIX.format(feedback=feedback))
             try:
                 items = self._complete_array(attempt_prompt)
-            except Exception:
+            except Exception as exc:
+                detail = ""
+                read = getattr(exc, "read", None)
+                if callable(read):
+                    try:
+                        detail = read().decode("utf-8", "replace")[:300]
+                    except Exception:
+                        detail = ""
+                logger.warning("[drafter] completion failed: %s: %s %s",
+                               type(exc).__name__, str(exc)[:200], detail)
                 return []
             if items:
                 break
