@@ -45,6 +45,12 @@ class GateConfig:
     max_holdout_drop: float = 0.02
     overopt_gap: float = 0.25    # dev-holdout gain divergence alarm
     min_cases: int = 4
+    require_holdout_gain: bool = True
+    """A dev-only gain is not evidence of a reusable skill — it is evidence of
+    fitting the cases the skill was written from. Verified promotion therefore
+    requires the gain to reproduce on held-out cases. When dev improves but
+    holdout stays flat the verdict is `staged` (unproven, human may approve),
+    not `promoted` and not `rejected`."""
 
 
 class ForgeGate:
@@ -93,7 +99,12 @@ class ForgeGate:
             f"holdout {baseline_holdout:.3f}->{holdout_score:.3f} ({holdout_gain:+.3f})",
         ]
         if dev_up and held_ok and not overopt:
-            verdict = "promoted"
+            if self.config.require_holdout_gain and holdout_gain <= 0:
+                verdict = "staged"
+                reasons.append("dev gain did not reproduce on held-out cases — "
+                               "unproven, not auto-verified")
+            else:
+                verdict = "promoted"
         elif not dev_up:
             verdict = "rejected"
             reasons.append("no dev gain — the skill does not help")
