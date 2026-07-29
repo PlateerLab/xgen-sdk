@@ -184,8 +184,10 @@ class LLMDrafter:
         candidates: list[SkillCandidate] = []
         strongest = max((h.signal for h in sorted(hits, key=lambda h: -h.strength)),
                         default="")
+        dropped_leak = dropped_invalid = 0
         for item in items[: self.max_candidates]:
             if not isinstance(item, dict) or _is_example_leak(item):
+                dropped_leak += 1
                 continue
             try:
                 candidates.append(
@@ -208,7 +210,15 @@ class LLMDrafter:
                     )
                 )
             except ValueError:
+                dropped_invalid += 1
                 continue
+        if hits:
+            # "0건"이 세 가지 다른 사건일 수 있다 — 모델이 빈 배열을 줬거나,
+            # 예시 유출 가드가 전부 걷어냈거나, 필드가 깨져 버려졌거나.
+            # 숫자로 나뉘지 않으면 약한 모델을 튜닝할 근거가 없다.
+            logger.info("[drafter] hits=%d · model=%d · leak=%d · invalid=%d · kept=%d",
+                        len(hits), len(items), dropped_leak, dropped_invalid,
+                        len(candidates))
         return candidates
 
 
@@ -256,6 +266,43 @@ def _near_duplicate(a: "SkillCandidate", b: "SkillCandidate") -> bool:
     if not ta or not tb:
         return False
     return len(ta & tb) / min(len(ta), len(tb)) >= 0.7
+
+
+def failover_completer(completers: list[Completer]) -> Completer:
+    """Try each completer in order; remember the one that works.
+
+    Observed failure this exists for: the box serving the primary model went
+    down and curation stopped silently — the loop kept "running" while every
+    draft returned nothing. With a second endpoint listed, learning continues.
+
+    A completer that raises is treated as unhealthy and the next one is tried.
+    The last known-good index is tried first next time, so the healthy path
+    costs no extra calls.
+    """
+    live = [c for c in completers if c is not None]
+    if not live:
+        raise ValueError("failover_completer needs at least one completer")
+    state = {"index": 0}
+
+    def complete(prompt: str) -> str:
+        order = list(range(state["index"], len(live))) + \
+            list(range(0, state["index"]))
+        last: Exception | None = None
+        for i in order:
+            try:
+                result = live[i](prompt)
+            except Exception as exc:
+                last = exc
+                logger.warning("[drafter] endpoint %d unhealthy: %s: %s",
+                               i, type(exc).__name__, str(exc)[:120])
+                continue
+            if i != state["index"]:
+                logger.warning("[drafter] failed over to endpoint %d", i)
+                state["index"] = i
+            return result
+        raise last if last else RuntimeError("no endpoint answered")
+
+    return complete
 
 
 def anthropic_completer(model: str, api_key: str,
