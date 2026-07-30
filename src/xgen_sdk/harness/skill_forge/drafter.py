@@ -102,9 +102,10 @@ def _is_example_leak(item: dict) -> bool:
 
 
 def _sanitize_name(raw: str) -> str:
-    name = re.sub(r"[^a-z0-9-]", "-", raw.strip().lower().replace("_", "-").replace(" ", "-"))
-    name = re.sub(r"-{2,}", "-", name).strip("-")
-    return name[:64] or "unnamed-skill"
+    # agentskills.io 이름 규칙을 그대로 따른다(64자·소문자 영숫자·하이픈, 앞뒤와
+    # 연속 하이픈 금지). 규칙을 어기면 다른 에이전트가 스킬을 조용히 무시한다.
+    from .portable import spec_name
+    return spec_name(raw)
 
 
 def _extract_json_array(text: str) -> list:

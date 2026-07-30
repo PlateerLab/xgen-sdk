@@ -24,14 +24,27 @@ Reflector = Callable[[str, str], str]  # (purpose, draft) -> improved draft
 
 
 def _frontmatter(candidate: SkillCandidate, description: str) -> str:
+    """내부 body 의 프론트매터.
+
+    두 가지를 고쳤다. ①description 을 60자로 자르고 있었는데 스펙 상한은 1024 이고
+    이 필드가 곧 발견 품질이다(에이전트는 name+description 만 보고 활성화를
+    결정한다) — 자르면 안 뜬다. ②콜론이 들어간 description 을 날값으로 적으면
+    YAML 이 깨져 스킬이 통째로 무시된다.
+
+    스펙에 없는 kind/scope/origin 은 최상위에 두면 호환이 깨지므로 `metadata`
+    아래로 내렸다. 내보내기 전용 정본은 portable.to_skill_md 다.
+    """
+    from .portable import META_PREFIX, MAX_DESCRIPTION, _yaml_scalar
+    origin = candidate.provenance.origin if candidate.provenance else "manual"
     return (
         "---\n"
         f"name: {candidate.name}\n"
-        f"description: {description[:60]}\n"
-        "version: 0.1.0\n"
-        f"kind: {candidate.kind}\n"
-        f"scope: {candidate.scope}\n"
-        f"origin: {candidate.provenance.origin if candidate.provenance else 'manual'}\n"
+        f"description: {_yaml_scalar(description[:MAX_DESCRIPTION])}\n"
+        "metadata:\n"
+        f"  {META_PREFIX}version: 0.1.0\n"
+        f"  {META_PREFIX}kind: {candidate.kind}\n"
+        f"  {META_PREFIX}scope: {candidate.scope}\n"
+        f"  {META_PREFIX}origin: {origin}\n"
         "---\n"
     )
 
