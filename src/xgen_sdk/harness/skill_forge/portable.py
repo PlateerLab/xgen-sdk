@@ -159,9 +159,12 @@ def to_skill_md(skill: SkillDef, *, evidence: dict[str, Any] | None = None,
     body = _body_without_frontmatter(skill.body).rstrip()
     if skill.kind != "guide":
         # config/tool 은 마크다운이 아니라 JSON/매니페스트다. 그대로 흘리면 다른
-        # 에이전트가 지시문으로 읽으므로 코드블록으로 감싸 설명을 붙인다.
+        # 에이전트가 지시문으로 읽으므로 코드블록으로 감싼다.
+        # 펜스 길이는 내용에 맞춰 늘린다 — payload 안에 ``` 가 있으면 3중 백틱이
+        # 거기서 닫혀 뒷부분이 본문으로 새어 나온다(검수에서 확인).
+        fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", body)), default=0) + 1)
         body = (f"# {skill.name}\n\n{skill.description}\n\n"
-                f"## Payload ({skill.kind})\n\n```json\n{body}\n```\n")
+                f"## Payload ({skill.kind})\n\n{fence}json\n{body}\n{fence}\n")
     elif not body:
         body = f"# {skill.name}\n\n{skill.description}\n"
     return "\n".join(lines) + "\n\n" + body + "\n"
@@ -233,6 +236,11 @@ def candidate_from_skill_md(text: str, *, scope: str = "user",
 
     들여올 때 `verified` 는 절대 믿지 않는다. 남이 스스로 붙인 표시이고,
     검증은 우리 벤치가 이 환경에서 다시 해야 의미가 있다(그게 차별점이다).
+
+    **kind 는 항상 `guide`.** 파일에 `xgen-jermes-kind: config|tool` 이 적혀 있어도
+    따르지 않는다 — config 는 하네스 설정을 바꾸고 tool 은 실행 가능한 산출물로
+    컴파일되므로, 남의 파일이 그걸 정하게 두면 안 된다. 원래 kind 는 payload 의
+    `imported_metadata` 에 그대로 남아 사람이 보고 승격시킬 수 있다.
     """
     problems = validate_skill_md(text)
     if problems:

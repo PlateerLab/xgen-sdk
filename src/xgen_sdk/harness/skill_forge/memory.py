@@ -82,7 +82,13 @@ class Measurement:
 @dataclass
 class MemoryPolicy:
     min_cases: int = 4
-    min_gain: float = 0.0
+    min_gain: float = 0.05
+    """이 이상 올려야 도움이 됐다고 본다.
+
+    0 이면 안 된다 — 잡음 수준의 +0.001 도 helpful 로 세어 **trust 가 한쪽으로만
+    흐른다**(검수에서 실제로 잡힌 편향: +0.001 은 trust 를 올리는데 -0.001 은
+    중립이었다). 해악 문턱과 같은 값으로 둬서 잡음 구간을 대칭으로 만든다.
+    """
     harm_threshold: float = 0.05
     """이 이상 점수를 떨어뜨리면 해롭다고 본다 — 잡음과 구분하려고 0 이 아니다."""
     step: float = 0.15
@@ -190,7 +196,8 @@ class Contradiction:
 
 
 def detect_contradictions(items: Sequence[MemoryItem],
-                          min_overlap: float = 0.5) -> list[Contradiction]:
+                          min_overlap: float = 0.5,
+                          min_tokens: int = 1) -> list[Contradiction]:
     """같은 것을 말하는데 반대로 말하는 쌍을 찾는다.
 
     두 가지만 본다 — 부정 뒤집힘과 같은 자리의 숫자 충돌. 의미 모순 전반을
@@ -205,7 +212,11 @@ def detect_contradictions(items: Sequence[MemoryItem],
                 continue
             left_core, right_core = _tokens(_strip_negation(left.text)), _tokens(
                 _strip_negation(right.text))
-            if not left_core or not right_core:
+            # `min_tokens` 로 얇은 근거를 걸러낼 수 있다(기본 1 = 안 거름).
+            # 2 로 올리면 "threshold is 0.8" 처럼 핵심 토큰이 하나인 **정당한** 모순도
+            # 같이 죽는다 — 검수에서 확인했다. 그래서 기본값은 민감하게 두고,
+            # 오탐의 대가는 `resolve` 가 감당한다(둘 다 disputed → 사람이 본다).
+            if min(len(left_core), len(right_core)) < min_tokens:
                 continue
             overlap = len(left_core & right_core) / min(len(left_core), len(right_core))
             if overlap < min_overlap:
@@ -217,7 +228,10 @@ def detect_contradictions(items: Sequence[MemoryItem],
                                            "negation_flip", round(overlap, 3),
                                            "한쪽만 부정형"))
                 continue
-            left_nums, right_nums = _NUMBER.findall(left.text), _NUMBER.findall(right.text)
+            # 문자열로 비교하면 "0.8" 과 "0.80" 이 충돌로 잡힌다(검수에서 확인).
+            # 같은 값의 다른 표기는 모순이 아니다.
+            left_nums = [float(n) for n in _NUMBER.findall(left.text)]
+            right_nums = [float(n) for n in _NUMBER.findall(right.text)]
             if left_nums and right_nums and left_nums != right_nums:
                 found.append(Contradiction(left.item_id, right.item_id,
                                            "numeric_conflict", round(overlap, 3),
@@ -254,7 +268,15 @@ def resolve(contradiction: Contradiction, left: MemoryItem, right: MemoryItem,
     apply_measurement(right, right_measurement, policy)
     margin = left_measurement.gain - right_measurement.gain
     if abs(margin) <= policy.harm_threshold:
+        # 둘 다 보류한다 — 서로 반대되는 두 사실을 동시에 믿는 것이 더 나쁘다.
+        # 대신 **왜 보류됐는지**를 양쪽 이력에 남긴다. 오탐이면 사람이 여기서 되돌린다.
+        def note(other: MemoryItem) -> str:
+            return (f"disputed: {contradiction.kind}({contradiction.detail}) "
+                    f"상대={other.item_id} — 재현벤치가 변별 못 함(차이 {margin:+.3f})")
+
         left.status = right.status = "disputed"
+        left.history.append(note(right))
+        right.history.append(note(left))
         return Resolution(contradiction,
                           reason=f"변별 없음(차이 {margin:+.3f}) — 사람 확인 필요")
 
