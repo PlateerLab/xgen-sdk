@@ -55,15 +55,25 @@ class GateConfig:
 
 class ForgeGate:
     def __init__(self, runner: BenchRunner | ScoreFn,
-                 config: GateConfig | None = None) -> None:
+                 config: GateConfig | None = None,
+                 constitution=None) -> None:
         self._score: ScoreFn = runner.score if hasattr(runner, "score") else runner  # type: ignore[union-attr]
         self.config = config or GateConfig()
+        # 규약(constitution.py). Hermes 는 "배우지 말 것"을 프롬프트 문장으로 두지만
+        # 문장은 모델이 지키면 지켜지고 안 지키면 안 지켜진다 — 여기서 집행한다.
+        self.constitution = constitution
 
     def verify(self, candidate: SkillCandidate, skill: SkillDef,
                cases: Sequence[BenchCase]) -> GateResult:
         reason = safety_check(candidate)
         if reason:
             return GateResult(verdict="rejected", reasons=[f"sec: {reason}"])
+
+        if self.constitution is not None:
+            violation = self.constitution.check_candidate(candidate)
+            if violation:
+                # 벤치를 돌려보기 전에 막는다 — 배우면 안 되는 것은 성능이 좋아도 안 된다.
+                return GateResult(verdict="rejected", reasons=[violation])
 
         if len(cases) < self.config.min_cases:
             return GateResult(
