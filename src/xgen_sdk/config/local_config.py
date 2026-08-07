@@ -23,6 +23,8 @@ class LocalConfigManager:
     """
 
     def __init__(self, db_manager=None, persist_path: Optional[str] = None):
+        #: 네임스페이스별 캐시 버전 (Redis 없는 배포용 프로세스 내 카운터).
+        self._cache_versions: Dict[str, int] = {}
         """
         LocalConfigManager 초기화
 
@@ -405,6 +407,21 @@ class LocalConfigManager:
         return sorted(list(self._category_index.keys()))
 
     # ========== ConfigComposer 호환성 메서드 ==========
+
+    # ========== 범용 캐시 version sentinel (Redis 없는 배포) ==========
+    #
+    # Redis 가 없으면 Pod 간 신호를 보낼 수 없다. 단일 파드에서는 프로세스 내
+    # 카운터로 충분하고, 여러 파드라면 애초에 이 매니저를 쓰면 안 된다.
+    # **0 을 돌려주지 않는 것이 중요하다** — 0 은 "버전 정보 없음"이라 읽기
+    # 쪽이 TTL 로 폴백하는 신호인데, 여기서는 실제로 정확한 값을 줄 수 있다.
+
+    def get_cache_version(self, namespace: str) -> int:
+        return self._cache_versions.get(str(namespace or "default"), 1)
+
+    def bump_cache_version(self, namespace: str) -> int:
+        ns = str(namespace or "default")
+        self._cache_versions[ns] = self._cache_versions.get(ns, 1) + 1
+        return self._cache_versions[ns]
 
     def get_config_by_name(self, config_name: str) -> Any:
         """

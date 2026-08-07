@@ -122,6 +122,22 @@ class ConfigClient:
 
     # ========== Core Methods ==========
 
+    # ========== 범용 캐시 version sentinel ==========
+
+    def get_cache_version(self, namespace: str) -> int:
+        """네임스페이스의 캐시 버전. 0 = 버전 정보 없음(호출처는 TTL 로 버틴다)."""
+        try:
+            return int(self._manager.get_cache_version(namespace))
+        except Exception:  # noqa: BLE001 — 캐시 힌트가 요청을 실패시키면 안 된다
+            return 0
+
+    def bump_cache_version(self, namespace: str) -> int:
+        """쓰기 경로에서 부른다 — 다른 Pod 의 캐시를 무효화한다."""
+        try:
+            return int(self._manager.bump_cache_version(namespace))
+        except Exception:  # noqa: BLE001
+            return 0
+
     def health_check(self) -> bool:
         return self._manager.health_check()
 

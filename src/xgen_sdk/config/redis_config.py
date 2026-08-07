@@ -175,6 +175,57 @@ class RedisConfigManager:
             logger.warning(f"bump_meta_version failed: {e}")
             return 0
 
+    # ========== 범용 캐시 version sentinel ==========
+    #
+    # config 말고도 **Pod 별 in-memory 캐시**를 두는 곳이 여럿 있다(사용자
+    # preferences 게이트 등). 그런 캐시는 TTL 로만 버티면 "쓰기가 반영되기까지
+    # 최대 TTL" 이라는 staleness 를 늘 지고 간다. 쓰기 쪽이 INCR 하고 읽기 쪽이
+    # 값만 비교하면 그 staleness 가 사라진다 — config 가 이미 쓰는 방식이고,
+    # 다른 서비스가 각자 Redis 를 만지지 않도록 SDK 가 표준으로 제공한다.
+    #
+    # 네임스페이스를 나누는 이유: 한 도메인의 쓰기가 다른 도메인의 캐시까지
+    # 무효화하면 무관한 재조회가 연쇄된다.
+
+    @staticmethod
+    def _cache_version_key(namespace: str) -> str:
+        ns = str(namespace or "default").strip() or "default"
+        return f"cache:_meta:version:{ns}"
+
+    def get_cache_version(self, namespace: str) -> int:
+        """네임스페이스의 현재 캐시 버전.
+
+        Redis 미사용/장애/키 부재면 ``0``. 호출처는 0 을 "버전 정보 없음"으로
+        보고 **자기 TTL 로 안전하게 버텨야 한다** — 0 을 "안 바뀜"으로 믿고
+        캐시를 영구히 붙들면 Redis 장애가 곧 stale 고착이 된다.
+        """
+        if not self._connection_available:
+            return 0
+        try:
+            raw = self.redis_client.get(self._cache_version_key(namespace))
+            return int(raw) if raw is not None else 0
+        except Exception as e:
+            logger.warning(f"get_cache_version({namespace}) failed: {e}")
+            return 0
+
+    def bump_cache_version(self, namespace: str) -> int:
+        """네임스페이스의 캐시 버전을 INCR — 다른 Pod 의 캐시를 무효화한다.
+
+        쓰기 경로에서 부른다. 실패해도 예외를 올리지 않는다: 캐시 무효화가
+        사용자의 쓰기 자체를 실패시키면 안 된다(그 경우 읽기 쪽 TTL 이
+        최후 방어선으로 남는다).
+
+        Returns:
+            새 버전(int). Redis 미사용/장애 시 0.
+        """
+        if not self._connection_available:
+            return 0
+        try:
+            new_version = self.redis_client.incr(self._cache_version_key(namespace))
+            return int(new_version) if new_version is not None else 0
+        except Exception as e:
+            logger.warning(f"bump_cache_version({namespace}) failed: {e}")
+            return 0
+
     def set_config(self, config_path: str, config_value: Any,
                    data_type: str = "string", category: Optional[str] = None,
                    env_name: Optional[str] = None) -> bool:

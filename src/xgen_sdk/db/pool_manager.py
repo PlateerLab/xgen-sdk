@@ -801,8 +801,17 @@ class DatabaseManagerPsycopg3:
                         else:
                             cur.execute(query)
 
-                        if query.strip().upper().startswith('SELECT'):
+                        # 결과셋 유무는 **커서가 안다**. 쿼리 문자열이
+                        # 'SELECT' 로 시작하는지로 판정하면 RETURNING 절이
+                        # 붙은 DML(INSERT/UPDATE/DELETE ... RETURNING)과
+                        # WITH ... SELECT 의 결과가 통째로 버려진다.
+                        # 실기 사고: workspace 의 seq 발급이
+                        # `UPDATE ... RETURNING value` 라, 값이 유실되자
+                        # 호출부가 "행이 없다"고 오판해 INSERT → UNIQUE 위반
+                        # → 해당 워크스페이스의 모든 쓰기가 영구 실패했다.
+                        if cur.description is not None:
                             result = cur.fetchall()
+                            conn.commit()
                             return list(result) if result else []
                         else:
                             conn.commit()
@@ -818,8 +827,10 @@ class DatabaseManagerPsycopg3:
                     else:
                         cursor.execute(query)
 
-                    if query.strip().upper().startswith('SELECT'):
+                    # 위와 같은 이유 — 결과셋 유무는 커서가 안다.
+                    if cursor.description is not None:
                         result = cursor.fetchall()
+                        self._sqlite_connection.commit()
                         return [dict(row) for row in result] if result else []
                     else:
                         self._sqlite_connection.commit()
