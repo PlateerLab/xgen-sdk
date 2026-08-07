@@ -94,7 +94,7 @@ def create_sync_redis(
         # 복제 지연이 그대로 버그가 된다 (예: seq 발급 직후 조회).
         return sentinel.master_for(cfg.sentinel_master, **kwargs)
     if cfg.url:
-        return redis.Redis.from_url(cfg.url, **kwargs)
+        return redis.Redis.from_url(cfg.url_with_db(), **kwargs)
     return redis.Redis(host=cfg.host, port=cfg.port, **kwargs)
 
 
@@ -126,7 +126,7 @@ def create_async_redis(
         sentinel = Sentinel(list(cfg.sentinel_hosts), sentinel_kwargs=sentinel_kwargs, **kwargs)
         return sentinel.master_for(cfg.sentinel_master, **kwargs)
     if cfg.url:
-        return aioredis.Redis.from_url(cfg.url, **kwargs)
+        return aioredis.Redis.from_url(cfg.url_with_db(), **kwargs)
     return aioredis.Redis(host=cfg.host, port=cfg.port, **kwargs)
 
 

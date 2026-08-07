@@ -45,7 +45,7 @@ _DEFAULT_SENTINEL_PORT = 26379
 _DEFAULT_PORT = 6379
 
 
-def _int(raw: Optional[str], fallback: int) -> int:
+def _int(raw: Optional[str], fallback):
     try:
         return int(str(raw).strip())
     except (TypeError, ValueError):
@@ -89,7 +89,11 @@ class RedisSettings:
     host: Optional[str] = None
     port: int = _DEFAULT_PORT
     password: Optional[str] = None
-    db: int = 0
+    #: ``None`` = **지정하지 않음**. URL 에 db 가 들어 있으면 그것을 따르고,
+    #: 없으면 redis-py 기본(0). 값을 주면 **URL 보다 우선**한다 — 스케줄러·
+    #: 세션·보안접근이 서로 다른 db 를 쓰므로 여기서 밀리면 전부 한 db 에
+    #: 몰려 키가 섞인다.
+    db: Optional[int] = None
     #: 있으면 host/port/password 보다 **우선**한다 (redis://, rediss://).
     url: Optional[str] = None
 
@@ -135,11 +139,24 @@ class RedisSettings:
         """로그용 한 줄. **비밀번호는 절대 넣지 않는다.**"""
         if self.use_sentinel:
             hosts = ",".join(f"{h}:{p}" for h, p in self.sentinel_hosts)
-            return f"sentinel[{hosts}] master={self.sentinel_master} db={self.db}"
+            return f"sentinel[{hosts}] master={self.sentinel_master} db={self.db if self.db is not None else 0}"
         if self.url:
             parsed = urlparse(self.url)
-            return f"{parsed.scheme}://{parsed.hostname}:{parsed.port or _DEFAULT_PORT} db={self.db}"
-        return f"{self.host}:{self.port} db={self.db}"
+            return f"{parsed.scheme}://{parsed.hostname}:{parsed.port or _DEFAULT_PORT} db={self.db if self.db is not None else '(URL)'}"
+        return f"{self.host}:{self.port} db={self.db if self.db is not None else 0}"
+
+    def url_with_db(self) -> Optional[str]:
+        """URL 에 **명시한 db 를 반영**해 돌려준다.
+
+        ⚠ ``redis.Redis.from_url(url, db=3)`` 은 db 를 **무시하고 URL 의 db 를
+        쓴다**(실행 확인). 그래서 여기서 URL 자체를 고쳐야 한다 — 안 그러면
+        서로 다른 db 를 쓰는 호출처(스케줄러·세션·보안접근)가 전부 URL 의 db
+        하나로 몰려 키가 섞인다.
+        """
+        if not self.url or self.db is None:
+            return self.url
+        parsed = urlparse(self.url)
+        return parsed._replace(path=f"/{self.db}").geturl()
 
     def with_overrides(self, **kwargs: Any) -> "RedisSettings":
         """일부만 바꾼 새 설정. ``None`` 을 명시적으로 주면 그대로 반영된다
@@ -171,7 +188,7 @@ class RedisSettings:
             host=(e.get("REDIS_HOST") or "").strip() or None,
             port=_int(e.get("REDIS_PORT"), _DEFAULT_PORT),
             password=password,
-            db=_int(e.get("REDIS_DB"), 0),
+            db=_int(e.get("REDIS_DB"), None) if e.get("REDIS_DB") else None,
             url=(e.get("REDIS_URL") or "").strip() or None,
             sentinel_hosts=tuple(hosts),
             sentinel_master=master,
@@ -186,7 +203,6 @@ class RedisSettings:
     def client_kwargs(self) -> Dict[str, Any]:
         """직결/Sentinel 공통으로 redis-py 에 넘길 인자."""
         kwargs: Dict[str, Any] = {
-            "db": self.db,
             "decode_responses": self.decode_responses,
             "socket_timeout": self.socket_timeout,
             "socket_connect_timeout": self.socket_connect_timeout,
@@ -194,6 +210,9 @@ class RedisSettings:
         }
         # health_check_interval=0 은 비활성 의미라 그대로 넘긴다.
         kwargs["health_check_interval"] = self.health_check_interval
+        # db 를 지정하지 않았으면 **넘기지 않는다** — URL 안의 db 를 존중한다.
+        if self.db is not None:
+            kwargs["db"] = self.db
         if self.password:
             kwargs["password"] = self.password
         kwargs.update(self.extra)

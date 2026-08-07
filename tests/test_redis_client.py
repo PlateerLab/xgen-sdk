@@ -83,7 +83,9 @@ class SettingsFromEnvTestCase(unittest.TestCase):
     def test_overrides_do_not_mutate_the_original(self):
         base = RedisSettings.from_env({"REDIS_HOST": "h"})
         derived = base.with_overrides(db=7)
-        self.assertEqual(base.db, 0)
+        # db 미지정은 None 이다 — 0 이 아니다. 0 으로 두면 "0번 db 를 명시했다"와
+        # 구분이 안 되어 URL 안의 db 를 덮어써 버린다.
+        self.assertIsNone(base.db)
         self.assertEqual(derived.db, 7)
 
 
@@ -98,7 +100,7 @@ class SyncClientTestCase(unittest.TestCase):
         self.assertEqual(kwargs["password"], "pw")
 
     def test_url_connection(self):
-        s = RedisSettings(url="redis://h:6379/0", db=2)
+        s = RedisSettings(url="redis://h:6379/0")
         with patch("redis.Redis") as R:
             create_sync_redis(settings=s)
         R.from_url.assert_called_once()
@@ -254,3 +256,48 @@ class ExistingPublicApiMustSurviveTestCase(unittest.TestCase):
     def test_no_hardcoded_password_default(self):
         src = open("src/xgen_sdk/redis/client.py", encoding="utf-8").read()
         self.assertNotIn("redis_secure_password123", src)
+
+
+class ExplicitDbBeatsTheUrlTestCase(unittest.TestCase):
+    """명시한 ``db`` 는 URL 안의 db 보다 **우선**해야 한다.
+
+    ``redis.Redis.from_url(url, db=7)`` 은 db 를 무시하고 URL 의 db 를 쓴다
+    (실행으로 확인). 그대로 두면 서로 다른 db 를 쓰는 호출처 — 스케줄러
+    잡스토어, 세션(presence), 보안접근(secured access) — 가 전부 URL 의 db
+    하나로 몰려 **키가 섞인다.** 지금은 REDIS_URL 이 Rust 게이트웨이에만
+    주입돼 드러나지 않지만, Python 서비스에 들어오는 순간 터진다.
+    """
+
+    def test_explicit_db_rewrites_the_url(self):
+        s = RedisSettings.from_env({"REDIS_URL": "redis://:pw@h:6379/0"}).with_overrides(db=7)
+        self.assertEqual(s.url_with_db(), "redis://:pw@h:6379/7")
+
+    def test_unspecified_db_respects_the_url(self):
+        s = RedisSettings.from_env({"REDIS_URL": "redis://:pw@h:6379/3"})
+        self.assertIsNone(s.db, "지정하지 않았으면 None 이어야 URL 을 존중한다")
+        self.assertEqual(s.url_with_db(), "redis://:pw@h:6379/3")
+
+    def test_factory_uses_the_rewritten_url(self):
+        s = RedisSettings.from_env({"REDIS_URL": "redis://h:6379/0"}).with_overrides(db=5)
+        with patch("redis.Redis") as R:
+            create_sync_redis(settings=s)
+        self.assertEqual(R.from_url.call_args[0][0], "redis://h:6379/5")
+
+    def test_unspecified_db_is_not_forced_to_zero(self):
+        """db 를 안 넘겨야 redis-py 가 URL 의 db 를 쓴다."""
+        s = RedisSettings.from_env({"REDIS_URL": "redis://h:6379/3"})
+        self.assertNotIn("db", s.client_kwargs())
+
+    def test_direct_connection_still_defaults_to_zero(self):
+        s = RedisSettings.from_env({"REDIS_HOST": "h"})
+        with patch("redis.Redis") as R:
+            create_sync_redis(settings=s)
+        # db 를 안 넘기면 redis-py 기본 0 — 기존 동작과 같다.
+        self.assertNotIn("db", R.call_args.kwargs)
+
+    def test_env_redis_db_is_still_honoured(self):
+        s = RedisSettings.from_env({"REDIS_HOST": "h", "REDIS_DB": "4"})
+        self.assertEqual(s.db, 4)
+        with patch("redis.Redis") as R:
+            create_sync_redis(settings=s)
+        self.assertEqual(R.call_args.kwargs["db"], 4)
