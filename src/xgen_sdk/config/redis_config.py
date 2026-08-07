@@ -47,36 +47,58 @@ class RedisConfigManager:
 
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None,
                  db: Optional[int] = None, password: Optional[str] = None,
-                 db_manager = None):
-        # 환경 변수에서 Redis 연결 정보 읽기
-        host = host or os.getenv('REDIS_HOST', '192.168.2.242')
-        port = port or int(os.getenv('REDIS_PORT', '6379'))
-        db = db or int(os.getenv('REDIS_DB', '0'))
-        password = password or os.getenv('REDIS_PASSWORD', 'redis_secure_password123!')
+                 db_manager = None, settings=None):
+        """
+        Args:
+            settings: :class:`xgen_sdk.redis.RedisSettings`. 주면 접속 정보를
+                여기서 전부 가져온다. 생략하면 환경변수에서 읽는다.
+            host/port/db/password: 하위 호환용 개별 오버라이드.
 
-        # 연결 타임아웃 설정 (기본 5초, 환경변수로 조정 가능)
-        socket_timeout = float(os.getenv('REDIS_SOCKET_TIMEOUT', '5'))
-        socket_connect_timeout = float(os.getenv('REDIS_CONNECT_TIMEOUT', '3'))
+        ⚠ **접속은 xgen_sdk.redis 팩토리가 만든다.** 예전에는 여기서 직접
+        ``redis.Redis(host=..., port=...)`` 를 불렀는데, 그 결과 **config
+        계층만 Sentinel 을 몰랐다** — 서비스의 클라이언트는 Sentinel 로 새
+        마스터를 따라가는데 config 는 고정 주소에 남아, 페일오버 뒤 설정
+        쓰기가 read-only 오류로 실패했다.
+
+        ⚠ 기본값도 없앴다. 예전에는 host 가 사내 IP(192.168.2.242), password
+        가 실제 비밀번호 문자열이었다 — 환경변수가 빠지면 조용히 엉뚱한
+        서버에 붙었다. 지금은 설정이 없으면 **붙지 않는다**.
+        """
+        from xgen_sdk.redis import RedisSettings, create_sync_redis, ping_sync
+
+        cfg = settings if settings is not None else RedisSettings.from_env()
+        overrides = {}
+        if host is not None:
+            overrides['host'] = host
+        if port is not None:
+            overrides['port'] = port
+        if db is not None:
+            overrides['db'] = db
+        if password is not None:
+            overrides['password'] = password
+        # config 값은 문자열로 다룬다 (기존 계약 유지).
+        overrides['decode_responses'] = True
+        cfg = cfg.with_overrides(**overrides)
+        self._settings = cfg
+
+        host = cfg.host
+        port = cfg.port
+        db = cfg.db
+        password = cfg.password
+        socket_timeout = cfg.socket_timeout
+        socket_connect_timeout = cfg.socket_connect_timeout
 
         self._host = host
         self._port = port
         self._connection_available = False
 
         try:
-            self.redis_client = redis.Redis(
-                host=host,
-                port=port,
-                db=db,
-                password=password,
-                decode_responses=True,
-                socket_timeout=socket_timeout,
-                socket_connect_timeout=socket_connect_timeout
-            )
+            self.redis_client = create_sync_redis(settings=cfg)
 
             # 연결 테스트 (빠른 실패)
             self.redis_client.ping()
             self._connection_available = True
-            logger.info(f"✅ Redis Config Manager 초기화 완료: {host}:{port}")
+            logger.info(f"✅ Redis Config Manager 초기화 완료: {cfg.describe()}")
 
         except redis.exceptions.ConnectionError as e:
             logger.warning(f"⚠️  Redis 연결 실패: {host}:{port}")

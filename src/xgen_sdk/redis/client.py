@@ -46,15 +46,26 @@ class RedisClient:
             RedisClient._initialized = True
             return
         
-        # 환경 변수에서 Redis 연결 정보 읽기
-        self._host = host or os.getenv('REDIS_HOST', 'redis')
-        self._port = port or int(os.getenv('REDIS_PORT', '6379'))
-        self._db = db or int(os.getenv('REDIS_DB', '0'))
-        self._password = password or os.getenv('REDIS_PASSWORD', 'redis_secure_password123!')
-        
-        # 연결 타임아웃 설정
-        self._socket_timeout = float(os.getenv('REDIS_SOCKET_TIMEOUT', '5'))
-        self._socket_connect_timeout = float(os.getenv('REDIS_CONNECT_TIMEOUT', '3'))
+        # 접속 정보는 RedisSettings 한 곳에서 해석한다 — Sentinel/URL/직결을
+        # 여기서 다시 판단하지 않는다.
+        from xgen_sdk.redis.settings import RedisSettings
+
+        overrides = {'decode_responses': True}
+        if host is not None:
+            overrides['host'] = host
+        if port is not None:
+            overrides['port'] = port
+        if db is not None:
+            overrides['db'] = db
+        if password is not None:
+            overrides['password'] = password
+        self._settings = RedisSettings.from_env().with_overrides(**overrides)
+        self._host = self._settings.host
+        self._port = self._settings.port
+        self._db = self._settings.db
+        self._password = self._settings.password
+        self._socket_timeout = self._settings.socket_timeout
+        self._socket_connect_timeout = self._settings.socket_connect_timeout
         
         # 키 프리픽스 (multi-tenant 지원)
         self._key_prefix = key_prefix
@@ -69,22 +80,28 @@ class RedisClient:
         RedisClient._initialized = True
     
     def _connect(self) -> bool:
-        """Redis 서버에 연결"""
+        """Redis 서버에 연결.
+
+        ⚠ **접속은 xgen_sdk.redis 팩토리가 만든다.** 예전에는 여기서 직접
+        ``redis.Redis(host=...)`` 를 불러 **Sentinel 을 몰랐다** — 페일오버 뒤
+        강등된 옛 마스터에 붙어 쓰기가 read-only 로 실패한다. 이 클라이언트는
+        LLM/오디오 카탈로그 캐시와 세션 관리가 쓰는 가장 넓은 경로라 영향이
+        컸다.
+        """
+        from xgen_sdk.redis.factory import create_sync_redis
+
         try:
-            self._redis_client = redis.Redis(
-                host=self._host,
-                port=self._port,
-                db=self._db,
-                password=self._password,
-                decode_responses=True,
-                socket_timeout=self._socket_timeout,
-                socket_connect_timeout=self._socket_connect_timeout
-            )
-            
+            if not self._settings.configured:
+                # 기본값을 지어내 엉뚱한 서버에 붙느니 붙지 않는다.
+                logger.warning("Redis 접속 정보가 없어 연결을 건너뜁니다")
+                self._connection_available = False
+                return False
+            self._redis_client = create_sync_redis(settings=self._settings)
+
             # 연결 테스트
             self._redis_client.ping()
             self._connection_available = True
-            logger.info(f"✅ Redis 연결 성공: {self._host}:{self._port}")
+            logger.info(f"✅ Redis 연결 성공: {self._settings.describe()}")
             return True
             
         except redis.exceptions.ConnectionError as e:
