@@ -1,11 +1,52 @@
 import logging
 import inspect
 import json
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Dict, Optional, Any
+from uuid import UUID
 from fastapi import Request
 from xgen_sdk.db import XgenDB
 
 logger = logging.getLogger("backend-logger")
+
+
+def _json_default(value: Any) -> Any:
+    """json.dumps 가 모르는 타입을 문자열류로 흘려보낸다."""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (set, frozenset)):
+        return list(value)
+    return str(value)
+
+
+def _dump_metadata(metadata: Optional[Dict]) -> str:
+    """metadata 직렬화. 어떤 입력이 와도 예외를 던지지 않는다.
+
+    _log 의 except Exception 이 직렬화 실패를 삼키면 metadata 하나 때문에
+    로그 레코드 자체가 DB 에 안 남는다. 여기서 끝내고 로그는 반드시 남긴다.
+    """
+    if not metadata:
+        return '{}'
+    try:
+        return json.dumps(metadata, ensure_ascii=False, default=_json_default)
+    except (TypeError, ValueError) as e:
+        # default 로도 못 막는 경우: 직렬화 불가 dict 키, 순환 참조 등
+        logger.warning(f"metadata serialization fallback: {str(e)}")
+        try:
+            return json.dumps(
+                {"_serialization_error": str(e), "_metadata_repr": repr(metadata)},
+                ensure_ascii=False,
+                default=_json_default,
+            )
+        except Exception:
+            return '{"_serialization_error": "metadata could not be serialized"}'
 
 
 class BackendLogger:
@@ -48,7 +89,7 @@ class BackendLogger:
                 'message': message,
                 'function_name': func_name,
                 'api_endpoint': endpoint,
-                'metadata': json.dumps(metadata) if metadata else '{}'
+                'metadata': _dump_metadata(metadata)
             }
             self.app_db.insert_record('backend_logs', log_data)
             logger.info(f"Logged backend data with log_id: {log_id}")
