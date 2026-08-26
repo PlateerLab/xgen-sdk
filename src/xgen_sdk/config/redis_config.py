@@ -12,6 +12,11 @@ from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
+#: get_all_configs 의 MGET 배치 크기. 너무 크면 한 번의 왕복이 무거워지고,
+#: 너무 작으면 왕복 수가 늘어난다. 수백 개 규모의 config 에서는 한두 번의
+#: 왕복으로 끝나는 크기.
+_MGET_CHUNK = 256
+
 
 def _is_db_available(db_manager) -> bool:
     """
@@ -133,6 +138,14 @@ class RedisConfigManager:
         # FastAPI(uvicorn) 의 asyncio 환경에서 set_config 는 sync 함수이며 await 가
         # 없어 한 워커 안에서 한 번에 하나만 실행되므로 동일 워커 안 race-free.
         self._last_write_version: int = 0
+
+        # get_config_by_name 미스 폴백(전체 스윕)의 결과 인덱스 캐시.
+        # 글로벌 version sentinel 로 가드한다 — 어떤 write 든 version 을 INCR
+        # 하므로, 값이 바뀌면 다음 조회에서 자동으로 재구성된다. 덕분에
+        # "존재하지 않는 config 이름" 을 반복 조회해도 스윕은 version 당 1회.
+        self._name_index_cache: Optional[Dict[str, Any]] = None
+        self._name_index_tail_cache: Optional[Dict[str, Any]] = None
+        self._name_index_version: int = -1
 
         # DB Manager (선택적)
         self.db_manager = db_manager
@@ -530,21 +543,34 @@ class RedisConfigManager:
         """
         모든 설정 조회
 
+        ⚠ 이 메서드는 핫패스에서 불린다 (`get_config_by_name` 의 미스 폴백).
+        그래서 두 가지를 지킨다:
+
+        1. 키 스캔은 ``KEYS`` 가 아니라 ``SCAN``. KEYS 는 O(N) 이면서 그동안
+           Redis 를 **블로킹**한다 — 공용 Redis 에서는 다른 서비스까지 멈춘다.
+        2. 값 조회는 키마다 GET 왕복이 아니라 ``MGET`` 배치. 예전 구현은
+           키 1개당 GET 1회를 순차로 돌아, config 240여 개 환경에서 호출
+           1회당 240여 회의 왕복(합산 80~120ms)을 만들었다.
+
         Returns:
             모든 설정 리스트
         """
+        if not self._connection_available:
+            return []
         try:
-            # config:* 패턴으로 모든 설정 키 검색
             pattern = f"{self.config_prefix}:*"
-            keys = self.redis_client.keys(pattern)
+            # category 인덱스 키 및 _meta: 네임스페이스(version sentinel 등) 제외
+            keys = [
+                key for key in self.redis_client.scan_iter(match=pattern, count=500)
+                if ':category:' not in key and ':_meta:' not in key
+            ]
 
             configs = []
-            for key in keys:
-                # category 인덱스 키 및 _meta: 네임스페이스(version sentinel 등) 제외
-                if ':category:' in key or ':_meta:' in key:
-                    continue
-                data = self.redis_client.get(key)
-                if data:
+            for start in range(0, len(keys), _MGET_CHUNK):
+                chunk = keys[start:start + _MGET_CHUNK]
+                for key, data in zip(chunk, self.redis_client.mget(chunk) or []):
+                    if not data:
+                        continue
                     try:
                         configs.append(json.loads(data))
                     except (json.JSONDecodeError, TypeError):
@@ -643,22 +669,62 @@ class RedisConfigManager:
             if value is not None:
                 return value
 
-            # 2. 모든 config에서 검색 (env_name 또는 path와 일치)
-            all_configs = self.get_all_configs()
-            for config in all_configs:
-                if config.get('env_name') == config_name or config['path'] == config_name:
-                    return config['value']
-
-                # path의 마지막 부분이 config_name과 일치하는 경우
-                path_parts = config['path'].split('.')
-                if path_parts[-1] == config_name:
-                    return config['value']
+            # 2. env_name 으로 못 찾으면 path / path 끝조각으로 검색.
+            #    예전에는 여기서 매번 전체 config 를 스윕했다 — 존재하지 않는
+            #    (혹은 값이 None 인) config 를 조회할 때마다 Redis 왕복이
+            #    config 개수만큼 발생해, 요청 1건에 수백 회 GET 이 찍혔다.
+            #    이제는 version 으로 가드된 인덱스를 쓴다.
+            exact, tail = self._get_name_index()
+            if config_name in exact:
+                return exact[config_name]
+            if config_name in tail:
+                return tail[config_name]
 
             raise KeyError(f"Configuration '{config_name}' not found")
 
         except Exception as e:
             logger.error(f"Config 조회 실패: {config_name} - {str(e)}")
             raise KeyError(f"Configuration '{config_name}' not found")
+
+    def _get_name_index(self) -> tuple:
+        """(exact, tail) 이름 인덱스를 반환. 글로벌 version 이 바뀌면 재구성.
+
+        - exact : env_name / path 전체와 일치하는 이름 → 값
+        - tail  : path 의 마지막 조각과 일치하는 이름 → 값 (exact 보다 낮은 우선순위)
+
+        version 조회 실패(Redis 장애 등)는 캐시를 버리지 않는다 — 조회 자체가
+        실패하는 상황에서 스윕을 반복해도 얻는 게 없다.
+        """
+        try:
+            current = self.get_config_version()
+        except Exception:
+            current = getattr(self, "_name_index_version", -1)
+
+        # __new__ 로 만들어진 인스턴스(테스트 픽스처 등)에서도 안전하도록 getattr.
+        cached = getattr(self, "_name_index_cache", None)
+        cached_tail = getattr(self, "_name_index_tail_cache", None)
+        cached_version = getattr(self, "_name_index_version", -1)
+        if cached is not None and cached_tail is not None and current == cached_version:
+            return cached, cached_tail
+
+        exact: Dict[str, Any] = {}
+        tail: Dict[str, Any] = {}
+        for config in self.get_all_configs():
+            value = config.get('value')
+            env_name = config.get('env_name')
+            path = config.get('path') or ''
+            if env_name:
+                exact.setdefault(env_name, value)
+            if path:
+                exact.setdefault(path, value)
+                last = path.split('.')[-1]
+                if last:
+                    tail.setdefault(last, value)
+
+        self._name_index_cache = exact
+        self._name_index_tail_cache = tail
+        self._name_index_version = current
+        return exact, tail
 
     def get_config_by_category_name(self, category_name: str) -> Dict[str, Any]:
         """

@@ -46,6 +46,32 @@ logger = logging.getLogger("xgen-sdk.config-base")
 # 1회만 두드리도록.
 # ============================================================== #
 
+#: 값을 로그에 그대로 남기면 안 되는 config 이름 조각.
+#: config 로더는 부팅/refresh 마다 값을 INFO 로 남기는데, 여기에 API 키·
+#: 비밀번호가 평문으로 찍히면 로그 수집기(Loki 등)에 그대로 적재된다.
+_SENSITIVE_NAME_PARTS = (
+    "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL",
+    "PRIVATE", "SALT", "CERT", "DSN",
+)
+
+
+def _mask_config_value(env_name: str, value: Any) -> Any:
+    """민감한 이름의 config 값을 로그용으로 마스킹.
+
+    값의 존재/길이는 남긴다 — 운영에서 "값이 비어 있어서 생긴 문제" 를
+    진단하려면 그 정도는 필요하고, 그 이상은 유출이다.
+    """
+    name = (env_name or "").upper()
+    if not any(part in name for part in _SENSITIVE_NAME_PARTS):
+        return value
+    if value is None:
+        return "<unset>"
+    text = str(value)
+    if not text:
+        return "<empty>"
+    return f"<redacted len={len(text)}>"
+
+
 _VERSION_CACHE_TTL_S: float = 0.05  # 50ms — 사용자 체감 지연 < 1 frame
 _version_cache_value: Optional[int] = None
 _version_cache_ts: float = 0.0
@@ -170,7 +196,7 @@ class PersistentConfig:
                 db_value = get_db_config(self.db_manager, self.config_path)
                 if db_value is not None:
                     db_value = normalize_config_value(db_value, expected_type)
-                    logger.info(f"[DB] [{category}] {self.env_name} | path={self.config_path} | value={db_value}")
+                    logger.info(f"[DB] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, db_value)}")
                     # Redis 에 값이 없을 때만 restore. 이미 있으면 set 을 skip 해
                     # 불필요한 version sentinel INCR (멀티-Pod stampede 원인) 방지.
                     try:
@@ -192,7 +218,7 @@ class PersistentConfig:
             redis_value = self.redis_manager.get_config_value(self.env_name)
             if redis_value is not None:
                 redis_value = normalize_config_value(redis_value, expected_type)
-                logger.info(f"[Redis] [{category}] {self.env_name} | path={self.config_path} | value={redis_value}")
+                logger.info(f"[Redis] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, redis_value)}")
                 if _is_db_available(self.db_manager):
                     from xgen_sdk.db.db_config_helper import set_db_config
                     set_db_config(self.db_manager, self.config_path, redis_value,
@@ -202,7 +228,7 @@ class PersistentConfig:
                 return redis_value
 
             # 3. 기본값 사용 및 Redis/DB에 저장
-            logger.info(f"[Default] [{category}] {self.env_name} | path={self.config_path} | value={self.env_value}")
+            logger.info(f"[Default] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, self.env_value)}")
             self.redis_manager.set_config(
                 config_path=self.config_path,
                 config_value=self.env_value,
