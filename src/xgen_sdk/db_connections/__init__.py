@@ -27,6 +27,7 @@ Usage:
         build_oracle_description_lb,
         build_mysql_sqlalchemy,
         build_informix_conn_str,
+        build_tibero_odbc_conn_str,
         UnsupportedDBTypeError,
         MultiHostNotSupportedError,
         InvalidHostsError,
@@ -52,6 +53,7 @@ from xgen_sdk.db_connections.dsn_builder import (
     build_postgres_libpq_dsn,
     build_postgres_sqlalchemy,
     build_sqlalchemy,
+    build_tibero_odbc_conn_str,
     extract_additional_hosts,
     extract_multi_host_mode,
     hosts_display,
@@ -78,6 +80,7 @@ __all__ = [
     "validate_db_type_supports_multi_host",
     # builders
     "build_informix_conn_str",
+    "build_tibero_odbc_conn_str",
     "build_mysql_sqlalchemy",
     "build_oracle_description_lb",
     "build_oracle_dsn",

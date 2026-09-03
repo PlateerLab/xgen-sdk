@@ -46,10 +46,13 @@ DEFAULT_PORTS: Dict[str, int] = {
     "oracle": 1521,
     "mysql": 3306,
     "informix": 9089,
+    # Tibero 기본 리스너 포트. 설치 기본값이 8629 이고 현장에서 그대로 두는 경우가
+    # 대부분이라 이 값을 기본으로 둔다(Oracle 의 1521 과 헷갈리기 쉬운 자리).
+    "tibero": 8629,
 }
 
 MULTI_HOST_SUPPORTED_TYPES = frozenset({"postgresql", "oracle"})
-SUPPORTED_DB_TYPES = frozenset({"postgresql", "oracle", "mysql", "informix"})
+SUPPORTED_DB_TYPES = frozenset({"postgresql", "oracle", "mysql", "informix", "tibero"})
 
 # multi_host_mode 허용 값
 VALID_MULTI_HOST_MODES = frozenset({"failover", "load_balance"})
@@ -539,6 +542,60 @@ def build_informix_conn_str(
         parts.append(f"UID={username}")
     if password:
         parts.append(f"PWD={password}")
+    return ";".join(parts) + ";"
+
+
+def build_tibero_odbc_conn_str(
+    hosts: List[Tuple[str, int]],
+    db_name: str,
+    username: str,
+    password: str,
+    options: Any = None,
+) -> str:
+    """Tibero ODBC 연결 문자열 — multi-host 미지원.
+
+    Tibero 는 SQL·데이터 딕셔너리가 Oracle 호환이지만 **와이어 프로토콜은 다르다** —
+    oracledb 로는 붙을 수 없고, 공식 Python 드라이버도 없다. 그래서 Informix 와 같은
+    길을 간다: 표준 드라이버 래퍼(pyodbc) + 벤더가 주는 클라이언트(libtbodbc.so).
+
+    ``options.tibero_driver`` 로 ODBC 드라이버 이름을 바꿀 수 있다. 기본값 ``Tibero``
+    는 Tibero Client 설치본이 ``odbcinst.ini`` 에 등록하는 이름인데, 사이트마다
+    ``Tibero 7`` 처럼 다르게 등록해 두는 일이 흔하다 — 그때 이 값만 고치면 된다.
+    ``options.tibero_dsn`` 을 주면 미리 등록된 DSN 을 쓰고 host/port 는 무시한다
+    (사내 표준 DSN 을 이미 배포한 사이트를 위한 길).
+
+    값에 세미콜론이나 중괄호가 들어가면 연결 문자열이 통째로 갈라지므로 거부한다 —
+    조용히 잘린 문자열로 엉뚱한 서버에 붙는 것보다 못 붙는 편이 낫다.
+    """
+    if len(hosts) > 1:
+        raise MultiHostNotSupportedError("Tibero 는 multi-host 를 지원하지 않습니다.")
+
+    opts = parse_options_dict(options)
+    driver = str(opts.get("tibero_driver") or "Tibero").strip() or "Tibero"
+    dsn = str(opts.get("tibero_dsn") or "").strip()
+
+    def _safe(name: str, value: str) -> str:
+        v = str(value or "")
+        if any(ch in v for ch in ";{}"):
+            raise InvalidHostsError(
+                f"Tibero 연결 값에 ';' 또는 중괄호를 쓸 수 없습니다 ({name})."
+            )
+        return v
+
+    parts: List[str] = []
+    if dsn:
+        parts.append(f"DSN={_safe('tibero_dsn', dsn)}")
+    else:
+        h, p = hosts[0]
+        # 드라이버 이름만 중괄호로 감싼다 — 공백이 든 이름("Tibero 7")이 흔하다.
+        parts.append("DRIVER={%s}" % _safe("tibero_driver", driver))
+        parts.append(f"SERVER={_safe('db_host', h)}")
+        parts.append(f"PORT={int(p)}")
+        parts.append(f"DB={_safe('db_name', db_name)}")
+    if username:
+        parts.append(f"UID={_safe('username', username)}")
+    if password:
+        parts.append(f"PWD={_safe('password', password)}")
     return ";".join(parts) + ";"
 
 
