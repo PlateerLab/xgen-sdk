@@ -240,6 +240,74 @@ class ConfigComposer:
         except Exception as e:
             self.logger.debug("Failed to align sentinels after refresh_all: %s", e)
 
+    #: refresh_all_if_stale_status() 결과값.
+    REFRESH_FRESH = "fresh"          # 확인했고, 최신이었다
+    REFRESH_REFRESHED = "refreshed"  # 확인했고, drift 가 있어 갱신했다
+    REFRESH_UNKNOWN = "unknown"      # **확인하지 못했다** (Redis 장애 등)
+
+    def refresh_all_if_stale_status(self) -> str:
+        """version sentinel 로 최신성을 확인하고 **확인 여부까지** 알려준다 (1.39.0).
+
+        ``refresh_all_if_stale`` 는 예외를 삼키고 False 를 돌려주므로 호출자가
+        "확인했는데 최신" 과 "확인조차 못 했다" 를 구분할 수 없다. in-memory 캐시 값으로
+        보호 여부를 결정하는 호출자(권한 게이트 등)에게 이 구분은 필수다 — 확인하지
+        못한 캐시를 확정 답변으로 쓰면, 캐시가 낡은 사이에 관리자가 켠 보호가 꺼진 것처럼
+        보인다(fail-open).
+
+        Returns:
+            "fresh" | "refreshed" | "unknown"
+        """
+        probe = getattr(self.redis_manager, "probe_config_version", None)
+        try:
+            if callable(probe):
+                status, current = probe()
+                if status != "ok":
+                    self.logger.warning(
+                        "config version 확인 실패(%s) — 캐시 최신성을 보장할 수 없다", status,
+                    )
+                    return self.REFRESH_UNKNOWN
+            else:
+                # 구버전 매니저 호환: 확인 여부를 알 수 없으므로 health_check 로 대신 가른다.
+                check = getattr(self.redis_manager, "health_check", None)
+                if callable(check) and not check():
+                    return self.REFRESH_UNKNOWN
+                current = _read_version_cached(self.redis_manager)
+
+            if current != self._last_known_version:
+                self.logger.info(
+                    "Config version drift detected (last_known=%s current=%s) — refreshing all",
+                    self._last_known_version, current,
+                )
+                self.refresh_all()
+                return self.REFRESH_REFRESHED
+            return self.REFRESH_FRESH
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning("refresh_all_if_stale_status failed: %s", e)
+            return self.REFRESH_UNKNOWN
+
+    def probe_config_value(self, env_name: str, *, verify_freshness: bool = True):
+        """설정 값 조회 — (상태, 값). "못 읽었다" 를 숨기지 않는다 (1.39.0).
+
+        in-memory PersistentConfig 를 보되, ``verify_freshness`` 가 참이면 최신성을
+        먼저 확인한다. 확인하지 못하면(저장소 장애) 캐시 값을 확정 답변으로 내주지 않고
+        ``("error", None)`` 을 돌려준다 — 호출자가 DB 폴백이나 fail-closed 를 택할 수 있게.
+
+        Returns:
+            ("ok", value) | ("missing", None) | ("error", None)
+        """
+        if verify_freshness and self.refresh_all_if_stale_status() == self.REFRESH_UNKNOWN:
+            return ("error", None)
+        try:
+            for category in self.config_categories.values():
+                config_obj = (getattr(category, "configs", None) or {}).get(env_name)
+                if config_obj is not None:
+                    value = getattr(config_obj, "value", None)
+                    return ("missing", None) if value is None else ("ok", value)
+            return ("missing", None)
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning("probe_config_value(%s) 실패: %s", env_name, e)
+            return ("error", None)
+
     def refresh_all_if_stale(self) -> bool:
         """글로벌 version sentinel 이 본 Pod 의 마지막 관측치와 다르면 전체 refresh.
 
@@ -253,20 +321,11 @@ class ConfigComposer:
 
         Returns:
             실제 refresh 가 수행됐는지 여부. (디버깅/관찰용)
+
+        주의: False 는 "최신이라 갱신 안 함" 과 "확인 실패" 를 **구분하지 않는다**.
+        그 구분이 필요한 호출자는 :meth:`refresh_all_if_stale_status` 를 쓴다.
         """
-        try:
-            current = _read_version_cached(self.redis_manager)
-            if current != self._last_known_version:
-                self.logger.info(
-                    "Config version drift detected (last_known=%s current=%s) — refreshing all",
-                    self._last_known_version, current
-                )
-                self.refresh_all()
-                return True
-            return False
-        except Exception as e:
-            self.logger.warning("refresh_all_if_stale failed (graceful skip): %s", e)
-            return False
+        return self.refresh_all_if_stale_status() == self.REFRESH_REFRESHED
 
     def get_config_summary(self) -> Dict[str, Any]:
         try:

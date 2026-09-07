@@ -8,7 +8,7 @@ import os
 import redis
 import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +183,65 @@ class RedisConfigManager:
         except Exception as e:
             logger.debug(f"get_config_version failed: {e}")
             return 0
+
+    # ──────────────────────────────────────────────────────────────────
+    # probe_* — "못 읽었다" 를 숨기지 않는 조회 (1.39.0)
+    #
+    # 기존 get_config_value / get_config_version 은 **연결 실패와 값 부재를 똑같이**
+    # default(0 / None) 로 돌려준다. 편의 API 로는 괜찮지만, 그 값으로 **보호 여부를
+    # 결정하는 호출자**(권한 게이트·승인 게이트 등)에게는 위험하다 — 저장소 장애가
+    # "설정 안 함" 으로 둔갑해 보호가 통째로 풀린다(fail-open).
+    #
+    # 아래 probe_* 는 (상태, 값) 을 돌려준다:
+    #     ("ok", value)   읽었다
+    #     ("missing", None) 저장소는 정상인데 그런 키가 없다
+    #     ("error", None)   읽지 못했다 (연결 실패·예외)
+    # 호출자는 "error" 를 보고 DB 폴백·마지막 확인값·fail-closed 를 스스로 정할 수 있다.
+    # ──────────────────────────────────────────────────────────────────
+
+    #: probe 결과 상태값.
+    PROBE_OK = "ok"
+    PROBE_MISSING = "missing"
+    PROBE_ERROR = "error"
+
+    def probe_config_value(self, env_name: str) -> Tuple[str, Any]:
+        """설정 값 조회 — (상태, 값). 실패를 default 로 뭉개지 않는다."""
+        if not self._connection_available:
+            return (self.PROBE_ERROR, None)
+        try:
+            raw = self.redis_client.get(f"{self.config_prefix}:{env_name}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"probe_config_value 실패({env_name}): {e}")
+            return (self.PROBE_ERROR, None)
+        if raw is None:
+            return (self.PROBE_MISSING, None)
+        try:
+            payload = json.loads(raw)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"probe_config_value 파싱 실패({env_name}): {e}")
+            return (self.PROBE_ERROR, None)
+        if "value" not in payload:
+            return (self.PROBE_MISSING, None)
+        return (self.PROBE_OK, payload.get("value"))
+
+    def probe_config_version(self) -> Tuple[str, int]:
+        """version sentinel 조회 — (상태, 버전).
+
+        ``get_config_version`` 은 장애도 0 으로 돌려주므로 "확인했는데 0" 과
+        "못 읽었다" 가 구분되지 않는다. 캐시 최신성을 **확인했는지** 알아야 하는
+        호출자는 이 API 를 쓴다 (키가 아직 없으면 ok/0 — 그것도 확인된 사실이다).
+        """
+        if not self._connection_available:
+            return (self.PROBE_ERROR, 0)
+        try:
+            raw = self.redis_client.get(self.version_key)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"probe_config_version 실패: {e}")
+            return (self.PROBE_ERROR, 0)
+        try:
+            return (self.PROBE_OK, int(raw) if raw is not None else 0)
+        except (TypeError, ValueError):
+            return (self.PROBE_ERROR, 0)
 
     def bump_meta_version(self) -> int:
         """글로벌 version sentinel 을 명시적으로 INCR.
