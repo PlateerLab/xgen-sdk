@@ -48,7 +48,10 @@ class BackendLogger:
                 'message': message,
                 'function_name': func_name,
                 'api_endpoint': endpoint,
-                'metadata': json.dumps(metadata) if metadata else '{}'
+                # default=str — metadata 에 DB row(datetime/Decimal/UUID 등)가 그대로
+                # 섞여 들어오는 호출부가 있다. 직렬화 실패 시 로그 행이 통째로 유실되므로
+                # 값 보존을 우선한다.
+                'metadata': json.dumps(metadata, ensure_ascii=False, default=str) if metadata else '{}'
             }
             self.app_db.insert_record('backend_logs', log_data)
             logger.info(f"Logged backend data with log_id: {log_id}")
