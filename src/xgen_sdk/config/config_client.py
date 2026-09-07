@@ -144,6 +144,22 @@ class ConfigClient:
     def get_config_value(self, env_name: str, default: Any = None) -> Any:
         return self._manager.get_config_value(env_name, default)
 
+    def probe_config_value(self, env_name: str):
+        """설정 값 조회 — (상태, 값). "못 읽었다" 를 숨기지 않는다 (1.39.0).
+
+        ("ok", value) | ("missing", None) | ("error", None). 저장소 장애를 "설정 안 함"
+        으로 오독해 보호가 풀리는 것(fail-open)을 막아야 하는 호출자가 쓴다.
+        """
+        probe = getattr(self._manager, "probe_config_value", None)
+        if callable(probe):
+            return probe(env_name)
+        # 구버전 매니저 호환 — 상태를 알 수 없으므로 health_check 로 가른다.
+        check = getattr(self._manager, "health_check", None)
+        if callable(check) and not check():
+            return ("error", None)
+        value = self._manager.get_config_value(env_name, None)
+        return ("missing", None) if value is None else ("ok", value)
+
     def get_config(self, env_name: str) -> Optional[Dict[str, Any]]:
         return self._manager.get_config(env_name)
 
