@@ -119,6 +119,37 @@ def get_db_config(db_manager, config_path: str) -> Optional[Any]:
         return None
 
 
+def probe_db_config(db_manager, config_path: str) -> tuple:
+    """DB 설정 조회 — (상태, 값). "못 읽었다" 를 숨기지 않는다 (1.40.0).
+
+    ``get_db_config`` 는 **조회 실패도 None** 으로 돌려주므로 "행이 없다" 와 구분되지 않는다.
+    그 둘을 접으면 DB 장애가 "설정 안 함" 으로 둔갑한다 — 보호 여부를 이 값으로 정하는
+    호출자(권한 게이트 등)에게는 치명적이다.
+
+    Returns:
+        ("ok", value) | ("missing", None) | ("error", None)
+    """
+    actual_manager = _get_db_manager(db_manager)
+    if actual_manager is None or not _is_db_available(db_manager):
+        return ("error", None)
+
+    try:
+        db_type = getattr(actual_manager, 'db_type', 'postgresql')
+        placeholder = "%s" if db_type == "postgresql" else "?"
+        query = (
+            "SELECT config_value, data_type, env_name FROM persistent_configs "
+            f"WHERE config_path = {placeholder} LIMIT 1"
+        )
+        result = actual_manager.execute_query_one(query, (config_path,))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"probe_db_config 실패: {config_path} - {e}")
+        return ("error", None)
+
+    if not result:
+        return ("missing", None)
+    return ("ok", _convert_db_value(result.get('config_value'), result.get('data_type', 'string')))
+
+
 def set_db_config(db_manager, config_path: str,
                   config_value: Any, config_type: str = "string",
                   env_name: Optional[str] = None) -> bool:

@@ -40,6 +40,11 @@ def _manager(data=None, boom=False, available=True):
     mgr._connection_available = available
     mgr.config_prefix = "config"
     mgr.version_key = "config:__version__"
+    # 1.40.0 에서 늘어난 재연결 상태 — 쿨다운을 길게 둬 이 테스트에서는 재접속을 시도하지 않는다
+    # (여기서 보려는 것은 '상태 3분기' 이지 복구 동작이 아니다. 복구는 test_config_resilience.py).
+    mgr._last_connect_attempt = __import__("time").monotonic()
+    mgr._reconnect_cooldown = 3600.0
+    mgr.recovery_epoch = 0
     return mgr
 
 
@@ -85,6 +90,7 @@ class _Composer(ConfigComposer):
         self.config_categories = configs or {}
         self.all_configs = {}
         self._last_known_version = last_version
+        self._last_recovery_epoch = int(getattr(manager, "recovery_epoch", 0) or 0)
         import logging
         self.logger = logging.getLogger("test-composer")
         self.refreshed = 0

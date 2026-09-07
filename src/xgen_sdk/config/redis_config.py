@@ -8,6 +8,7 @@ import os
 import redis
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -96,32 +97,18 @@ class RedisConfigManager:
         self._host = host
         self._port = port
         self._connection_available = False
+        self.redis_client = None
 
-        try:
-            self.redis_client = create_sync_redis(settings=cfg)
+        # 재연결 상태 — Redis 가 죽어도 서비스는 DB/로컬로 계속 돌고, **살아나면 자동으로
+        # 다시 Redis 를 쓴다**. 예전에는 __init__ 에서 한 번만 붙어서, 기동 시점에 Redis 가
+        # 없었거나 중간에 한 번 끊기면 그 프로세스는 **영원히** Redis 로 돌아오지 못했다.
+        self._last_connect_attempt: float = 0.0
+        self._reconnect_cooldown: float = float(os.getenv("REDIS_RECONNECT_COOLDOWN_SEC", "5") or 5)
+        #: 재연결 성공 때마다 1 증가. 캐시를 든 상위 계층(ConfigComposer)이 이 값의 변화를
+        #: 보고 "Redis 가 돌아왔다 → 다시 맞춰야 한다" 를 알아챈다.
+        self.recovery_epoch: int = 0
 
-            # 연결 테스트 (빠른 실패)
-            self.redis_client.ping()
-            self._connection_available = True
-            logger.info(f"✅ Redis Config Manager 초기화 완료: {cfg.describe()}")
-
-        except redis.exceptions.ConnectionError as e:
-            logger.warning(f"⚠️  Redis 연결 실패: {host}:{port}")
-            logger.warning(f"   원인: {e}")
-            logger.warning(f"   💡 Redis 서버가 실행 중인지 확인하세요.")
-            logger.warning(f"   💡 환경변수 REDIS_HOST, REDIS_PORT를 확인하세요.")
-            logger.warning(f"   ⏳ Redis 없이 계속 진행합니다 (일부 기능 제한됨)")
-            self._connection_available = False
-
-        except redis.exceptions.TimeoutError as e:
-            logger.warning(f"⚠️  Redis 연결 타임아웃 ({socket_connect_timeout}초): {host}:{port}")
-            logger.warning(f"   💡 네트워크 연결 또는 방화벽을 확인하세요.")
-            logger.warning(f"   ⏳ Redis 없이 계속 진행합니다 (일부 기능 제한됨)")
-            self._connection_available = False
-
-        except Exception as e:
-            logger.warning(f"⚠️  Redis 초기화 중 오류: {e}")
-            self._connection_available = False
+        self._connect(initial=True)
 
         # Config 키 Prefix
         self.config_prefix = "config"
@@ -152,16 +139,94 @@ class RedisConfigManager:
 
     # ========== Config 값 CRUD ==========
 
-    def health_check(self) -> bool:
-        """Redis 연결 상태 확인"""
-        if not self._connection_available:
-            return False
+    # ──────────────────────────────────────────────────────────────────
+    # 연결 수명주기 — 죽어도 계속 돌고, 살아나면 자동 복귀 (1.40.0)
+    # ──────────────────────────────────────────────────────────────────
+
+    def _connect(self, initial: bool = False) -> bool:
+        """Redis 접속 시도. 성공 여부를 돌려주고 실패해도 예외를 올리지 않는다.
+
+        접속 실패는 **치명적이지 않다** — config 값은 DB(persistent_configs)에도 있고
+        PersistentConfig 가 DB 를 먼저 본다. 그래서 여기서는 상태만 기록하고 진행한다.
+        """
+        from xgen_sdk.redis import create_sync_redis
+
+        self._last_connect_attempt = time.monotonic()
+        cfg = self._settings
         try:
-            return self.redis_client.ping()
-        except Exception as e:
-            logger.error(f"Redis health check failed: {e}")
+            self.redis_client = create_sync_redis(settings=cfg)
+            self.redis_client.ping()
+            was_down = not self._connection_available
+            self._connection_available = True
+            if initial:
+                logger.info(f"✅ Redis Config Manager 초기화 완료: {cfg.describe()}")
+            elif was_down:
+                self.recovery_epoch += 1
+                logger.info(
+                    "🔁 Redis Config Manager 재연결 성공 (epoch=%s): %s",
+                    self.recovery_epoch, cfg.describe(),
+                )
+            return True
+        except redis.exceptions.ConnectionError as e:
+            if initial:
+                logger.warning(f"⚠️  Redis 연결 실패: {self._host}:{self._port}")
+                logger.warning(f"   원인: {e}")
+                logger.warning(f"   💡 Redis 서버가 실행 중인지 / REDIS_HOST·REDIS_PORT 를 확인하세요.")
+                logger.warning(f"   ⏳ Redis 없이 계속 진행합니다 (DB 로 폴백, 복구되면 자동 재연결)")
+            else:
+                logger.debug(f"Redis 재연결 실패: {e}")
             self._connection_available = False
             return False
+        except redis.exceptions.TimeoutError as e:
+            if initial:
+                logger.warning(f"⚠️  Redis 연결 타임아웃: {self._host}:{self._port} ({e})")
+                logger.warning(f"   ⏳ Redis 없이 계속 진행합니다 (DB 로 폴백, 복구되면 자동 재연결)")
+            else:
+                logger.debug(f"Redis 재연결 타임아웃: {e}")
+            self._connection_available = False
+            return False
+        except Exception as e:  # noqa: BLE001
+            if initial:
+                logger.warning(f"⚠️  Redis 초기화 중 오류: {e}")
+            else:
+                logger.debug(f"Redis 재연결 오류: {e}")
+            self._connection_available = False
+            return False
+
+    def reconnect(self) -> bool:
+        """즉시 재연결 시도 (쿨다운 무시). 운영/디버깅용."""
+        return self._connect()
+
+    def _ensure_connection(self) -> bool:
+        """읽기·쓰기 진입점에서 부르는 자동 복구.
+
+        끊긴 상태면 쿨다운(기본 5초)마다 한 번씩만 재접속을 시도한다. 요청마다
+        무제한으로 붙으러 가면 Redis 가 죽어 있는 동안 전 요청이 접속 타임아웃만큼
+        느려지므로, "죽어도 서비스는 정상 속도로 돈다" 는 원칙을 지키기 위한 쿨다운이다.
+        """
+        if self._connection_available:
+            return True
+        if (time.monotonic() - self._last_connect_attempt) < self._reconnect_cooldown:
+            return False
+        return self._connect()
+
+    def health_check(self, auto_recover: bool = True) -> bool:
+        """Redis 연결 상태 확인.
+
+        끊겨 있으면 ``auto_recover`` 기본값에 따라 재연결을 한 번 시도한다(쿨다운 적용).
+        예전에는 여기서 False 만 돌려주고 아무도 다시 붙지 않아, **한 번 끊긴 프로세스는
+        영원히 Redis 를 쓰지 못했다**.
+        """
+        if not self._connection_available:
+            if not auto_recover:
+                return False
+            return self._ensure_connection()
+        try:
+            return bool(self.redis_client.ping())
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Redis health check failed: {e}")
+            self._connection_available = False
+            return self._ensure_connection() if auto_recover else False
 
     def get_config_version(self) -> int:
         """글로벌 config version sentinel 값을 조회.
@@ -175,7 +240,7 @@ class RedisConfigManager:
             반환값 0 은 단순히 "버전 정보 없음" 을 의미하며 호출처는 안전하게
             "이전과 동일" 로 간주해야 한다.
         """
-        if not self._connection_available:
+        if not self._ensure_connection():
             return 0
         try:
             raw = self.redis_client.get(self.version_key)
@@ -206,7 +271,7 @@ class RedisConfigManager:
 
     def probe_config_value(self, env_name: str) -> Tuple[str, Any]:
         """설정 값 조회 — (상태, 값). 실패를 default 로 뭉개지 않는다."""
-        if not self._connection_available:
+        if not self._ensure_connection():
             return (self.PROBE_ERROR, None)
         try:
             raw = self.redis_client.get(f"{self.config_prefix}:{env_name}")
@@ -231,7 +296,7 @@ class RedisConfigManager:
         "못 읽었다" 가 구분되지 않는다. 캐시 최신성을 **확인했는지** 알아야 하는
         호출자는 이 API 를 쓴다 (키가 아직 없으면 ok/0 — 그것도 확인된 사실이다).
         """
-        if not self._connection_available:
+        if not self._ensure_connection():
             return (self.PROBE_ERROR, 0)
         try:
             raw = self.redis_client.get(self.version_key)
@@ -455,7 +520,7 @@ class RedisConfigManager:
         Returns:
             설정 값 또는 기본값
         """
-        if not self._connection_available:
+        if not self._ensure_connection():
             return default
 
         try:
@@ -614,7 +679,7 @@ class RedisConfigManager:
         Returns:
             모든 설정 리스트
         """
-        if not self._connection_available:
+        if not self._ensure_connection():
             return []
         try:
             pattern = f"{self.config_prefix}:*"

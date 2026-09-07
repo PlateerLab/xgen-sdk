@@ -773,7 +773,21 @@ def create_config_manager(db_manager=None):
     if redis_manager._connection_available:
         logger.info("🔴 Redis 연결 성공 - RedisConfigManager 사용")
         return redis_manager
-    else:
-        logger.warning("🟡 Redis 연결 실패 - LocalConfigManager로 fallback")
-        # LocalConfigManager 생성이 에러를 만들지 않는 문제가 있으므로, 그냥 None을 반환하여 해결.
-        return None
+
+    # Redis 가 지금 없더라도 **RedisConfigManager 를 그대로 돌려준다** (1.40.0).
+    #
+    #   - 값은 DB(persistent_configs)에 있고 PersistentConfig 가 DB 를 먼저 본다.
+    #     즉 Redis 없이도 설정은 정상적으로 읽힌다.
+    #   - 이 매니저는 이제 읽기·쓰기 진입점마다 쿨다운을 두고 재접속을 시도하므로,
+    #     **Redis 가 살아나면 그 순간부터 자동으로 다시 Redis 를 쓴다.**
+    #
+    # 예전에는 여기서 None 을 돌려줬다. 그러면 ConfigComposer.redis_manager 가 None 이 되어
+    # 호출부마다 AttributeError 를 맞거나 null 가드를 흩뿌려야 했고, 무엇보다 **Redis 가
+    # 돌아와도 그 프로세스는 영원히 Redis 를 쓰지 못했다**. DB 도 없어 값을 읽을 곳이
+    # 아예 없는 경우에만 메모리 기반 LocalConfigManager 로 내려간다.
+    if db_manager is not None:
+        logger.warning("🟡 Redis 연결 실패 - DB 폴백으로 계속 진행 (복구되면 자동 재연결)")
+        return redis_manager
+
+    logger.warning("🟡 Redis·DB 모두 없음 - LocalConfigManager(메모리)로 fallback")
+    return LocalConfigManager(db_manager=db_manager)
