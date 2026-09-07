@@ -38,6 +38,7 @@ from xgen_sdk.auth.permission_registry import (
     registry,
     require_perm,
     require_any_perm,
+    require_login,
     validate_and_sync,
 )
 from xgen_sdk.auth.permission_resolver import (
@@ -73,6 +74,7 @@ __all__ = [
     "registry",
     "require_perm",
     "require_any_perm",
+    "require_login",
     "validate_and_sync",
     # resolver
     "resolve_user_permissions",

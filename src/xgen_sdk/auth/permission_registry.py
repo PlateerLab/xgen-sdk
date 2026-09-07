@@ -10,6 +10,9 @@ Permission Registry — 데코레이터 기반 권한 자동 수집 + DB 동기�
     - 새 기능 추가: 엔드포인트에 require_perm("xxx:yyy", description="...") 만 달면 끝
     - 기능 제거: 데코레이터 제거 → 시작 시 orphan 감지
     - 별도 상수 관리 불필요: 엔드포인트가 곧 권한 정의
+
+권한 없이 로그인만 요구하는 엔드포인트는 같은 자리에 require_login() 을 꽂는다
+(레지스트리에 아무것도 등록하지 않는다 — "기본 기능" 은 권한 키를 갖지 않는다).
 """
 import logging
 from typing import Set, Dict, List, Optional
@@ -154,6 +157,40 @@ def require_perm(*permissions: str, description: str = ""):
                 raise HTTPException(status_code=403, detail=f"Permission denied: {perm}")
 
         return user_session
+
+    return _dependency
+
+
+def require_login(description: str = ""):
+    """FastAPI Depends 팩토리: **로그인만** 요구 — 권한 게이팅 없음, 레지스트리 등록 없음.
+
+    ``require_perm`` 과 같은 자리에 같은 모양으로 꽂히지만(핸들러는 여전히
+    ``session`` dict 를 받는다) 권한 키를 하나도 만들지 않는다. "누구나 쓰는 기본
+    기능" 엔드포인트가 쓴다 — 예: Agent 캔버스·워크플로우 CRUD 처럼 인증된 사용자
+    전원에게 열린 기능. 이런 엔드포인트는 소유권 검사(본인 row 만)를 함수 본문에서
+    직접 한다; 이 의존성은 그 검사를 대신하지 않는다.
+
+    왜 ``require_perm`` 을 빼고 ``get_user_info_by_gateway`` 를 직접 부르지 않나:
+      - 시그니처가 한 토큰만 바뀌므로 게이트 제거 diff 가 리뷰 가능하다.
+      - 데코레이터 부재 = "인증 안 봄" 으로 오독되는 것을 막는다(의도가 이름에 있다).
+      - 훗날 게이트를 되살릴 때 같은 자리에 ``require_perm`` 만 다시 꽂으면 된다.
+
+    ``description`` 은 문서용이다(권한 편집 UI 에 나갈 곳이 없으므로 어디에도
+    등록되지 않는다).
+
+    Usage:
+        @router.get("/list")
+        async def list_workflows(request: Request,
+                                 session=Depends(require_login(description="내 워크플로우 목록"))):
+            user_id = session["user_id"]
+            ...
+    """
+    del description  # 문서용 — 등록하지 않는다
+
+    async def _dependency(request: Request):
+        from xgen_sdk.auth.gateway import get_user_info_by_gateway
+
+        return get_user_info_by_gateway(request)
 
     return _dependency
 
