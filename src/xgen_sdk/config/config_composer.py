@@ -55,6 +55,10 @@ class ConfigComposer:
         # 본 Pod 자신의 write 직후 갱신 / refresh_all 직후 갱신.
         # refresh_all_if_stale 는 이 값과 Redis 의 현재 version 을 비교해 drift 감지.
         self._last_known_version: int = 0
+        #: 마지막으로 관측한 redis_manager.recovery_epoch. Redis 가 끊겼다 돌아오면
+        #: 이 값이 달라지고, 그때 전체 refresh 로 **다시 Redis 를 정본으로 맞춘다**
+        #: (그동안 DB 로 읽던 값들이 Redis 에 write-back 된다).
+        self._last_recovery_epoch: int = int(getattr(self.redis_manager, "recovery_epoch", 0) or 0)
 
         if sub_config_dir:
             self._discover_and_load_configs(
@@ -257,6 +261,20 @@ class ConfigComposer:
         Returns:
             "fresh" | "refreshed" | "unknown"
         """
+        # Redis 가 끊겼다 돌아왔으면(재연결 epoch 변화) 버전 비교 이전에 전체를 다시 맞춘다.
+        # "복구되면 반드시 Redis 로 돌아온다" 는 원칙의 실행 지점 — 이게 없으면 재연결은
+        # 됐는데 이 Pod 의 메모리는 끊겨 있던 동안의 값에 머문다.
+        epoch = int(getattr(self.redis_manager, "recovery_epoch", 0) or 0)
+        if epoch != self._last_recovery_epoch:
+            self._last_recovery_epoch = epoch
+            self.logger.info("Redis 재연결 감지(epoch=%s) — 전체 config 재동기화", epoch)
+            try:
+                self.refresh_all()
+                return self.REFRESH_REFRESHED
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning("재연결 후 refresh_all 실패: %s", e)
+                return self.REFRESH_UNKNOWN
+
         probe = getattr(self.redis_manager, "probe_config_version", None)
         try:
             if callable(probe):
