@@ -289,6 +289,47 @@ class RedisConfigManager:
             return (self.PROBE_MISSING, None)
         return (self.PROBE_OK, payload.get("value"))
 
+    #: DB 에도 없다고 확인한 이름의 짧은 기억 — (이름 → 확인 시각).
+    #:
+    #: 왜 필요한가: Redis 미스마다 DB 를 두 번(config_path·env_name) 조회하면,
+    #: **존재하지 않는 이름을 반복 조회하는 호출부**가 요청마다 DB 왕복을 만든다.
+    #: 예전에 같은 자리에서 "요청 1건에 Redis GET 488회" 를 만든 적이 있다 —
+    #: 폴백은 조용히 증폭된다.
+    #:
+    #: 새로 설정된 값이 이 기억 때문에 늦게 보이는 일은 없다: 쓰기는 Redis 를
+    #: 먼저 채우고, 조회는 Redis 를 먼저 본다. 이 기억은 **두 곳 다 없는** 이름만 담는다.
+    _DB_MISS_TTL_S = 30.0
+
+    def _db_miss_recent(self, env_name: str) -> bool:
+        seen = getattr(self, "_db_miss_at", None)
+        if not seen:
+            return False
+        at = seen.get(env_name)
+        return at is not None and (time.monotonic() - at) < self._DB_MISS_TTL_S
+
+    def _remember_db_miss(self, env_name: str, missing: bool) -> None:
+        seen = getattr(self, "_db_miss_at", None)
+        if seen is None:
+            seen = {}
+            self._db_miss_at = seen
+        if missing:
+            if len(seen) > 512:      # 무한 성장 방지 — 오래된 것부터 버린다
+                for name in sorted(seen, key=seen.get)[:256]:
+                    seen.pop(name, None)
+            seen[env_name] = time.monotonic()
+        else:
+            seen.pop(env_name, None)
+
+    def clear_db_miss_memo(self) -> None:
+        """"DB 에도 없다" 기억을 버린다 — DB 가 새로 붙었거나 돌아왔을 때.
+
+        붙기 전에 "없다" 고 배운 이름들이 그대로 남으면, DB 를 붙여 놓고도 그 이름만
+        계속 없는 것으로 보인다.
+        """
+        seen = getattr(self, "_db_miss_at", None)
+        if seen:
+            seen.clear()
+
     def _probe_db_row(self, env_name: str, config_path: Optional[str] = None) -> Tuple[str, Any]:
         """DB **한 곳만** 본다 — (상태, 행). 사다리의 2단.
 
@@ -360,7 +401,16 @@ class RedisConfigManager:
         if redis_status == self.PROBE_OK:
             return (self.PROBE_OK, value, "redis")
 
+        if self._db_miss_recent(env_name):
+            # 최근에 DB 에도 없다고 확인한 이름 — 왕복을 아낀다.
+            return (
+                (self.PROBE_ERROR, None, "")
+                if redis_status == self.PROBE_ERROR
+                else (self.PROBE_MISSING, None, "")
+            )
+
         db_status, row = self._probe_db_row(env_name, config_path)
+        self._remember_db_miss(env_name, db_status == self.PROBE_MISSING)
         if db_status == self.PROBE_OK and row is not None:
             # Redis 가 "없다" 고 했을 때만 되살린다 — 못 읽은 상태(error)에서 쓰면
             # 엉뚱한 인스턴스에 쓰거나 끊긴 연결에 던지는 셈이다.
@@ -568,6 +618,8 @@ class RedisConfigManager:
                 logger.warning(f"Redis 미연결 — {final_env_name} 은 DB 에만 저장한다")
 
             db_ok = False
+            # 방금 쓴 이름은 "없다" 기억에서 뺀다.
+            self._remember_db_miss(final_env_name, False)
 
             # DB에도 저장 (DB가 있는 경우)
             if self.db_manager:

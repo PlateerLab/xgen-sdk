@@ -153,6 +153,11 @@ class ConfigClient:
         if getattr(self._manager, "db_manager", None) is not None:
             return False
         self._manager.db_manager = db_manager
+        # 붙기 전에 "DB 에도 없다" 고 배운 이름들을 버린다 — 그대로 두면 DB 를
+        # 붙여 놓고도 그 이름만 계속 없는 것으로 보인다.
+        clear = getattr(self._manager, "clear_db_miss_memo", None)
+        if callable(clear):
+            clear()
         # 메모리 매니저(Redis 없는 배포)는 붙는 순간 DB 를 한 번 읽어 채운다 —
         # 그러지 않으면 "DB 는 붙었는데 값은 여전히 비어 있는" 상태가 남는다.
         loader = getattr(self._manager, "_load_from_db", None)
