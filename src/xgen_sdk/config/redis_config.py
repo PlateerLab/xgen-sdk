@@ -727,8 +727,18 @@ class RedisConfigManager:
             bool: 성공 여부
         """
         try:
-            # 설정 데이터 먼저 조회하여 카테고리 확인
+            # 설정 메타 조회 — Redis 에 없으면 DB 메타를 본다. Redis 에만 물어보고
+            # 없다고 끝내면, DB 에만 남은 행은 영영 지워지지 않고 다음 조회에서
+            # **되살아난다**.
             config_data = self.get_config(env_name)
+            if not config_data:
+                db_status, row = self._probe_db_row(env_name, env_name)
+                if db_status == self.PROBE_OK and row is not None:
+                    path = row.get("config_path") or env_name
+                    config_data = {
+                        "path": path,
+                        "category": path.split('.')[0] if '.' in path else None,
+                    }
             if not config_data:
                 logger.warning(f"삭제할 Config를 찾을 수 없음: {env_name}")
                 return False
@@ -736,13 +746,31 @@ class RedisConfigManager:
             category = config_data.get('category')
 
             # Redis에서 삭제
-            redis_key = f"{self.config_prefix}:{env_name}"
-            self.redis_client.delete(redis_key)
+            if self._connection_available:
+                try:
+                    redis_key = f"{self.config_prefix}:{env_name}"
+                    self.redis_client.delete(redis_key)
 
-            # 카테고리 인덱스에서도 제거
-            if category:
-                category_key = f"{self.config_prefix}:category:{category}"
-                self.redis_client.srem(category_key, env_name)
+                    # 카테고리 인덱스에서도 제거
+                    if category:
+                        category_key = f"{self.config_prefix}:category:{category}"
+                        self.redis_client.srem(category_key, env_name)
+                except Exception as redis_err:  # noqa: BLE001
+                    logger.warning(f"Config Redis 삭제 실패 (DB 는 계속): {env_name} - {redis_err}")
+
+            # DB 에서도 제거 — Redis 에서만 지우면 다음 조회가 DB 에서 값을 찾아
+            # **되살린다**(사다리가 Redis → DB 이므로). 지우는 것은 두 곳 다 지운다.
+            if self.db_manager is not None:
+                try:
+                    from xgen_sdk.db.db_config_helper import delete_db_config
+
+                    delete_db_config(
+                        self.db_manager,
+                        config_path=config_data.get('path'),
+                        env_name=env_name,
+                    )
+                except Exception as db_err:  # noqa: BLE001
+                    logger.warning(f"Config DB 삭제 실패({env_name}): {db_err}")
 
             # 글로벌 version sentinel 갱신 — 다른 Pod 가 삭제 사실을 다음 read 시 감지.
             try:
@@ -769,21 +797,43 @@ class RedisConfigManager:
         Returns:
             설정 리스트
         """
+        configs = []
         try:
-            category_key = f"{self.config_prefix}:category:{category}"
-            env_names = self.redis_client.smembers(category_key)
+            if self._ensure_connection():
+                category_key = f"{self.config_prefix}:category:{category}"
+                env_names = self.redis_client.smembers(category_key)
+                for env_name in env_names:
+                    config = self.get_config(env_name)
+                    if config:
+                        configs.append(config)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"카테고리 Config 조회 실패: {category} - {str(e)}")
 
-            configs = []
-            for env_name in env_names:
-                config = self.get_config(env_name)
-                if config:
-                    configs.append(config)
-
+        if configs:
             return configs
 
-        except Exception as e:
-            logger.error(f"카테고리 Config 조회 실패: {category} - {str(e)}")
-            return []
+        # Redis 가 비었으면 DB 로 — 값 조회와 **같은 사다리**다. 카테고리만 Redis
+        # 전용으로 두면, 그 셋이 빠지는 순간 "설정이 하나도 없다" 가 된다
+        # (vectordb 접속 정보처럼 통째로 비면 곧장 장애다).
+        db_manager = getattr(self, "db_manager", None)
+        if db_manager is None:
+            return configs
+        try:
+            from xgen_sdk.db.db_config_helper import probe_db_category_rows
+
+            status, rows = probe_db_category_rows(db_manager, category)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"카테고리 DB 조회 실패: {category} - {e}")
+            return configs
+        if status != "ok":
+            return configs
+        for row in rows:
+            self._restore_to_redis({
+                "value": row.get("value"), "data_type": row.get("type", "string"),
+                "env_name": row.get("env_name"), "config_path": row.get("path"),
+            })
+        logger.info("config restore: 카테고리 %s ← DB (%d건)", category, len(rows))
+        return rows
 
     def get_category_configs_nested(self, category: str) -> Dict[str, Any]:
         """
@@ -1042,7 +1092,7 @@ class RedisConfigManager:
             KeyError: 설정이 존재하지 않는 경우
         """
         try:
-            # 1. env_name으로 직접 검색 시도
+            # 1. env_name으로 직접 검색 시도 (Redis 메타)
             if self.exists(config_name):
                 config_data = self.get_config(config_name)
                 self.set_config(
@@ -1053,6 +1103,24 @@ class RedisConfigManager:
                     env_name=config_data.get('env_name')
                 )
                 logger.info(f"Config 업데이트 완료: {config_name} = {new_value}")
+                return
+
+            # 1-b. Redis 에 없으면 **DB 메타**로 쓴다 (1.41.2).
+            #
+            # 예전에는 여기서 곧장 Redis 전체 스윕으로 갔고, 그것도 비면 KeyError 였다.
+            # 즉 **Redis 에서 키가 빠지면 쓰기가 통째로 실패**했다 — 값은 DB 에 멀쩡히
+            # 있는데도. 위성 파드의 쓰기(예: CLI 로그인 토큰 저장)가 이 경로를 탄다.
+            db_status, row = self._probe_db_row(config_name, config_name)
+            if db_status == self.PROBE_OK and row is not None:
+                config_path = row.get("config_path") or config_name
+                self.set_config(
+                    config_path=config_path,
+                    config_value=new_value,
+                    data_type=row.get("data_type", "string"),
+                    category=config_path.split('.')[0] if '.' in config_path else None,
+                    env_name=row.get("env_name") or config_name,
+                )
+                logger.info(f"Config 업데이트 완료(DB 메타): {config_name} = {new_value}")
                 return
 
             # 2. 모든 config에서 검색하여 업데이트

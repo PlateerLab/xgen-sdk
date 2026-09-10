@@ -175,6 +175,9 @@ class PersistentConfig:
         self._options_cache_ts: float = 0.0
         self.description = description
         self.label = label
+        #: 마지막 적재가 저장소에서 실제로 읽혔는가. False 면 지금 들고 있는 것은
+        #: 등록 기본값이고, 다음 접근에서 다시 시도한다.
+        self._loaded_ok: bool = True
         self._value = self._load_value()
         # Multi-Pod 캐시 인밸리데이션 — 자신이 마지막으로 본 글로벌 config version.
         # `.value` 접근 시 현재 version 과 비교해 변화가 있으면 lazy refresh.
@@ -185,7 +188,36 @@ class PersistentConfig:
             self._last_seen_version = 0
 
     def _load_value(self) -> Any:
-        """설정 값 로드 — **Redis → DB → 기본값**.
+        """최초 적재용 — 값 하나를 돌려준다 (못 읽으면 등록 기본값).
+
+        갱신에는 :meth:`_reload` 를 쓴다. 갱신 때 못 읽었다고 기본값을 박으면
+        관리자가 설정해 둔 값이 **메모리에서** 기본값으로 뒤집힌다.
+        """
+        status, value = self._resolve()
+        self._loaded_ok = status != "error"
+        return self.env_value if status == "error" else value
+
+    def _reload(self) -> bool:
+        """저장소에서 다시 읽어 캐시를 갱신한다. **못 읽으면 기존 값을 지킨다.**
+
+        Redis 재연결 직후처럼 저장소가 아직 흔들릴 때 refresh 가 돌면, 여기서
+        기본값을 박는 순간 그 파드의 모든 설정이 조용히 기본값으로 뒤집힌다.
+        읽지 못한 것은 "값이 바뀌었다" 가 아니다.
+        """
+        status, value = self._resolve()
+        if status == "error":
+            self._loaded_ok = False
+            logger.warning(
+                "[Unavailable] %s | path=%s | 저장소를 읽지 못해 직전 값을 유지한다",
+                self.env_name, self.config_path,
+            )
+            return False
+        self._value = value
+        self._loaded_ok = True
+        return True
+
+    def _resolve(self):
+        """(상태, 값) — **Redis → DB → 기본값**. 상태는 ``"ok"`` | ``"error"``.
 
         읽는 순서는 시스템 전체에서 하나여야 한다 (1.41.0). 예전에는 여기만 DB 를
         먼저 봤고 위성 파드(ConfigClient)는 Redis 만 봤다. 같은 키를 두 계층이
@@ -221,17 +253,13 @@ class PersistentConfig:
                     except Exception as db_err:  # noqa: BLE001
                         logger.debug(f"DB write-through 실패({self.env_name}): {db_err}")
                 if self.type_converter:
-                    return self.type_converter(value)
-                return value
+                    return ("ok", self.type_converter(value))
+                return ("ok", value)
 
             if status == "error":
-                # 저장소가 답하지 못했다 — 기본값을 **쓰지 않고** 메모리로만 쓴다.
-                logger.warning(
-                    "[Unavailable] [%s] %s | path=%s | 저장소를 읽지 못해 기본값을 임시로 사용한다 "
-                    "(저장하지 않음 — 복구 후 refresh 가 실제 값을 가져온다)",
-                    category, self.env_name, self.config_path,
-                )
-                return self.env_value
+                # 저장소가 답하지 못했다 — 기본값을 **쓰지 않는다**. 호출자가
+                # 직전 값을 지킬지(갱신) 기본값으로 시작할지(최초 적재) 정한다.
+                return ("error", None)
 
             # 3. 기본값 사용 및 Redis/DB에 저장 (진짜로 아무 데도 없을 때만)
             logger.info(f"[Default] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, self.env_value)}")
@@ -245,11 +273,11 @@ class PersistentConfig:
                 from xgen_sdk.db.db_config_helper import set_db_config
                 set_db_config(self.db_manager, self.config_path, self.env_value,
                               self._infer_data_type(self.env_value), self.env_name)
-            return self.env_value
+            return ("ok", self.env_value)
 
         except Exception as e:
             logger.warning(f"Failed to load value for {self.config_path}: {e}")
-            return self.env_value
+            return ("error", None)
 
     def _probe(self):
         """(상태, 값, 출처) — 매니저의 공통 사다리를 쓴다. 구버전 매니저도 받아 준다."""
@@ -295,18 +323,31 @@ class PersistentConfig:
         캐시 값을 그대로 반환하여 Redis 일시 장애 시에도 서비스가 멈추지 않게 한다.
         """
         try:
+            # 최초 적재가 실패했으면(저장소 장애 중 기동) version 변화를 기다리지 않고
+            # 성공할 때까지 매 접근마다 다시 시도한다 — 그러지 않으면 이 파드는
+            # version 이 바뀌기 전까지 **기본값**으로 계속 돈다.
+            if not getattr(self, "_loaded_ok", True):
+                if self._reload():
+                    _invalidate_version_cache()
+                    try:
+                        self._last_seen_version = _read_version_cached(self.redis_manager)
+                    except Exception:
+                        pass
+                return self._value
+
             current = _read_version_cached(self.redis_manager)
             if current != self._last_seen_version:
-                refreshed = self._load_value()
-                self._value = refreshed
-                # _load_value 가 default-restore 등으로 version 을 추가로 bump 했을
-                # 가능성이 있으므로 캐시 무효화 후 최신값을 다시 읽어 박는다.
-                # (그렇지 않으면 다음 .value 접근에서 또 다시 mismatch 로 인식.)
-                _invalidate_version_cache()
-                try:
-                    self._last_seen_version = _read_version_cached(self.redis_manager)
-                except Exception:
-                    self._last_seen_version = current
+                # 못 읽으면 직전 값을 지킨다(_reload). 그때는 sentinel 도 옮기지
+                # 않는다 — 옮기면 "갱신했다" 는 거짓말이 되어 다음 기회를 잃는다.
+                if self._reload():
+                    # _reload 가 default-restore 등으로 version 을 추가로 bump 했을
+                    # 가능성이 있으므로 캐시 무효화 후 최신값을 다시 읽어 박는다.
+                    # (그렇지 않으면 다음 .value 접근에서 또 다시 mismatch 로 인식.)
+                    _invalidate_version_cache()
+                    try:
+                        self._last_seen_version = _read_version_cached(self.redis_manager)
+                    except Exception:
+                        self._last_seen_version = current
         except Exception as e:
             # version sentinel 은 best-effort. 실패해도 기존 _value 그대로 반환.
             logger.debug("Version sentinel check failed for %s: %s", self.env_name, e)
@@ -331,7 +372,9 @@ class PersistentConfig:
         명시적으로 호출되면 version 캐시 TTL 을 무시하고 강제로 _load_value 를 돈다.
         호출 후 `_last_seen_version` 은 현재 Redis 의 글로벌 version 으로 맞춰진다.
         """
-        self._value = self._load_value()
+        # 못 읽으면 직전 값을 지킨다 — 갱신 실패는 "값이 바뀌었다" 가 아니다.
+        if not self._reload():
+            return
         try:
             self._last_seen_version = _read_version_cached(self.redis_manager)
         except Exception as e:
