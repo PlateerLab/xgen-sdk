@@ -172,3 +172,17 @@ def test_config_client_uses_the_same_ladder_once_db_is_attached():
     assert client.attach_db_manager(db) is True
     found = client.get_config_by_name("OPENAI_API_KEY")
     assert (found.value, found.status, found.source) == ("sk-openai", "ok", "db")
+
+
+def test_a_name_absent_from_both_stores_does_not_hammer_the_db():
+    """폴백은 조용히 증폭된다 — 없는 이름을 반복 조회해도 DB 왕복은 한 번뿐이다."""
+    db = _Db([])
+    mgr = _manager(db=db)
+    calls = []
+    original = db.execute_query_one
+    db.execute_query_one = lambda q, p: (calls.append(p[0]) or original(q, p))
+
+    for _ in range(5):
+        assert mgr.probe_value("NOPE", "no.pe")[0] == "missing"
+
+    assert len(calls) == 2, calls   # config_path 1회 + env_name 1회, 그 뒤로는 기억
