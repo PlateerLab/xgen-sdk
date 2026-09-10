@@ -185,49 +185,55 @@ class PersistentConfig:
             self._last_seen_version = 0
 
     def _load_value(self) -> Any:
-        """DB → Redis → 기본값 순서로 설정 값 로드"""
+        """설정 값 로드 — **Redis → DB → 기본값**.
+
+        읽는 순서는 시스템 전체에서 하나여야 한다 (1.41.0). 예전에는 여기만 DB 를
+        먼저 봤고 위성 파드(ConfigClient)는 Redis 만 봤다. 같은 키를 두 계층이
+        서로 다른 저장소에서 읽으니, Redis 에서 키가 빠진 순간 관리자 화면은
+        [설정됨] 인데 워크플로우 파드만 빈 값을 보는 상태가 생겼다.
+
+        이제 두 계층이 같은 사다리(:meth:`RedisConfigManager.probe_value`)를 탄다.
+        Redis 가 정본 캐시, DB 가 영속 저장소이고, DB 에서 찾으면 Redis 로 되살린다.
+
+        ⚠ **못 읽었을 때 기본값을 쓰지 않는다.** 저장소 장애를 "설정 안 함" 으로
+        오독해 기본값을 Redis/DB 에 써 버리면, 관리자가 넣어 둔 값이 그 순간
+        기본값으로 덮인다. 그럴 때는 메모리에만 기본값을 두고 **아무 데도 쓰지
+        않는다** — 저장소가 돌아오면 다음 refresh 가 진짜 값을 가져온다.
+        """
         try:
             category = self.config_path.split('.')[0] if '.' in self.config_path else 'unknown'
             expected_type = self._infer_data_type(self.env_value)
 
-            # 1. DB에서 먼저 확인
-            if _is_db_available(self.db_manager):
-                from xgen_sdk.db.db_config_helper import get_db_config
-                db_value = get_db_config(self.db_manager, self.config_path)
-                if db_value is not None:
-                    db_value = normalize_config_value(db_value, expected_type)
-                    logger.info(f"[DB] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, db_value)}")
-                    # Redis 에 값이 없을 때만 restore. 이미 있으면 set 을 skip 해
-                    # 불필요한 version sentinel INCR (멀티-Pod stampede 원인) 방지.
+            status, value, source = self._probe()
+            if status == "ok" and value is not None:
+                value = normalize_config_value(value, expected_type)
+                logger.info(
+                    f"[{source or 'store'}] [{category}] {self.env_name} | path={self.config_path} "
+                    f"| value={_mask_config_value(self.env_name, value)}"
+                )
+                # Redis 에서 읽었는데 DB 에 없을 수 있다(과거 Redis-only 쓰기 잔재).
+                # 영속 저장소를 채워 둔다 — 다음 Redis 유실 때 이 값이 살아남는다.
+                if source == "redis" and _is_db_available(self.db_manager):
                     try:
-                        redis_has_key = self.redis_manager.exists(self.env_name)
-                    except Exception:
-                        redis_has_key = False
-                    if not redis_has_key:
-                        self.redis_manager.set_config(
-                            config_path=self.config_path,
-                            config_value=db_value,
-                            data_type=self._infer_data_type(db_value),
-                            env_name=self.env_name
-                        )
-                    if self.type_converter:
-                        return self.type_converter(db_value)
-                    return db_value
-
-            # 2. Redis에서 확인
-            redis_value = self.redis_manager.get_config_value(self.env_name)
-            if redis_value is not None:
-                redis_value = normalize_config_value(redis_value, expected_type)
-                logger.info(f"[Redis] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, redis_value)}")
-                if _is_db_available(self.db_manager):
-                    from xgen_sdk.db.db_config_helper import set_db_config
-                    set_db_config(self.db_manager, self.config_path, redis_value,
-                                  self._infer_data_type(redis_value), self.env_name)
+                        from xgen_sdk.db.db_config_helper import set_db_config
+                        set_db_config(self.db_manager, self.config_path, value,
+                                      self._infer_data_type(value), self.env_name)
+                    except Exception as db_err:  # noqa: BLE001
+                        logger.debug(f"DB write-through 실패({self.env_name}): {db_err}")
                 if self.type_converter:
-                    return self.type_converter(redis_value)
-                return redis_value
+                    return self.type_converter(value)
+                return value
 
-            # 3. 기본값 사용 및 Redis/DB에 저장
+            if status == "error":
+                # 저장소가 답하지 못했다 — 기본값을 **쓰지 않고** 메모리로만 쓴다.
+                logger.warning(
+                    "[Unavailable] [%s] %s | path=%s | 저장소를 읽지 못해 기본값을 임시로 사용한다 "
+                    "(저장하지 않음 — 복구 후 refresh 가 실제 값을 가져온다)",
+                    category, self.env_name, self.config_path,
+                )
+                return self.env_value
+
+            # 3. 기본값 사용 및 Redis/DB에 저장 (진짜로 아무 데도 없을 때만)
             logger.info(f"[Default] [{category}] {self.env_name} | path={self.config_path} | value={_mask_config_value(self.env_name, self.env_value)}")
             self.redis_manager.set_config(
                 config_path=self.config_path,
@@ -244,6 +250,22 @@ class PersistentConfig:
         except Exception as e:
             logger.warning(f"Failed to load value for {self.config_path}: {e}")
             return self.env_value
+
+    def _probe(self):
+        """(상태, 값, 출처) — 매니저의 공통 사다리를 쓴다. 구버전 매니저도 받아 준다."""
+        probe = getattr(self.redis_manager, "probe_value", None)
+        if callable(probe):
+            try:
+                return probe(self.env_name, self.config_path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"probe_value 실패({self.env_name}): {e}")
+                return ("error", None, "")
+        # 사다리를 모르는 매니저 — 예전 동작(값만 조회)으로 내려간다.
+        try:
+            value = self.redis_manager.get_config_value(self.env_name)
+        except Exception:  # noqa: BLE001
+            return ("error", None, "")
+        return ("ok", value, "redis") if value is not None else ("missing", None, "")
 
     def _load_from_redis(self) -> Any:
         """하위호환용"""

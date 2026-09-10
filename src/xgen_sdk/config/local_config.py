@@ -203,6 +203,40 @@ class LocalConfigManager:
             logger.error(f"Config 저장 실패: {config_path} - {str(e)}")
             return False
 
+    #: probe 결과 상태값 — RedisConfigManager 와 **같은 인터페이스**여야 한다.
+    #: 두 매니저가 서로 다른 모양을 돌려주면 호출부가 매니저 종류를 알아야 한다.
+    PROBE_OK = "ok"
+    PROBE_MISSING = "missing"
+    PROBE_ERROR = "error"
+
+    def probe_value(self, env_name: str, config_path: Optional[str] = None):
+        """(상태, 값, 출처) — 메모리 → DB. RedisConfigManager.probe_value 의 짝."""
+        try:
+            if env_name in self._configs:
+                return (self.PROBE_OK, self._configs[env_name].get('value'), "memory")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Config 조회 실패: {env_name} - {str(e)}")
+            return (self.PROBE_ERROR, None, "")
+
+        if self.db_manager is None:
+            return (self.PROBE_MISSING, None, "")
+        try:
+            from xgen_sdk.db.db_config_helper import probe_db_config_row
+
+            status, row = probe_db_config_row(
+                self.db_manager, config_path=config_path, env_name=env_name
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"config DB 조회 실패({env_name}): {e}")
+            return (self.PROBE_ERROR, None, "")
+        if status == "ok" and row is not None:
+            return (self.PROBE_OK, row.get("value"), "db")
+        return (self.PROBE_ERROR if status == "error" else self.PROBE_MISSING, None, "")
+
+    def probe_config_value(self, env_name: str):
+        status, value, _source = self.probe_value(env_name)
+        return (status, value)
+
     def get_config_value(self, env_name: str, default: Any = None) -> Any:
         """
         설정 값만 조회 (env_name 기준)
@@ -214,14 +248,8 @@ class LocalConfigManager:
         Returns:
             설정 값 또는 기본값
         """
-        try:
-            if env_name in self._configs:
-                return self._configs[env_name].get('value', default)
-            return default
-
-        except Exception as e:
-            logger.error(f"Config 조회 실패: {env_name} - {str(e)}")
-            return default
+        status, value, _source = self.probe_value(env_name)
+        return value if status == self.PROBE_OK else default
 
     def get_config(self, env_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -436,9 +464,9 @@ class LocalConfigManager:
         Raises:
             KeyError: 설정이 존재하지 않는 경우
         """
-        # 1. env_name으로 직접 검색 시도
-        value = self.get_config_value(config_name)
-        if value is not None:
+        # 1. env_name / config_path 로 직접 검색 시도 (메모리 → DB)
+        status, value, _source = self.probe_value(config_name, config_path=config_name)
+        if status == self.PROBE_OK:
             return value
 
         # 2. 모든 config에서 검색

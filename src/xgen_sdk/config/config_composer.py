@@ -405,6 +405,12 @@ class ConfigComposer:
         sync 종료 후 모든 sentinel 을 현재 version 으로 정렬해 이를 방지한다.
         """
         self.logger.info("Redis sync check starting...")
+        # Redis 가 죽어 있으면 키마다 실패하는 write 를 수백 번 던질 이유가 없다.
+        # 값은 DB 에 있고, 재연결되면 recovery_epoch 변화가 전체 재동기화를 부른다.
+        health = getattr(self.redis_manager, "health_check", None)
+        if callable(health) and not health():
+            self.logger.warning("Redis 미연결 — Redis sync 를 건너뛴다 (DB 가 정본, 복구 시 자동 재동기화)")
+            return
         synced_count = 0
         for config_name, config in self.all_configs.items():
             if not self.redis_manager.exists(config.env_name):
@@ -441,10 +447,30 @@ class ConfigComposer:
 _config_composer_instance = None
 
 
+def set_config_composer(composer: ConfigComposer) -> None:
+    """앱이 만든 **진짜** composer 를 프로세스 정본으로 등록한다.
+
+    등록하지 않으면 :func:`get_config_composer` 가 sub_config 도 db_manager 도 없는
+    빈 composer 를 만들어 낸다 — 그 위에서 읽은 값은 전부 "설정 안 함" 이다.
+    설정을 등록하는 앱(xgen-core)은 기동 시 반드시 이걸 부른다.
+    """
+    global _config_composer_instance
+    _config_composer_instance = composer
+    logger.info("ConfigComposer 정본 등록 (configs=%d)", len(getattr(composer, "all_configs", {}) or {}))
+
+
 def get_config_composer() -> ConfigComposer:
-    """ConfigComposer 싱글톤 반환 (Lazy Init)"""
+    """ConfigComposer 싱글톤 반환.
+
+    앱이 :func:`set_config_composer` 로 등록해 둔 것이 있으면 그것을 준다.
+    없으면 lazy 로 하나 만든다 — 다만 그건 sub_config 를 모르는 빈 composer 이므로,
+    설정 등록 앱에서는 반드시 등록해서 이 경로를 타지 않게 해야 한다.
+    """
     global _config_composer_instance
     if _config_composer_instance is None:
-        logger.info("ConfigComposer instance initializing...")
+        logger.warning(
+            "ConfigComposer 정본이 등록되지 않아 빈 인스턴스를 만든다 — "
+            "설정 조회가 전부 '없음' 으로 보일 수 있다 (set_config_composer 확인)"
+        )
         _config_composer_instance = ConfigComposer()
     return _config_composer_instance
