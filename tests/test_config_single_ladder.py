@@ -59,7 +59,19 @@ class _Redis:
     def incr(self, key):
         self._check()
         self.incrs += 1
+        # 진짜 Redis 처럼 값을 남긴다 — 남기지 않으면 다른 파드의 GET 이 못 본다.
+        self.data[key] = str(self.incrs)
         return self.incrs
+
+    def delete(self, key):
+        self._check()
+        self.data.pop(key, None)
+
+    def srem(self, key, member):
+        self._check()
+        bucket = self.data.get(key)
+        if isinstance(bucket, set):
+            bucket.discard(member)
 
 
 class _Db:
@@ -70,6 +82,7 @@ class _Db:
         self.alive = alive
         self.db_type = "postgresql"
         self.saved = []
+        self.deleted = []
 
     def _is_pool_healthy(self):
         return self.alive
@@ -86,6 +99,14 @@ class _Db:
     def execute_query(self, query, params=None):
         if not self.alive:
             raise RuntimeError("db down")
+        if query.strip().upper().startswith("SELECT"):
+            prefix = params[0].rstrip("%")
+            return [r for r in self.rows if (r.get("config_path") or "").startswith(prefix)]
+        if query.strip().upper().startswith("DELETE"):
+            self.deleted.append(params[0])
+            column = "config_path" if "config_path =" in query else "env_name"
+            self.rows = [r for r in self.rows if r.get(column) != params[0]]
+            return None
         self.saved.append(params)
         return None
 
@@ -186,3 +207,111 @@ def test_a_name_absent_from_both_stores_does_not_hammer_the_db():
         assert mgr.probe_value("NOPE", "no.pe")[0] == "missing"
 
     assert len(calls) == 2, calls   # config_path 1회 + env_name 1회, 그 뒤로는 기억
+
+
+def test_a_transient_outage_does_not_flip_settings_back_to_defaults():
+    """갱신 때 못 읽었다고 기본값을 박으면, 파드의 모든 설정이 조용히 뒤집힌다.
+
+    시나리오: Redis 재연결 직후 refresh_all 이 도는데 저장소가 아직 흔들린다.
+    """
+    db = _Db([_row("SESSION_MIN", "app.session_min", "60", "int")])
+    mgr = _manager(db=db)
+    cfg = PersistentConfig(
+        env_name="SESSION_MIN", config_path="app.session_min",
+        env_value=480, redis_manager=mgr, db_manager=db,
+    )
+    assert cfg.value == 60           # 관리자가 넣어 둔 값
+
+    mgr.redis_client.alive = False   # 저장소가 통째로 흔들린다
+    db.alive = False
+    cfg.refresh()
+
+    assert cfg.value == 60, "갱신 실패가 값을 등록 기본값(480)으로 뒤집었다"
+
+    # 저장소가 돌아오면 다음 접근에서 스스로 다시 읽는다.
+    mgr.redis_client.alive = True
+    db.alive = True
+    db.rows[0]["config_value"] = "90"
+    mgr.redis_client.data.clear()
+    assert cfg.value == 90
+
+
+def test_a_write_survives_a_key_missing_from_redis():
+    """Redis 에서 키가 빠졌다고 쓰기가 실패하면 안 된다 — 값은 DB 에 있다.
+
+    위성 파드의 쓰기(예: CLI 로그인 토큰 저장)가 이 경로를 탄다. 예전에는
+    Redis 메타가 없으면 전체 스윕 → KeyError 로 끝났다.
+    """
+    db = _Db([_row("CLAUDE_CODE_OAUTH_TOKEN", "claude_code.oauth_token", "old")])
+    mgr = _manager(db=db)          # Redis 는 살아 있지만 이 키가 없다
+
+    mgr.update_config_by_name("CLAUDE_CODE_OAUTH_TOKEN", "new-token")
+
+    written = json.loads(mgr.redis_client.data["config:CLAUDE_CODE_OAUTH_TOKEN"])
+    assert written["value"] == "new-token"
+    assert written["path"] == "claude_code.oauth_token"   # DB 메타를 그대로 이어받는다
+    assert any("new-token" in str(p) for p in db.saved), db.saved
+
+
+def test_delete_removes_the_row_from_both_stores():
+    """Redis 에서만 지우면 다음 조회가 DB 에서 값을 찾아 되살린다."""
+    db = _Db([_row("LEGACY_KEY", "legacy.key", "v")])
+    mgr = _manager(redis_data={"config:LEGACY_KEY": json.dumps(
+        {"value": "v", "type": "string", "category": "legacy",
+         "path": "legacy.key", "env_name": "LEGACY_KEY"})}, db=db)
+
+    assert mgr.delete_config("LEGACY_KEY") is True
+    assert db.deleted, "DB 행이 남아 있으면 삭제한 설정이 되살아난다"
+    assert mgr.probe_value("LEGACY_KEY", "legacy.key")[0] == "missing"
+
+
+def test_category_reads_take_the_same_ladder():
+    """카테고리만 Redis 전용이면, 그 셋이 빠지는 순간 '설정이 하나도 없다' 가 된다."""
+    db = _Db([
+        _row("VECTORDB_HOST", "vectordb.host", "10.0.0.9"),
+        _row("VECTORDB_PORT", "vectordb.port", "6333", "int"),
+        _row("OPENAI_API_KEY", "openai.api_key", "sk-x"),
+    ])
+    mgr = _manager(db=db)          # Redis 에 카테고리 셋이 없다
+
+    rows = mgr.get_category_configs("vectordb")
+
+    assert {r["path"] for r in rows} == {"vectordb.host", "vectordb.port"}
+    # 되살아났으니 다음 조회는 Redis 에서 뜬다.
+    assert mgr.probe_value("VECTORDB_HOST")[2] == "redis"
+
+
+def test_an_admin_update_reaches_another_pod_immediately():
+    """전파 계약 — 관리자가 바꾸면 다른 파드가 **다음 조회에서** 새 값을 본다.
+
+    · 위성 파드(ConfigClient)는 캐시가 없다 → 즉시.
+    · 등록 파드(PersistentConfig)는 version sentinel 로 drift 를 보고 스스로 다시 읽는다.
+    """
+    shared_redis = _Redis()
+    db = _Db([_row("MODEL_DEFAULT", "llm.model_default", "gpt-4o")])
+
+    def pod():
+        mgr = _manager(db=db)
+        mgr.redis_client = shared_redis      # 두 파드가 같은 Redis 를 본다
+        return mgr
+
+    admin, satellite = pod(), pod()
+    holder = PersistentConfig(
+        env_name="MODEL_DEFAULT", config_path="llm.model_default",
+        env_value="", redis_manager=pod(), db_manager=db,
+    )
+    holder.redis_manager.redis_client = shared_redis
+    assert holder.value == "gpt-4o"
+    assert satellite.get_config_value("MODEL_DEFAULT") == "gpt-4o"
+
+    admin.set_config("llm.model_default", "claude-sonnet-4-6",
+                     env_name="MODEL_DEFAULT")
+
+    # 위성: 캐시가 없으니 곧바로 새 값
+    assert satellite.get_config_value("MODEL_DEFAULT") == "claude-sonnet-4-6"
+    # 등록 파드: version 이 올랐으니 다음 .value 접근에서 스스로 다시 읽는다
+    from xgen_sdk.config.base_config import _invalidate_version_cache
+    _invalidate_version_cache()
+    assert holder.value == "claude-sonnet-4-6"
+    # 영속 저장소에도 남았다
+    assert any("claude-sonnet-4-6" in str(x) for x in db.saved), db.saved

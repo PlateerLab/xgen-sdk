@@ -267,6 +267,72 @@ def set_db_config(db_manager, config_path: str,
         return False
 
 
+def probe_db_category_rows(db_manager, category: str) -> tuple:
+    """카테고리 하나의 설정 행들 — (상태, [행…]) (1.41.2).
+
+    카테고리 조회도 Redis 만 보면, Redis 에서 그 카테고리 셋이 빠지는 순간
+    "설정이 하나도 없다" 가 된다 (vectordb 접속 정보처럼 통째로 비면 곧장 장애다).
+    값 조회와 같은 사다리를 갖게 하려면 DB 쪽 짝이 필요하다.
+
+    카테고리는 config_path 의 첫 조각이다 — ``vectordb.host`` → ``vectordb``.
+    """
+    actual_manager = _get_db_manager(db_manager)
+    if actual_manager is None or not _is_db_available(db_manager):
+        return ("error", [])
+
+    db_type = getattr(actual_manager, 'db_type', 'postgresql')
+    placeholder = "%s" if db_type == "postgresql" else "?"
+    query = (
+        "SELECT config_value, data_type, env_name, config_path FROM persistent_configs "
+        f"WHERE config_path LIKE {placeholder}"
+    )
+    try:
+        results = actual_manager.execute_query(query, (f"{category}.%",))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("probe_db_category_rows 실패(%s): %s", category, e)
+        return ("error", [])
+
+    rows = []
+    for result in results or []:
+        data_type = result.get('data_type', 'string') or 'string'
+        path = result.get('config_path') or ''
+        rows.append({
+            "value": _convert_db_value(result.get('config_value'), data_type),
+            "type": data_type,
+            "category": path.split('.')[0] if '.' in path else category,
+            "path": path,
+            "env_name": result.get('env_name') or path,
+        })
+    return ("ok" if rows else "missing", rows)
+
+
+def delete_db_config(db_manager, *, config_path: Optional[str] = None,
+                     env_name: Optional[str] = None) -> bool:
+    """persistent_configs 에서 설정 행을 지운다 (1.41.2).
+
+    삭제가 Redis 에서만 일어나면 그 설정은 **되살아난다** — 다음 조회가 Redis 미스로
+    DB 를 보고 값을 찾아 Redis 로 복구하기 때문이다. 지우는 것은 두 곳 다 지워야 한다.
+    """
+    actual_manager = _get_db_manager(db_manager)
+    if actual_manager is None or not _is_db_available(db_manager):
+        return False
+
+    db_type = getattr(actual_manager, 'db_type', 'postgresql')
+    placeholder = "%s" if db_type == "postgresql" else "?"
+    deleted = False
+    for column, value in (("config_path", config_path), ("env_name", env_name)):
+        if not value:
+            continue
+        try:
+            actual_manager.execute_query(
+                f"DELETE FROM persistent_configs WHERE {column} = {placeholder}", (value,)
+            )
+            deleted = True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("delete_db_config 실패(%s=%s): %s", column, value, e)
+    return deleted
+
+
 def get_all_db_configs(db_manager) -> Dict[str, Any]:
     """
     DB에서 모든 설정 조회 (psycopg3 호환)
