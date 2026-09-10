@@ -38,10 +38,18 @@ class PersistentConfig(Generic[T]):
         config_value: T = None,
         data_type: str = "string",
         category: str = None,
+        status: str = "ok",
+        source: str = "",
     ):
         self.env_name = env_name
         self.config_path = config_path
         self.value = value
+        #: 조회 결과 상태 — "ok" | "missing" | "error".
+        #: ``error`` 는 **"설정 안 함" 이 아니라 "읽지 못했다"** 이다. 보호 여부를
+        #: 이 값으로 정하는 호출자는 반드시 구분해야 한다(fail-open 방지).
+        self.status = status
+        #: 값을 실제로 읽어 온 곳 — "redis" | "db" | "memory" | "".
+        self.source = source
         self.env_value = env_value if env_value is not None else value
         self.config_value = config_value
         self.data_type = data_type
@@ -107,18 +115,57 @@ class ConfigClient:
     PersistentConfig 객체 (.value 접근) 패턴을 제공합니다.
     """
 
-    def __init__(self, manager=None):
+    def __init__(self, manager=None, db_manager=None):
         """
         Args:
             manager: 사용할 config manager 인스턴스.
                      None이면 create_config_manager()로 자동 생성.
+            db_manager: 영속 저장소(persistent_configs) 매니저. 주면 Redis 가
+                비어 있거나 죽었을 때 **DB 로 폴백**한다 — core 와 같은 사다리.
+
+        ⚠ db_manager 없이 만들면 이 클라이언트는 **Redis 만** 본다. 그 상태가
+        오래 문제였다: 관리자 화면(core)은 DB 까지 보니 [설정됨] 인데, 위성 파드는
+        Redis 에서 키가 빠진 순간 빈 값을 보고 그대로 실행했다. 앱 기동 순서 때문에
+        생성 시점에 DB 가 아직 없다면 :meth:`attach_db_manager` 로 나중에 붙인다.
         """
         if manager is not None:
             self._manager = manager
         else:
             from xgen_sdk.config import create_config_manager
-            self._manager = create_config_manager(db_manager=None)
-        logger.info("ConfigClient initialized (%s)", type(self._manager).__name__)
+            self._manager = create_config_manager(db_manager=db_manager)
+        if db_manager is not None and getattr(self._manager, "db_manager", None) is None:
+            self._manager.db_manager = db_manager
+        logger.info(
+            "ConfigClient initialized (%s, db_fallback=%s)",
+            type(self._manager).__name__,
+            getattr(self._manager, "db_manager", None) is not None,
+        )
+
+    def attach_db_manager(self, db_manager) -> bool:
+        """DB 폴백을 나중에 붙인다 — 앱이 config 를 먼저 만들고 DB 를 나중에 여는 순서용.
+
+        붙이고 나면 이 클라이언트의 모든 조회가 core 와 **같은 사다리**
+        (Redis → DB)를 탄다. 이미 붙어 있으면 아무것도 하지 않는다.
+        """
+        if db_manager is None:
+            return False
+        if getattr(self._manager, "db_manager", None) is not None:
+            return False
+        self._manager.db_manager = db_manager
+        # 메모리 매니저(Redis 없는 배포)는 붙는 순간 DB 를 한 번 읽어 채운다 —
+        # 그러지 않으면 "DB 는 붙었는데 값은 여전히 비어 있는" 상태가 남는다.
+        loader = getattr(self._manager, "_load_from_db", None)
+        if callable(loader):
+            try:
+                loader()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ConfigClient: DB 적재 실패: %s", e)
+        logger.info("ConfigClient: DB 폴백 연결됨 (%s)", type(db_manager).__name__)
+        return True
+
+    @property
+    def has_db_fallback(self) -> bool:
+        return getattr(self._manager, "db_manager", None) is not None
 
     # ========== Core Methods ==========
 
@@ -210,20 +257,47 @@ class ConfigClient:
     # ========== PersistentConfig 패턴 ==========
 
     def get_config_by_name(self, config_name: str) -> PersistentConfig:
-        """이름으로 설정 조회 — PersistentConfig 객체 반환 (.value 접근 가능)"""
+        """이름으로 설정 조회 — PersistentConfig 객체 반환 (.value 접근 가능).
+
+        Redis → DB 사다리를 탄다(DB 폴백이 붙어 있을 때). 결과에는 ``.status`` 와
+        ``.source`` 가 함께 담긴다.
+
+        ⚠ 예전에는 ``except (KeyError, Exception)`` 로 **모든 실패를 value=None 으로**
+        접어 버렸다. 그래서 "설정 안 함" 과 "저장소를 못 읽었다" 가 호출부에서
+        구분되지 않았고, 후자가 조용히 전자처럼 동작했다 — 빈 API 키가 그대로
+        provider SDK 로 들어가는 사고가 여기서 났다. 이제 못 읽으면 로그가 그렇게
+        말하고 ``status="error"`` 가 붙는다.
+        """
+        status, value, source = self.probe_config_status(config_name)
+        if status == "error":
+            logger.warning(
+                "config 조회 실패(저장소 응답 없음): %s — 값 없음으로 취급되지만 "
+                "'설정 안 함' 이 아니다", config_name,
+            )
+        return PersistentConfig(
+            env_name=config_name,
+            config_path=config_name,
+            value=value,
+            status=status,
+            source=source,
+        )
+
+    def probe_config_status(self, config_name: str):
+        """(상태, 값, 출처) — 매니저의 공통 사다리 결과를 그대로 돌려준다."""
+        probe = getattr(self._manager, "probe_value", None)
+        if callable(probe):
+            try:
+                return probe(config_name, config_name)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("probe_value 실패(%s): %s", config_name, e)
+                return ("error", None, "")
         try:
-            value = self._manager.get_config_by_name(config_name)
-            return PersistentConfig(
-                env_name=config_name,
-                config_path=config_name,
-                value=value,
-            )
-        except (KeyError, Exception):
-            return PersistentConfig(
-                env_name=config_name,
-                config_path=config_name,
-                value=None,
-            )
+            return ("ok", self._manager.get_config_by_name(config_name), "")
+        except KeyError:
+            return ("missing", None, "")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("config 조회 실패(%s): %s", config_name, e)
+            return ("error", None, "")
 
     def get_config_by_category_name(self, category_name: str) -> DynamicCategoryConfig:
         """카테고리별 설정 조회 — DynamicCategoryConfig 객체 반환"""

@@ -269,8 +269,8 @@ class RedisConfigManager:
     PROBE_MISSING = "missing"
     PROBE_ERROR = "error"
 
-    def probe_config_value(self, env_name: str) -> Tuple[str, Any]:
-        """설정 값 조회 — (상태, 값). 실패를 default 로 뭉개지 않는다."""
+    def _probe_redis_value(self, env_name: str) -> Tuple[str, Any]:
+        """Redis **한 곳만** 본다 — (상태, 값). 사다리의 1단."""
         if not self._ensure_connection():
             return (self.PROBE_ERROR, None)
         try:
@@ -288,6 +288,97 @@ class RedisConfigManager:
         if "value" not in payload:
             return (self.PROBE_MISSING, None)
         return (self.PROBE_OK, payload.get("value"))
+
+    def _probe_db_row(self, env_name: str, config_path: Optional[str] = None) -> Tuple[str, Any]:
+        """DB **한 곳만** 본다 — (상태, 행). 사다리의 2단.
+
+        ``__new__`` 로 만들어진 인스턴스(테스트 픽스처)에서도 안전하도록 getattr.
+        """
+        db_manager = getattr(self, "db_manager", None)
+        if db_manager is None:
+            return (self.PROBE_MISSING, None)
+        try:
+            from xgen_sdk.db.db_config_helper import probe_db_config_row
+
+            return probe_db_config_row(
+                db_manager, config_path=config_path, env_name=env_name
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"config DB 조회 실패({env_name}): {e}")
+            return (self.PROBE_ERROR, None)
+
+    def _restore_to_redis(self, row: Dict[str, Any]) -> None:
+        """DB 에서 읽어 온 값을 Redis 에 되살린다 — **version 은 올리지 않는다**.
+
+        복구는 값의 변경이 아니다. 여기서 sentinel 을 올리면 모든 파드가 "누가 설정을
+        바꿨다" 로 오인해 전체 config 를 다시 읽는다(부팅·장애복구 때 stampede).
+        """
+        if not getattr(self, "_connection_available", False) or not row:
+            return
+        env_name = row.get("env_name")
+        if not env_name:
+            return
+        config_path = row.get("config_path") or env_name
+        category = config_path.split('.')[0] if '.' in config_path else 'unknown'
+        payload = {
+            'value': row.get("value"),
+            'type': row.get("data_type", "string"),
+            'category': category,
+            'path': config_path,
+            'env_name': env_name,
+        }
+        try:
+            self.redis_client.set(f"{self.config_prefix}:{env_name}", json.dumps(payload))
+            self.redis_client.sadd(f"{self.config_prefix}:category:{category}", env_name)
+            logger.info("config restore: %s ← DB (Redis 에 없어 되살림)", env_name)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"config restore 실패({env_name}): {e}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # probe_value — **설정을 읽는 유일한 사다리** (1.41.0)
+    #
+    #   Redis → DB → (없음)
+    #
+    # 예전에는 계층마다 사다리가 달랐다. core 의 PersistentConfig 는 DB→Redis,
+    # 위성 파드(ConfigClient)는 **Redis 만**, 일부 서비스는 persistent_configs 를
+    # 직접 SELECT 했다. 그래서 Redis 에서 키가 사라지면 core 화면은 [설정됨] 인데
+    # 워크플로우 파드만 빈 값을 보는 일이 생겼다 — 그 빈 값이 그대로 provider SDK 로
+    # 들어가 "Could not resolve authentication method" 가 됐다.
+    #
+    # 이제 모든 읽기는 이 함수 하나를 지난다. Redis 가 정본 캐시이고, 없거나 못 읽으면
+    # DB 가 받아 준다. DB 에서 찾으면 Redis 로 되살려 다음 읽기부터 다시 뜨겁다.
+    # ──────────────────────────────────────────────────────────────────
+    def probe_value(self, env_name: str, config_path: Optional[str] = None) -> Tuple[str, Any, str]:
+        """(상태, 값, 출처). 출처는 ``"redis"`` | ``"db"`` | ``""``.
+
+        상태:
+            ok      — 어느 한 곳에서 읽었다
+            missing — 두 곳 다 정상인데 그런 설정이 없다
+            error   — 읽지 못했다 (연결 실패·예외). **"설정 안 함" 과 절대 같지 않다.**
+        """
+        redis_status, value = self._probe_redis_value(env_name)
+        if redis_status == self.PROBE_OK:
+            return (self.PROBE_OK, value, "redis")
+
+        db_status, row = self._probe_db_row(env_name, config_path)
+        if db_status == self.PROBE_OK and row is not None:
+            # Redis 가 "없다" 고 했을 때만 되살린다 — 못 읽은 상태(error)에서 쓰면
+            # 엉뚱한 인스턴스에 쓰거나 끊긴 연결에 던지는 셈이다.
+            if redis_status == self.PROBE_MISSING:
+                self._restore_to_redis(row)
+            return (self.PROBE_OK, row.get("value"), "db")
+
+        if redis_status == self.PROBE_ERROR or db_status == self.PROBE_ERROR:
+            return (self.PROBE_ERROR, None, "")
+        return (self.PROBE_MISSING, None, "")
+
+    def probe_config_value(self, env_name: str) -> Tuple[str, Any]:
+        """설정 값 조회 — (상태, 값). 실패를 default 로 뭉개지 않는다.
+
+        1.41.0 부터 Redis 뿐 아니라 DB 까지 보는 :meth:`probe_value` 를 쓴다.
+        """
+        status, value, _source = self.probe_value(env_name)
+        return (status, value)
 
     def probe_config_version(self) -> Tuple[str, int]:
         """version sentinel 조회 — (상태, 버전).
@@ -443,25 +534,40 @@ class RedisConfigManager:
                 'env_name': final_env_name
             }
 
-            # Redis에 저장 (키: config:env_name)
-            redis_key = f"{self.config_prefix}:{final_env_name}"
-            self.redis_client.set(redis_key, json.dumps(config_data))
+            # ⚠ Redis 쓰기와 DB 쓰기는 **서로를 막지 않는다** (1.41.0).
+            # 예전에는 Redis 쓰기가 한 블록 안에서 먼저 일어나, Redis 가 죽어 있으면
+            # 예외가 나면서 **DB 쓰기까지 통째로 건너뛰었다** — 관리자가 UI 에서 저장한
+            # 설정이 아무 데도 남지 않고 사라졌다. 영속 저장소는 DB 다.
+            redis_ok = False
+            if self._ensure_connection():
+                try:
+                    # Redis에 저장 (키: config:env_name)
+                    redis_key = f"{self.config_prefix}:{final_env_name}"
+                    self.redis_client.set(redis_key, json.dumps(config_data))
 
-            # 카테고리별 인덱스도 저장 (키: config:category:name, 값: env_name)
-            category_key = f"{self.config_prefix}:category:{category}"
-            self.redis_client.sadd(category_key, final_env_name)
+                    # 카테고리별 인덱스도 저장 (키: config:category:name, 값: env_name)
+                    category_key = f"{self.config_prefix}:category:{category}"
+                    self.redis_client.sadd(category_key, final_env_name)
+                    redis_ok = True
 
-            # 글로벌 version sentinel 을 atomic 하게 증가시켜 다른 Pod 의 캐시 인밸리데이션을 유도.
-            # INCR 반환값(이 write 직후의 정확한 version)을 인스턴스 속성에 기록해 둠으로써
-            # 호출처(composer.update_config)가 다른 Pod 의 동시 쓰기에 영향받지 않고
-            # "내 write 의 정확한 version" 을 안전하게 알 수 있게 한다.
-            # 실패는 silent — set_config 자체의 성공/실패에 영향 주지 않는다.
-            try:
-                new_version = self.redis_client.incr(self.version_key)
-                if new_version is not None:
-                    self._last_write_version = int(new_version)
-            except Exception as version_err:
-                logger.warning(f"Failed to bump config version sentinel: {version_err}")
+                    # 글로벌 version sentinel 을 atomic 하게 증가시켜 다른 Pod 의 캐시 인밸리데이션을 유도.
+                    # INCR 반환값(이 write 직후의 정확한 version)을 인스턴스 속성에 기록해 둠으로써
+                    # 호출처(composer.update_config)가 다른 Pod 의 동시 쓰기에 영향받지 않고
+                    # "내 write 의 정확한 version" 을 안전하게 알 수 있게 한다.
+                    # 실패는 silent — set_config 자체의 성공/실패에 영향 주지 않는다.
+                    try:
+                        new_version = self.redis_client.incr(self.version_key)
+                        if new_version is not None:
+                            self._last_write_version = int(new_version)
+                    except Exception as version_err:
+                        logger.warning(f"Failed to bump config version sentinel: {version_err}")
+                except Exception as redis_err:  # noqa: BLE001
+                    logger.error(f"Config Redis 저장 실패 (DB 는 계속 진행): {config_path} - {redis_err}")
+                    self._connection_available = False
+            else:
+                logger.warning(f"Redis 미연결 — {final_env_name} 은 DB 에만 저장한다")
+
+            db_ok = False
 
             # DB에도 저장 (DB가 있는 경우)
             if self.db_manager:
@@ -476,33 +582,43 @@ class RedisConfigManager:
                             config_value=config_value,
                             data_type=data_type,
                         )
-                        if db_success:
-                            logger.info(f"✅ [DB] Config 저장 완료 (AppDatabaseManager): {final_env_name} = {config_value}")
+                        db_ok = bool(db_success)
+                        if db_ok:
+                            logger.info(f"✅ [DB] Config 저장 완료 (AppDatabaseManager): {final_env_name}")
                         else:
-                            logger.warning(f"⚠️  DB 저장 실패 (Redis는 성공): {config_path}")
+                            logger.warning(f"⚠️  DB 저장 실패: {config_path}")
                     else:
                         # 기존 DatabaseManager 사용 (레거시 호환 - psycopg3에도 동작)
                         if _is_db_available(self.db_manager):
                             logger.info(f"💾 [DB] Saving to DatabaseManager (legacy): {final_env_name}")
                             from xgen_sdk.db.db_config_helper import set_db_config
-                            set_db_config(
+                            db_ok = bool(set_db_config(
                                 self.db_manager,
                                 config_path,
                                 config_value,
                                 data_type,
                                 final_env_name
-                            )
-                            logger.info(f"✅ [DB] Config 저장 완료 (legacy): {final_env_name} = {config_value}")
+                            ))
+                            logger.info(f"✅ [DB] Config 저장 완료 (legacy): {final_env_name}")
                         else:
                             logger.warning(f"⚠️  DB Manager has no available connection")
                 except Exception as db_error:
-                    logger.error(f"❌ DB 저장 실패 (Redis는 성공): {config_path} - {db_error}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"❌ DB 저장 실패: {config_path} - {db_error}", exc_info=True)
             else:
-                logger.warning(f"⚠️  No DB Manager configured for config: {final_env_name}")
+                logger.debug(f"No DB Manager configured for config: {final_env_name}")
 
-            logger.debug(f"Config 저장 완료: {final_env_name} (path: {config_path}) = {config_value}")
+            # 어느 한 곳이라도 남았으면 성공. **둘 다 실패했는데 True 를 돌려주면**
+            # 관리자 화면은 "저장됨" 이라고 말하고 값은 어디에도 없다 — 그 거짓말이
+            # 가장 비싸다.
+            if not (redis_ok or db_ok):
+                logger.error(
+                    "Config 저장 실패 — Redis·DB 어느 쪽에도 쓰지 못했다: %s", config_path
+                )
+                return False
+            logger.debug(
+                "Config 저장 완료: %s (path=%s, redis=%s, db=%s)",
+                final_env_name, config_path, redis_ok, db_ok,
+            )
             return True
 
         except Exception as e:
@@ -519,22 +635,12 @@ class RedisConfigManager:
 
         Returns:
             설정 값 또는 기본값
+
+        1.41.0 부터 Redis → DB 사다리(:meth:`probe_value`)를 탄다. "못 읽었다" 와
+        "없다" 를 구분해야 하는 호출자는 :meth:`probe_value` 를 직접 쓴다.
         """
-        if not self._ensure_connection():
-            return default
-
-        try:
-            redis_key = f"{self.config_prefix}:{env_name}"
-            data = self.redis_client.get(redis_key)
-
-            if data:
-                config_data = json.loads(data)
-                return config_data.get('value', default)
-            return default
-
-        except Exception as e:
-            logger.error(f"Config 조회 실패: {env_name} - {str(e)}")
-            return default
+        status, value, _source = self.probe_value(env_name)
+        return value if status == self.PROBE_OK else default
 
     def get_config(self, env_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -787,13 +893,12 @@ class RedisConfigManager:
         Raises:
             KeyError: 설정이 존재하지 않는 경우
         """
-        try:
-            # 1. env_name으로 직접 검색 시도
-            value = self.get_config_value(config_name)
-            if value is not None:
-                return value
+        status, value, _source = self.probe_value(config_name, config_path=config_name)
+        if status == self.PROBE_OK:
+            return value
 
-            # 2. env_name 으로 못 찾으면 path / path 끝조각으로 검색.
+        try:
+            # env_name / config_path 로 못 찾으면 path 끝조각으로 한 번 더 본다.
             #    예전에는 여기서 매번 전체 config 를 스윕했다 — 존재하지 않는
             #    (혹은 값이 None 인) config 를 조회할 때마다 Redis 왕복이
             #    config 개수만큼 발생해, 요청 1건에 수백 회 GET 이 찍혔다.
@@ -803,12 +908,10 @@ class RedisConfigManager:
                 return exact[config_name]
             if config_name in tail:
                 return tail[config_name]
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Config 이름 인덱스 조회 실패: {config_name} - {str(e)}")
 
-            raise KeyError(f"Configuration '{config_name}' not found")
-
-        except Exception as e:
-            logger.error(f"Config 조회 실패: {config_name} - {str(e)}")
-            raise KeyError(f"Configuration '{config_name}' not found")
+        raise KeyError(f"Configuration '{config_name}' not found")
 
     def _get_name_index(self) -> tuple:
         """(exact, tail) 이름 인덱스를 반환. 글로벌 version 이 바뀌면 재구성.

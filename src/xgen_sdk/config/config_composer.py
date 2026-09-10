@@ -405,6 +405,12 @@ class ConfigComposer:
         sync 종료 후 모든 sentinel 을 현재 version 으로 정렬해 이를 방지한다.
         """
         self.logger.info("Redis sync check starting...")
+        # Redis 가 죽어 있으면 키마다 실패하는 write 를 수백 번 던질 이유가 없다.
+        # 값은 DB 에 있고, 재연결되면 recovery_epoch 변화가 전체 재동기화를 부른다.
+        health = getattr(self.redis_manager, "health_check", None)
+        if callable(health) and not health():
+            self.logger.warning("Redis 미연결 — Redis sync 를 건너뛴다 (DB 가 정본, 복구 시 자동 재동기화)")
+            return
         synced_count = 0
         for config_name, config in self.all_configs.items():
             if not self.redis_manager.exists(config.env_name):

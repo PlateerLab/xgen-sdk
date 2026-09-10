@@ -150,6 +150,60 @@ def probe_db_config(db_manager, config_path: str) -> tuple:
     return ("ok", _convert_db_value(result.get('config_value'), result.get('data_type', 'string')))
 
 
+def probe_db_config_row(db_manager, *, config_path: Optional[str] = None,
+                        env_name: Optional[str] = None) -> tuple:
+    """DB 설정 **행 전체** 조회 — (상태, 행). 값만이 아니라 메타까지 돌려준다 (1.41.0).
+
+    Redis 로 되살릴(backfill) 때는 값만으로는 부족하다 — data_type 이 없으면 list/dict
+    가 문자열로 굳고, config_path/env_name 이 없으면 카테고리 인덱스가 깨진다.
+    그래서 한 번의 조회로 필요한 것을 다 가져온다.
+
+    ``config_path`` 와 ``env_name`` 중 **하나만** 주면 그 컬럼으로 찾는다. 둘 다 주면
+    config_path 를 먼저 보고, 없으면 env_name 으로 한 번 더 본다 (등록 이름과 경로가
+    서로 다른 축이라 호출자가 가진 것이 무엇인지에 따라 갈린다).
+
+    Returns:
+        ("ok", {"value","data_type","env_name","config_path"}) | ("missing", None) | ("error", None)
+    """
+    actual_manager = _get_db_manager(db_manager)
+    if actual_manager is None or not _is_db_available(db_manager):
+        return ("error", None)
+
+    db_type = getattr(actual_manager, 'db_type', 'postgresql')
+    placeholder = "%s" if db_type == "postgresql" else "?"
+    # 같은 문자열이어도 컬럼이 다르면 다른 조회다 — 호출자는 자기가 가진 이름이
+    # 경로인지 env 이름인지 모르는 경우가 많다(get_config_by_name 이 둘 다 받는다).
+    lookups = []
+    if config_path:
+        lookups.append(("config_path", config_path))
+    if env_name:
+        lookups.append(("env_name", env_name))
+    if not lookups:
+        return ("missing", None)
+
+    saw_error = False
+    for column, value in lookups:
+        query = (
+            "SELECT config_value, data_type, env_name, config_path FROM persistent_configs "
+            f"WHERE {column} = {placeholder} LIMIT 1"
+        )
+        try:
+            result = actual_manager.execute_query_one(query, (value,))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("probe_db_config_row 실패(%s=%s): %s", column, value, e)
+            saw_error = True
+            continue
+        if result:
+            data_type = result.get('data_type', 'string') or 'string'
+            return ("ok", {
+                "value": _convert_db_value(result.get('config_value'), data_type),
+                "data_type": data_type,
+                "env_name": result.get('env_name') or env_name or config_path,
+                "config_path": result.get('config_path') or config_path or env_name,
+            })
+    return ("error", None) if saw_error else ("missing", None)
+
+
 def set_db_config(db_manager, config_path: str,
                   config_value: Any, config_type: str = "string",
                   env_name: Optional[str] = None) -> bool:
