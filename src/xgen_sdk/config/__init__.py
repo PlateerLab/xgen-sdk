@@ -9,7 +9,13 @@ xgen-workflow/documents: ConfigClient로 사용만
 
 from xgen_sdk.config.redis_config import RedisConfigManager
 from xgen_sdk.config.local_config import LocalConfigManager, create_config_manager
-from xgen_sdk.config.config_client import ConfigClient, DynamicCategoryConfig
+from xgen_sdk.config.config_client import (
+    ConfigClient,
+    DynamicCategoryConfig,
+    get_config_client,
+    reset_config_client,
+    set_config_client,
+)
 from xgen_sdk.config.base_config import (
     BaseConfig,
     PersistentConfig,
@@ -59,6 +65,9 @@ __all__ = [
     # 사용 (workflow/documents)
     "ConfigClient",
     "DynamicCategoryConfig",
+    "get_config_client",
+    "set_config_client",
+    "reset_config_client",
     # 유틸리티
     "dict_to_namespace",
     "get_config_dict",

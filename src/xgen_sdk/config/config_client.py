@@ -15,6 +15,7 @@ Usage:
 """
 
 import logging
+import threading
 from typing import Dict, Any, Optional, List, Generic, TypeVar
 
 logger = logging.getLogger("xgen-sdk.config-client")
@@ -390,3 +391,45 @@ class ConfigClient:
         if hasattr(self._manager, 'close'):
             self._manager.close()
         logger.info("ConfigClient closed")
+
+
+# ============================================================== #
+# 프로세스 하나짜리 클라이언트
+#
+# 여러 모듈이 각자 ConfigClient() 를 만들면, 그중 **DB 폴백이 붙은 것과 안 붙은
+# 것이 섞인다**. 같은 파드 안에서도 어떤 조회는 Redis 만 보고 어떤 조회는 DB 까지
+# 보는 상태가 되고, 값이 어긋난 날 어느 경로였는지 아무도 되짚지 못한다.
+# 읽는 길이 하나여야 한다 — 그 하나를 여기서 준다.
+# ============================================================== #
+
+_client_lock = threading.Lock()
+_client_singleton: Optional["ConfigClient"] = None
+
+
+def get_config_client(db_manager=None, manager=None) -> "ConfigClient":
+    """이 프로세스의 ConfigClient. 없으면 만들고, ``db_manager`` 를 주면 붙인다.
+
+    앱 기동 순서상 DB 가 늦게 열리는 곳이 많아서, 나중에 다시 부르며 DB 를
+    붙이는 것을 정상 경로로 둔다 (이미 붙어 있으면 무시).
+    """
+    global _client_singleton
+    with _client_lock:
+        if _client_singleton is None:
+            _client_singleton = ConfigClient(manager=manager, db_manager=db_manager)
+        elif db_manager is not None:
+            _client_singleton.attach_db_manager(db_manager)
+        return _client_singleton
+
+
+def set_config_client(client: "ConfigClient") -> None:
+    """앱이 이미 만든 클라이언트를 이 프로세스의 정본으로 등록한다."""
+    global _client_singleton
+    with _client_lock:
+        _client_singleton = client
+
+
+def reset_config_client() -> None:
+    """싱글톤 폐기 (테스트·헬스체커의 재생성 경로용)."""
+    global _client_singleton
+    with _client_lock:
+        _client_singleton = None
