@@ -139,6 +139,17 @@ def set_policy(app_db, action_type: str, *, actor_id: Optional[int],
     new_line = (before["default_line_id"] if default_line_id is _SENTINEL
                 else (int(default_line_id) if default_line_id else None))
 
+    # 결재선을 고를 자리가 없는 행위는 **기본 결재선 없이 켤 수 없다.**
+    #
+    # 지식 컬렉션 생성이나 도구 게시는 버튼 하나다 — 거기서 "누구에게 결재를
+    # 올릴까요" 를 물을 자리가 없다. 기본 결재선 없이 켜면 결재는 아무에게도
+    # 가지 않고, 사용자는 이유 없이 "실패했습니다" 만 본다. 그건 통제가 아니라
+    # 고장이다.
+    if new_required and not sp.picks_line and not new_line:
+        raise ValueError(
+            f"{sp.label} 은(는) 기본 결재선을 함께 지정해야 켤 수 있습니다 — "
+            "이 행위를 하는 화면에는 결재자를 고를 자리가 없습니다")
+
     _q(app_db,
        """INSERT INTO approval_action_policies
               (action_type, required, default_line_id, updated_by, updated_at)

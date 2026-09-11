@@ -50,6 +50,13 @@ class ActionSpec:
     gated: bool = True
     #: 사람이 마이페이지에서 **직접** 올릴 수 있는가.
     user_submittable: bool = False
+    #: 이 행위를 하는 화면이 **결재선을 고를 자리**를 갖고 있는가.
+    #:
+    #: 배포는 모달이 있어서 사용자가 결재자를 고른다. 지식 컬렉션 생성이나 도구
+    #: 게시는 버튼 하나다 — 거기서 결재선을 물을 자리가 없다. 그런 행위를
+    #: 기본 결재선 없이 켜면 결재가 **아무에게도 가지 않고** 사용자는 그냥
+    #: "실패했습니다" 만 본다. 그래서 정책이 켜질 때 기본 결재선을 요구한다.
+    picks_line: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -60,6 +67,7 @@ class ActionSpec:
             "domain": self.domain,
             "gated": self.gated,
             "user_submittable": self.user_submittable,
+            "picks_line": self.picks_line,
         }
 
 
@@ -84,7 +92,7 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         AGENT_DEPLOY, "에이전트 배포",
         "에이전트를 외부(URL·임베드·API)로 여는 것",
-        OWNER_CORE, DOMAIN_DEPLOY,
+        OWNER_CORE, DOMAIN_DEPLOY, picks_line=True,
     ),
 
     # ── 지식 ──

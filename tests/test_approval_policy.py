@@ -100,7 +100,7 @@ def test_turning_a_gate_on_and_off(db):
 
 def test_required_actions_lists_only_what_is_on(db):
     policy.set_policy(db, "agent.deploy", actor_id=1, required=True)
-    policy.set_policy(db, "tool.publish", actor_id=1, required=True)
+    policy.set_policy(db, "tool.publish", actor_id=1, required=True, default_line_id=2)
     policy.set_policy(db, "db.create", actor_id=1, required=False)
     assert set(policy.required_actions(db)) == {"agent.deploy", "tool.publish"}
 
@@ -155,8 +155,9 @@ def test_changing_the_default_line_is_written_down_too(db):
 
 def test_history_is_newest_first(db):
     policy.set_policy(db, "agent.deploy", actor_id=1, required=True)
-    policy.set_policy(db, "tool.publish", actor_id=1, required=True)
-    assert [h["target"] for h in policy.history(db)] == ["tool.publish", "agent.deploy"]
+    policy.set_policy(db, "tool.publish", actor_id=1, required=True, default_line_id=2)
+    assert [h["target"] for h in policy.history(db)][:2] == [
+        "tool.publish:default_line", "tool.publish"]
 
 
 # ── 슈퍼유저 면제 ─────────────────────────────────────────────────────
@@ -267,3 +268,41 @@ def test_the_log_is_newest_first(logdb):
     from xgen_sdk.approval import store
     ids = [r["id"] for r in store.search(logdb)["rows"]]
     assert ids == sorted(ids, reverse=True)
+
+
+# ── 결재선 없이 켤 수 없는 행위 ───────────────────────────────────────
+
+
+def test_an_action_without_a_picker_needs_a_default_line(db):
+    """지식 컬렉션 생성은 버튼 하나다 — "누구에게 올릴까요" 를 물을 자리가 없다.
+
+    기본 결재선 없이 켜면 결재는 아무에게도 가지 않고, 사용자는 이유 없이
+    "실패했습니다" 만 본다. 그건 통제가 아니라 고장이다.
+    """
+    with pytest.raises(ValueError, match="기본 결재선"):
+        policy.set_policy(db, "collection.create", actor_id=1, required=True)
+
+
+def test_it_can_be_turned_on_together_with_a_line(db):
+    policy.set_policy(db, "collection.create", actor_id=1, required=True, default_line_id=3)
+    assert policy.is_required(db, "collection.create") is True
+
+
+def test_deploy_can_be_turned_on_without_one(db):
+    """배포 모달에는 결재자를 고르는 자리가 있다 — 사용자가 그때 고른다."""
+    policy.set_policy(db, "agent.deploy", actor_id=1, required=True)
+    assert policy.is_required(db, "agent.deploy") is True
+
+
+def test_the_line_cannot_be_removed_while_it_is_on(db):
+    """켜 둔 채로 결재선만 지우면 그 순간부터 조용히 고장 난다."""
+    policy.set_policy(db, "tool.publish", actor_id=1, required=True, default_line_id=3)
+    with pytest.raises(ValueError, match="기본 결재선"):
+        policy.set_policy(db, "tool.publish", actor_id=1, default_line_id=None)
+
+
+def test_turning_it_off_frees_the_line(db):
+    policy.set_policy(db, "tool.publish", actor_id=1, required=True, default_line_id=3)
+    policy.set_policy(db, "tool.publish", actor_id=1, required=False)
+    policy.set_policy(db, "tool.publish", actor_id=1, default_line_id=None)
+    assert policy.get(db, "tool.publish")["default_line_id"] is None
