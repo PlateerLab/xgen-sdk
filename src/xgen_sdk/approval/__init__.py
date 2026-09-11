@@ -2,7 +2,9 @@
 
     engine.py    규칙(상태기계). DB 를 모른다 — 전부 dict 위에서 시험된다.
     store.py     원장 읽기/쓰기. 규칙은 여기 두지 않는다.
-    registry.py  승인됐을 때 무엇을 할지. 어떤 행위를 태울지는 기능 쪽이 꽂는다.
+    catalog.py   결재를 태울 수 있는 **행위 목록** — 세 레포가 같은 것을 본다.
+    policy.py    그중 무엇이 지금 결재 필수인가. **기본은 아무것도 막지 않는다.**
+    registry.py  승인됐을 때 무엇을 할지. 훅은 행위를 가진 서비스가 꽂는다.
     directory.py 결재자를 찾는 길 — 부서(역할)는 필터일 뿐이다.
     notifier.py  기존 알림 체계(``user_notifications``)를 그대로 탄다.
     models.py    표 정의(DDL). 표를 만드는 것은 core 한 곳이다.
@@ -24,11 +26,16 @@
   * **결정**(``store.decide``)은 core 의 ``/api/approval`` 한 곳에서만 한다 —
     승인 순간의 판정과 알림이 두 곳에 살면 어긋난다.
 """
-from xgen_sdk.approval import directory, engine, models, notifier, registry, sql, store  # noqa: F401
+from xgen_sdk.approval import (  # noqa: F401
+    catalog, directory, engine, models, notifier, policy, registry, sql, store,
+)
+from xgen_sdk.approval.catalog import ActionSpec, CATALOG  # noqa: F401
 from xgen_sdk.approval.engine import ApprovalError  # noqa: F401
 from xgen_sdk.approval.models import (  # noqa: F401
+    ApprovalActionPolicy,
     ApprovalLine,
     ApprovalLineStep,
+    ApprovalPolicyHistory,
     ApprovalRequest,
     ApprovalRequestStep,
 )
@@ -36,14 +43,20 @@ from xgen_sdk.approval.registry import (  # noqa: F401
     GENERIC,
     TEST,
     is_registered,
+    is_user_submittable,
     known_actions,
     register_action,
     run_apply,
+    run_reject,
+    submittable_actions,
 )
 
 __all__ = [
-    "directory", "engine", "models", "notifier", "registry", "sql", "store",
-    "ApprovalError",
-    "ApprovalLine", "ApprovalLineStep", "ApprovalRequest", "ApprovalRequestStep",
-    "GENERIC", "TEST", "is_registered", "known_actions", "register_action", "run_apply",
+    "catalog", "directory", "engine", "models", "notifier", "policy", "registry",
+    "sql", "store",
+    "ActionSpec", "CATALOG", "ApprovalError",
+    "ApprovalActionPolicy", "ApprovalLine", "ApprovalLineStep",
+    "ApprovalPolicyHistory", "ApprovalRequest", "ApprovalRequestStep",
+    "GENERIC", "TEST", "is_registered", "is_user_submittable", "known_actions",
+    "register_action", "run_apply", "run_reject", "submittable_actions",
 ]

@@ -47,6 +47,7 @@ TEMPLATE_TURN = "APV-TURN"      # 내 차례가 왔다
 TEMPLATE_APPROVED = "APV-OK"    # 내가 올린 건이 승인 완료
 TEMPLATE_REJECTED = "APV-NO"    # 내가 올린 건이 거절
 TEMPLATE_APPLY_FAIL = "APV-ERR"  # 승인은 됐는데 적용이 실패
+TEMPLATE_CANCELED = "APV-CXL"    # 전제가 사라져 시스템이 회수했다
 
 #: 템플릿이 DB 에 없어도 알림은 나가야 한다 — 시드는 "운영팀이 다듬을 수 있게"
 #: 올려 두는 것이지 동작의 전제가 아니다.
@@ -69,6 +70,11 @@ DEFAULTS: Dict[str, tuple] = {
         "결재는 승인됐지만 적용에 실패했습니다 — {{title}}",
         "'{{title}}' 은(는) 모든 결재자의 승인을 받았으나 실제 적용이 실패했습니다. "
         "사유: {{error}} — 승인은 유효하며, 적용만 다시 시도하면 됩니다.",
+    ),
+    TEMPLATE_CANCELED: (
+        "결재가 회수되었습니다 — {{title}}",
+        "'{{title}}' 결재가 회수되었습니다. 사유: {{note}} — "
+        "대상이 바뀌어 이 결재는 더 이상 유효하지 않습니다.",
     ),
 }
 
@@ -158,16 +164,31 @@ def _requester_name(req: Dict[str, Any]) -> str:
     return str(req.get("requester_name") or req.get("requester_username") or "미상")
 
 
+def _common(req: Dict[str, Any]) -> Dict[str, str]:
+    """모든 결재 문구가 쓸 수 있는 치환값.
+
+    ``{{action}}`` 을 넣어 두는 이유: 결재가 배포·지식·도구 게시까지 태우기
+    시작하면 제목만으로는 **무슨 종류의 일인지** 알 수 없다. 운영팀이 문구에
+    넣고 싶을 때 쓸 수 있어야 한다(기본 문구는 안 쓴다 — 짧은 편이 낫다).
+    """
+    from xgen_sdk.approval.registry import known_actions
+
+    action_type = str(req.get("action_type") or "")
+    return {
+        "title": str(req.get("title") or ""),
+        "requester": _requester_name(req),
+        "action": known_actions().get(action_type, action_type),
+        "target": str(req.get("target_ref") or ""),
+    }
+
+
 def notify_turn(app_db, req: Dict[str, Any], approver_ids: Iterable[int]) -> None:
     """차례가 온 결재자들에게. 기안자 본인에게는 보내지 않는다(자기 차례일 수 없다)."""
     ids: List[int] = [int(u) for u in approver_ids or [] if u]
     if not ids or app_db is None:
         return
     try:
-        title, message, link = _render(app_db, TEMPLATE_TURN, {
-            "title": str(req.get("title") or ""),
-            "requester": _requester_name(req),
-        })
+        title, message, link = _render(app_db, TEMPLATE_TURN, _common(req))
         link = _link(req.get("id"), base=link)
         for uid in ids:
             try:
@@ -194,7 +215,7 @@ def notify_settled(app_db, req: Dict[str, Any], *, actor_name: str = "", note: s
     try:
         tid = TEMPLATE_APPROVED if status == "approved" else TEMPLATE_REJECTED
         title, message, link = _render(app_db, tid, {
-            "title": str(req.get("title") or ""),
+            **_common(req),
             "actor": actor_name or "결재자",
             "note": note or "(사유 없음)",
         })
@@ -213,10 +234,41 @@ def notify_apply_failed(app_db, req: Dict[str, Any], error: str) -> None:
         return
     try:
         title, message, link = _render(app_db, TEMPLATE_APPLY_FAIL, {
-            "title": str(req.get("title") or ""),
+            **_common(req),
             "error": (error or "")[:300],
         })
         _insert(app_db, int(req["requester_id"]), TEMPLATE_APPLY_FAIL,
                 title, message, _link(req.get("id"), base=link))
     except Exception as exc:  # noqa: BLE001
         logger.warning("결재 적용 실패 알림 실패: %s", exc)
+
+
+def notify_system_canceled(app_db, req: Dict[str, Any],
+                           approver_ids: Iterable[int], *, note: str = "") -> None:
+    """**시스템이 회수했다** 를 기안자와 이미 처리한 결재자들에게.
+
+    사람의 회수는 알리지 않는다(회수한 사람이 기안자 본인이다). 시스템 회수는
+    다르다 — 승인 버튼을 누른 사람 입장에서는 자기가 처리한 건이 **말없이
+    사라진다**. 왜 사라졌는지(대상이 수정됐다) 를 알려야 다음에 올라온 같은
+    제목의 결재를 보고 "아까 그거 아닌가" 를 묻지 않는다.
+    """
+    if app_db is None:
+        return
+    told = {int(u) for u in approver_ids or [] if u}
+    if req.get("requester_id"):
+        told.add(int(req["requester_id"]))
+    if not told:
+        return
+    try:
+        title, message, link = _render(app_db, TEMPLATE_CANCELED, {
+            **_common(req),
+            "note": note or "(사유 없음)",
+        })
+        link = _link(req.get("id"), base=link)
+        for uid in told:
+            try:
+                _insert(app_db, uid, TEMPLATE_CANCELED, title, message, link)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("결재 회수 알림 실패 (user=%s): %s", uid, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("결재 회수 알림 전체 실패: %s", exc)
