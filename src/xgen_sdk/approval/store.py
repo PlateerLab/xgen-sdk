@@ -571,3 +571,79 @@ def can_read(req: Dict[str, Any], user_id: int, is_admin: bool) -> bool:
     if int(req.get("requester_id") or 0) == uid:
         return True
     return any(int(s.get("approver_id") or 0) == uid for s in req.get("steps") or [])
+
+
+# ── 관리자 열람 — [결재 로그] ─────────────────────────────────────────
+
+
+def search(app_db, *, statuses: Optional[Sequence[str]] = None,
+           action_types: Optional[Sequence[str]] = None,
+           query: str = "", since: Any = None, until: Any = None,
+           limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    """**전 사용자의 결재**를 훑는다 — 관리 화면 전용.
+
+    :func:`involved` 와 무엇이 다른가: 저쪽은 "내가 걸려 있는 것" 이라 사용자
+    자신의 축으로 잘린다. 이쪽은 자르지 않는다. 그래서 **부르는 쪽이 권한을
+    확인해야 한다**(core 의 ``/api/admin/approval`` 이 ``require_perm`` 으로
+    막는다). 결재 제목은 그 자체로 조직의 정보다 — 무슨 계약을, 누구를 뽑는지.
+
+    ``query`` 는 제목과 기안자(이름·아이디)를 함께 훑는다. 결재를 찾는 사람이
+    기억하는 것은 보통 둘 중 하나다.
+
+    반환: ``{"rows": [...], "total": N}`` — 화면이 쪽수를 매길 수 있게.
+    """
+    where: List[str] = []
+    params: List[Any] = []
+
+    if statuses:
+        where.append("r.status IN (" + ", ".join(["%s"] * len(statuses)) + ")")
+        params += list(statuses)
+    if action_types:
+        where.append("r.action_type IN (" + ", ".join(["%s"] * len(action_types)) + ")")
+        params += list(action_types)
+    q = str(query or "").strip()
+    if q:
+        like = f"%{q}%"
+        where.append("(r.title ILIKE %s OR u.full_name ILIKE %s OR u.username ILIKE %s "
+                     "OR r.target_ref ILIKE %s)")
+        params += [like, like, like, like]
+    if since:
+        where.append("r.created_at >= %s")
+        params.append(since)
+    if until:
+        where.append("r.created_at <= %s")
+        params.append(until)
+
+    cond = ("WHERE " + " AND ".join(where)) if where else ""
+    total_rows = _q(
+        app_db,
+        f"""SELECT COUNT(*) AS n
+              FROM approval_requests r
+              LEFT JOIN users u ON u.id = r.requester_id
+             {cond}""",
+        params,
+    )
+    total = int((total_rows[0] if total_rows else {}).get("n") or 0)
+
+    rows = _q(
+        app_db,
+        f"""
+        SELECT r.id, r.title, r.action_type, r.status, r.created_at, r.decided_at,
+               r.applied_at, r.apply_error, r.target_ref, r.requester_id,
+               r.canceled_by, r.cancel_note,
+               u.username AS requester_username, u.full_name AS requester_name,
+               (SELECT COALESCE(cu.full_name, cu.username)
+                  FROM approval_request_steps c
+                  LEFT JOIN users cu ON cu.id = c.approver_id
+                 WHERE c.request_id = r.id AND c.status = 'pending'
+                 LIMIT 1) AS waiting_on,
+               (SELECT COUNT(*) FROM approval_request_steps t WHERE t.request_id = r.id) AS step_count
+          FROM approval_requests r
+          LEFT JOIN users u ON u.id = r.requester_id
+         {cond}
+         ORDER BY r.id DESC
+         LIMIT %s OFFSET %s
+        """,
+        [*params, max(1, min(int(limit), 500)), max(0, int(offset))],
+    )
+    return {"rows": rows, "total": total}

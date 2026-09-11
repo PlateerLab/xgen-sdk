@@ -175,3 +175,95 @@ def test_superuser_exemption_defaults_to_on():
 ])
 def test_superuser_exemption_reads_the_usual_shapes(raw, expected):
     assert policy.superuser_exempt(raw) is expected
+
+
+# ── [결재 로그] — 전 사용자 열람 ──────────────────────────────────────
+
+
+class LogDB(PolicyDB):
+    """search() 의 SQL 까지 이해하는 메모리 DB."""
+
+    def _run(self, s, p):
+        if s.startswith("SELECT COUNT(*) AS n"):
+            return [{"n": len(self._match(s, p))}]
+        if s.startswith("SELECT r.id, r.title, r.action_type, r.status, r.created_at, r.decided_at,"):
+            rows = self._match(s, p[:-2])
+            rows.sort(key=lambda r: r["id"], reverse=True)
+            return [dict(r, requester_username=None, requester_name=None,
+                         waiting_on=None, step_count=1)
+                    for r in rows[p[-1]:p[-1] + p[-2]]]
+        return super()._run(s, p)
+
+    def _match(self, sql, params):
+        rows = list(self.t["approval_requests"])
+        i = 0
+        if "r.status IN" in sql:
+            n = sql.split("r.status IN (")[1].split(")")[0].count("%s")
+            wanted, i = params[i:i + n], i + n
+            rows = [r for r in rows if r["status"] in wanted]
+        if "r.action_type IN" in sql:
+            n = sql.split("r.action_type IN (")[1].split(")")[0].count("%s")
+            wanted, i = params[i:i + n], i + n
+            rows = [r for r in rows if r["action_type"] in wanted]
+        if "r.title ILIKE" in sql:
+            needle = params[i].strip("%")
+            i += 4
+            rows = [r for r in rows if needle in (r["title"] or "")
+                    or needle in (r.get("target_ref") or "")]
+        return rows
+
+
+@pytest.fixture
+def logdb():
+    from xgen_sdk.approval import store
+    d = LogDB()
+    for uid, name in ((1, "기안자"), (3, "팀장")):
+        d.add_user(uid, name, name)
+    for title, action in (("배포 A", "agent.deploy"), ("배포 B", "agent.deploy"),
+                          ("컬렉션 C", "collection.create")):
+        store.submit(d, requester_id=1, title=title, action_type=action,
+                     target_ref=f"t:{title}",
+                     steps=[{"approver_id": 3, "step_order": 1}])
+    return d
+
+
+def test_the_log_sees_everyone(logdb):
+    """기안자도 결재자도 아닌 관리자가 전부 본다 — 그래서 권한이 필요하다."""
+    from xgen_sdk.approval import store
+    out = store.search(logdb)
+    assert out["total"] == 3 and len(out["rows"]) == 3
+
+
+def test_the_log_filters_by_action(logdb):
+    from xgen_sdk.approval import store
+    out = store.search(logdb, action_types=["agent.deploy"])
+    assert out["total"] == 2
+
+
+def test_the_log_filters_by_status(logdb):
+    from xgen_sdk.approval import store
+    rows = store.search(logdb)["rows"]
+    store.decide(logdb, rows[0]["id"], actor_id=3, action="approved")
+    assert store.search(logdb, statuses=["approved"])["total"] == 1
+    assert store.search(logdb, statuses=["pending"])["total"] == 2
+
+
+def test_the_log_searches_title_and_target(logdb):
+    from xgen_sdk.approval import store
+    assert store.search(logdb, query="컬렉션")["total"] == 1
+    assert store.search(logdb, query="배포")["total"] == 2
+
+
+def test_the_log_pages(logdb):
+    from xgen_sdk.approval import store
+    first = store.search(logdb, limit=2)
+    assert first["total"] == 3 and len(first["rows"]) == 2
+    second = store.search(logdb, limit=2, offset=2)
+    assert len(second["rows"]) == 1
+    assert {r["id"] for r in first["rows"]} & {r["id"] for r in second["rows"]} == set()
+
+
+def test_the_log_is_newest_first(logdb):
+    from xgen_sdk.approval import store
+    ids = [r["id"] for r in store.search(logdb)["rows"]]
+    assert ids == sorted(ids, reverse=True)
