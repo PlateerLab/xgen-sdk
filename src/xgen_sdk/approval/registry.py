@@ -1,18 +1,19 @@
 """결재가 승인됐을 때 **무엇을 할지** 를 꽂는 자리.
 
-왜 레지스트리인가
------------------
-"어떤 API 에 결재를 태울지" 는 아직 정해지지 않았고, 정해질 때마다 결재
-엔진을 고치게 두면 안 된다. 그래서 엔진은 ``action_type`` 문자열만 알고,
-그 문자열이 무엇을 뜻하는지는 **기능 쪽이 등록**한다.
+목록과 동작을 나눈다
+--------------------
+  * **무엇이 있는가** 는 :mod:`xgen_sdk.approval.catalog` 이 선언한다. 세 레포가
+    같은 목록을 본다 — core 의 [결재 목록 설정] 화면이 workflow 의 행위를
+    보여 줘야 하기 때문이다.
+  * **승인되면 무엇을 하는가** 는 행위를 가진 서비스가 여기에 꽂는다. core 는
+    workflow 파드 안의 함수를 부를 수 없으므로, 적용은 소유자가 한다.
 
     from xgen_sdk.approval.registry import register_action
 
     def _apply(payload, request):
         ...  # 실제로 그 일을 한다
 
-    register_action("db.connection.activate", _apply,
-                    label="DB 연결 활성화")
+    register_action("agent.deploy", _apply)
 
 계약 두 가지
 ------------
@@ -27,49 +28,103 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, Optional
 
+from xgen_sdk.approval.catalog import CATALOG, GENERIC, TEST, ActionSpec, spec
+
 logger = logging.getLogger("approval-registry")
 
-#: action_type → {"apply": fn, "label": str}
+#: action_type → {"apply": fn, "label": str, "spec": ActionSpec|None}
 _ACTIONS: Dict[str, Dict[str, Any]] = {}
-
-#: 아무 일도 하지 않는 기본 종류. **승인 자체가 결론**인 결재다.
-#: 아직 어떤 API 도 결재를 타지 않으므로 지금은 전부 이것으로 올라온다.
-GENERIC = "generic"
 
 
 def register_action(
     action_type: str,
     apply: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
     *,
+    reject: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
     label: str = "",
+    action_spec: Optional[ActionSpec] = None,
 ) -> None:
-    """결재 종류를 등록한다. ``apply`` 가 없으면 승인 자체가 결론이다."""
+    """결재 종류를 등록한다. ``apply`` 가 없으면 승인 자체가 결론이다.
+
+    ``reject`` 는 **거절·회수된 뒤 치울 것이 있을 때** 쓴다. 지식 문서 업로드
+    처럼 "일단 올려 두고 승인 뒤에 보이게" 하는 행위는, 거절되면 올려 둔 것을
+    치워야 한다 — 안 치우면 거절된 문서가 아무도 모르는 채 남는다.
+
+    **이미 등록된 것을 덮어쓰지 않는다** — 카탈로그가 먼저 이름표를 달아 두고,
+    소유 서비스가 나중에 훅만 꽂는 순서이기 때문이다. 나중에 온 쪽이
+    label 을 비워 보내면 앞서 달린 이름표가 그대로 남는다.
+    """
     key = str(action_type or "").strip()
     if not key:
         raise ValueError("action_type 이 비어 있습니다")
-    _ACTIONS[key] = {"apply": apply, "label": label or key}
+    prev = _ACTIONS.get(key) or {}
+    sp = action_spec or prev.get("spec") or spec(key)
+    _ACTIONS[key] = {
+        "apply": apply if apply is not None else prev.get("apply"),
+        "reject": reject if reject is not None else prev.get("reject"),
+        "label": label or (sp.label if sp else "") or prev.get("label") or key,
+        "spec": sp,
+    }
 
 
 def is_registered(action_type: str) -> bool:
     return str(action_type or "") in _ACTIONS
 
 
+def is_user_submittable(action_type: str) -> bool:
+    """사람이 마이페이지에서 **직접** 올릴 수 있는 종류인가.
+
+    게이트 행위(배포·컬렉션 생성·도구 게시…)는 아니다. payload 를 손으로 적어
+    올릴 수 있으면 남의 워크플로우를 배포시키는 길이 된다 — 그 행위들은
+    **기능 쪽 코드만** 올린다.
+    """
+    sp = (_ACTIONS.get(str(action_type or "")) or {}).get("spec")
+    return bool(sp.user_submittable) if sp else True
+
+
 def known_actions() -> Dict[str, str]:
-    """등록된 종류 → 사람이 읽는 이름. 화면의 선택지가 여기서 나온다."""
+    """등록된 종류 → 사람이 읽는 이름."""
     return {k: v["label"] for k, v in sorted(_ACTIONS.items())}
 
 
+def submittable_actions() -> Dict[str, str]:
+    """마이페이지 [결재 올리기] 의 선택지 — 자유 결재만."""
+    return {k: v["label"] for k, v in sorted(_ACTIONS.items())
+            if is_user_submittable(k)}
+
+
+def has_apply(action_type: str) -> bool:
+    """적용 훅이 이 프로세스에 꽂혀 있는가.
+
+    없다고 등록되지 않은 것은 아니다 — 소유가 다른 서비스라 **이 파드에는**
+    없는 것일 수 있다. 결정(core)과 적용(소유 서비스)이 다른 파드라서 생기는
+    구분이고, ``store.decide`` 가 이것으로 "지금 적용할 것인가" 를 가른다.
+    """
+    return (_ACTIONS.get(str(action_type or "")) or {}).get("apply") is not None
+
+
+def has_reject(action_type: str) -> bool:
+    return (_ACTIONS.get(str(action_type or "")) or {}).get("reject") is not None
+
+
+def owner_of(action_type: str) -> str:
+    """이 행위의 적용을 책임지는 서비스. 카탈로그에 없으면 core 로 본다
+    (테스트가 즉석에서 등록한 종류 — 등록한 그 자리에서 적용된다)."""
+    sp = (_ACTIONS.get(str(action_type or "")) or {}).get("spec")
+    return sp.owner if sp else "core"
+
+
 def run_apply(action_type: str, payload: Dict[str, Any], request: Dict[str, Any]) -> str:
-    """최종 승인 뒤 적용. 실패하면 **사유 문자열**을 돌려준다(예외를 던지지 않는다).
+    """적용. 실패하면 **사유 문자열**을 돌려준다(예외를 던지지 않는다).
 
     던지면 호출부가 승인 기록까지 함께 잃을 위험이 있다. 이 함수의 일은
     "적용이 됐는가" 를 말하는 것이지 흐름을 끊는 것이 아니다.
     """
-    spec = _ACTIONS.get(str(action_type or ""))
-    if spec is None:
+    entry = _ACTIONS.get(str(action_type or ""))
+    if entry is None:
         # 등록이 사라진 종류(기능이 제거됐다). 승인은 그대로 두고 사실만 남긴다.
         return f"등록되지 않은 결재 종류입니다: {action_type}"
-    fn = spec.get("apply")
+    fn = entry.get("apply")
     if fn is None:
         return ""
     try:
@@ -80,10 +135,20 @@ def run_apply(action_type: str, payload: Dict[str, Any], request: Dict[str, Any]
         return f"{type(exc).__name__}: {exc}"[:1000]
 
 
-#: 결재선을 **실제로 태워 보는** 종류. 아직 어떤 API 도 결재를 타지 않으므로,
-#: 이것이 없으면 결재선이 도는지 확인할 방법이 없다 — 확인할 수 없는 체계는
-#: 켜 두고도 아무도 믿지 않는다.
-TEST = "test"
+def run_reject(action_type: str, payload: Dict[str, Any], request: Dict[str, Any]) -> str:
+    """거절·회수 뒤 치우기. :func:`run_apply` 와 같은 계약 — 사유를 돌려준다."""
+    entry = _ACTIONS.get(str(action_type or ""))
+    if entry is None:
+        return f"등록되지 않은 결재 종류입니다: {action_type}"
+    fn = entry.get("reject")
+    if fn is None:
+        return ""
+    try:
+        fn(payload or {}, request or {})
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("결재 되돌리기 실패 (%s)", action_type)
+        return f"{type(exc).__name__}: {exc}"[:1000]
 
 
 def _apply_test(payload: Dict[str, Any], request: Dict[str, Any]) -> None:
@@ -98,6 +163,9 @@ def _apply_test(payload: Dict[str, Any], request: Dict[str, Any]) -> None:
     )
 
 
-# 기본 종류 — 무엇에 결재를 태울지 정해지기 전에도 결재 자체는 돈다.
-register_action(GENERIC, None, label="일반 승인 (적용 동작 없음)")
-register_action(TEST, _apply_test, label="테스트 결재 (결재선 확인용)")
+# 카탈로그가 먼저 이름표를 단다. 적용 훅은 소유 서비스가 나중에 꽂는다 —
+# 그래서 어느 파드에서 물어도 **목록은 같다**.
+for _spec in CATALOG:
+    register_action(_spec.action_type, None, action_spec=_spec)
+
+register_action(TEST, _apply_test)

@@ -132,6 +132,12 @@ class ApprovalRequest(BaseModel):
         #: 지금 차례인 단계 번호(= 그 한 사람). 종결되면 마지막 값에서 멈춘다.
         self.current_step_order = kwargs.get('current_step_order', 1)
         self.decided_at = kwargs.get('decided_at')
+        #: 이 결재가 **무엇에 대한** 것인가 — ``workflow:{id}``, ``collection:{name}``.
+        #: 같은 대상에 결재가 두 건 떠 있으면 어느 쪽이 적용되는지 아무도 모른다.
+        self.target_ref = kwargs.get('target_ref')
+        #: 회수한 주체 — ``requester``(사람) 또는 ``system``(대상이 바뀌어 무효).
+        self.canceled_by = kwargs.get('canceled_by')
+        self.cancel_note = kwargs.get('cancel_note')
         #: applier 실행 결과. 승인은 됐는데 적용이 실패한 상태를 **숨기지 않는다**
         #: — 승인을 되돌리는 것보다 "승인됐으나 적용 실패" 를 보이는 편이 맞다.
         self.applied_at = kwargs.get('applied_at')
@@ -151,6 +157,12 @@ class ApprovalRequest(BaseModel):
             'status': 'VARCHAR(20) NOT NULL DEFAULT \'pending\'',
             'current_step_order': 'INTEGER NOT NULL DEFAULT 1',
             'decided_at': 'TIMESTAMP',
+            # 대상 표의 PK 가 아니라 **문자열**이다. 대상은 표마다 다른 키를 쓰고
+            # (워크플로우는 문자열 id, 컬렉션은 이름), 대상이 지워져도 "무엇에
+            # 대한 결재였나" 는 남아야 한다.
+            'target_ref': 'VARCHAR(200)',
+            'canceled_by': 'VARCHAR(20)',
+            'cancel_note': 'VARCHAR(500)',
             'applied_at': 'TIMESTAMP',
             'apply_error': 'VARCHAR(1000)',
         }
@@ -160,7 +172,19 @@ class ApprovalRequest(BaseModel):
             # "내가 올린 것" — 기안함.
             ("idx_approval_requests_requester", "requester_id, status"),
             ("idx_approval_requests_status", "status"),
+            # "이 대상에 뜬 결재" — 배포 화면이 "결재 진행 중" 을 보여 줄 때.
+            ("idx_approval_requests_target", "action_type, target_ref"),
         ]
+
+    #: 같은 대상에 **진행 중인 결재는 하나**다. 부분 UNIQUE 는 모델의 인덱스
+    #: 선언(``CREATE INDEX``)으로는 못 만든다 — core 의 마이그레이션이 만든다
+    #: (``add_approval_policy_tables.py``). 응용 계층도 미리 막지만, 동시 요청
+    #: 두 건이 같은 찰나에 들어오면 그것만으로는 늦다.
+    PENDING_TARGET_UNIQUE = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_pending_target "
+        "ON approval_requests (action_type, target_ref) "
+        "WHERE status = 'pending' AND target_ref IS NOT NULL"
+    )
 
 
 class ApprovalRequestStep(BaseModel):
@@ -226,3 +250,84 @@ class ApprovalRequestStep(BaseModel):
             ("idx_approval_steps_approver_status", "approver_id, status"),
             ("idx_approval_steps_request", "request_id, step_order"),
         ]
+
+
+class ApprovalActionPolicy(BaseModel):
+    """**어떤 행위가 결재를 받아야 하는가** — 관리자가 정하는 한 줄.
+
+    기본은 무제한이다
+    -----------------
+    표에 행이 없으면 ``결재 불필요``다. 그래서 이 기능이 켜진 환경에서도
+    관리자가 켜기 전까지는 XGEN 의 어떤 행위도 막히지 않는다 — 통제를
+    도입하면서 아무에게도 묻지 않고 전 조직의 작업을 멈추는 일이 없어야 한다.
+
+    왜 config 가 아니라 표인가
+    --------------------------
+    행위마다 켜짐 여부 + 기본 결재선 + 누가 언제 바꿨나까지 붙는다. 설정 키
+    수십 개로 흩으면 "지금 무엇이 결재 대상인가" 를 한 번에 볼 수 없고,
+    화면이 필요로 하는 것이 정확히 그 한 장이다.
+    (전역 스위치 하나 — 슈퍼유저 면제 — 만 설정 사다리에 둔다. 그건 행위별
+    값이 아니라 전체에 걸리는 하나이기 때문이다.)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.action_type = kwargs.get('action_type', '')
+        self.required = kwargs.get('required', False)
+        #: 결재를 올릴 때 **미리 채워지는** 결재선. 요청자가 바꿀 수 있다 —
+        #: 잠그지 않는다(무제한 원칙). 없으면 요청자가 직접 고른다.
+        self.default_line_id = kwargs.get('default_line_id')
+        self.updated_by = kwargs.get('updated_by')
+        self.updated_at = kwargs.get('updated_at')
+
+    def get_table_name(self) -> str:
+        return "approval_action_policies"
+
+    def get_schema(self) -> Dict[str, str]:
+        return {
+            # 카탈로그(xgen_sdk.approval.catalog)의 키. FK 가 아니다 —
+            # 카탈로그는 코드에 있고, 코드에서 사라진 행위의 옛 설정이 남아
+            # 있다고 해서 표가 깨질 이유는 없다.
+            'action_type': 'VARCHAR(64) NOT NULL',
+            'required': 'BOOLEAN NOT NULL DEFAULT FALSE',
+            'default_line_id': 'INTEGER REFERENCES approval_lines(id) ON DELETE SET NULL',
+            'updated_by': 'INTEGER',
+            'updated_at': 'TIMESTAMP',
+            'UNIQUE_action': 'UNIQUE(action_type)',
+        }
+
+    def get_indexes(self) -> List[tuple]:
+        return [("idx_approval_policies_required", "required")]
+
+
+class ApprovalPolicyHistory(BaseModel):
+    """**누가 언제 무엇을 결재 대상으로 만들었나.**
+
+    [결재 로그] 의 두 번째 축이다. 결재 건의 이력(누가 승인했나)과 설정의
+    이력(누가 이 행위를 결재 대상으로 만들었나)은 다른 질문이고, 감사에서
+    실제로 문제가 되는 것은 후자일 때가 많다 — "그날 왜 승인 없이 배포됐나" 의
+    답이 "전날 누군가 껐다" 인 경우.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        #: 바뀐 대상 — action_type, 또는 전역 스위치 이름(``superuser_exempt``).
+        self.target = kwargs.get('target', '')
+        self.before = kwargs.get('before')
+        self.after = kwargs.get('after')
+        self.changed_by = kwargs.get('changed_by')
+
+    def get_table_name(self) -> str:
+        return "approval_policy_history"
+
+    def get_schema(self) -> Dict[str, str]:
+        return {
+            'target': 'VARCHAR(64) NOT NULL',
+            'before': 'VARCHAR(300)',
+            'after': 'VARCHAR(300)',
+            # 기록이므로 users FK 를 걸지 않는다 — 결재 단계와 같은 이유다.
+            'changed_by': 'INTEGER',
+        }
+
+    def get_indexes(self) -> List[tuple]:
+        return [("idx_approval_policy_history_target", "target")]

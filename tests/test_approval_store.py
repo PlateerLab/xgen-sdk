@@ -57,6 +57,7 @@ class FakeDB:
             row = {"id": self._next("approval_requests"), "title": p[0], "reason": p[1],
                    "action_type": p[2], "payload": p[3], "requester_id": p[4],
                    "line_id": p[5], "status": "pending", "current_step_order": p[6],
+                   "target_ref": p[7], "canceled_by": None, "cancel_note": None,
                    "decided_at": None, "applied_at": None, "apply_error": None,
                    "created_at": "T0"}
             self.t["approval_requests"].append(row)
@@ -122,6 +123,11 @@ class FakeDB:
                 if r["id"] == p[3]:
                     r.update(status=p[0], current_step_order=p[1], decided_at=p[2])
             return []
+        if s.startswith("UPDATE approval_requests SET status = %s, decided_at = %s, canceled_by"):
+            for r in self.t["approval_requests"]:
+                if r["id"] == p[4] and r["status"] == p[5]:
+                    r.update(status=p[0], decided_at=p[1], canceled_by=p[2], cancel_note=p[3])
+            return []
         if s.startswith("UPDATE approval_requests SET status = %s, decided_at"):
             for r in self.t["approval_requests"]:
                 if r["id"] == p[2]:
@@ -129,9 +135,20 @@ class FakeDB:
             return []
         if s.startswith("UPDATE approval_requests SET applied_at"):
             for r in self.t["approval_requests"]:
-                if r["id"] == p[2]:
+                if r["id"] == p[2] and r.get("applied_at") is None:
                     r.update(applied_at=p[0], apply_error=p[1])
             return []
+        if s.startswith("SELECT id, title, status, current_step_order, requester_id"):
+            return [r for r in self.t["approval_requests"]
+                    if r["action_type"] == p[0] and r.get("target_ref") == p[1]
+                    and r["status"] == p[2]]
+        if s.startswith("SELECT id, action_type, status FROM approval_requests"):
+            types = p[3:-1]
+            return [{"id": r["id"], "action_type": r["action_type"], "status": r["status"]}
+                    for r in self.t["approval_requests"]
+                    if r.get("applied_at") is None
+                    and r["status"] in (p[0], p[1], p[2])
+                    and r["action_type"] in types]
         if s.startswith("SELECT r.id, r.title, r.action_type, r.status, r.created_at, r.requester_id"):
             out = []
             for st in self.t["approval_request_steps"]:

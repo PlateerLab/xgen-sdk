@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from xgen_sdk.approval import engine as E
 from xgen_sdk.approval import notifier
-from xgen_sdk.approval.registry import GENERIC, is_registered, run_apply
+from xgen_sdk.approval.registry import (
+    GENERIC, has_apply, has_reject, is_registered, is_user_submittable,
+    owner_of, run_apply, run_reject,
+)
 from xgen_sdk.approval.sql import q as _q, rows as _rows  # noqa: F401 — 기존 이름 보존
 
 logger = logging.getLogger("approval-store")
@@ -104,16 +107,39 @@ def delete_line(app_db, line_id: int, actor_id: int, is_superuser: bool) -> None
 def submit(app_db, *, requester_id: int, title: str, reason: str = "",
            action_type: str = GENERIC, payload: Optional[Dict[str, Any]] = None,
            line_id: Optional[int] = None,
-           steps: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
+           steps: Optional[Sequence[Dict[str, Any]]] = None,
+           target_ref: Optional[str] = None,
+           via_user_api: bool = False) -> Dict[str, Any]:
     """결재를 올린다. 템플릿(``line_id``) 또는 직접 지정(``steps``) 중 하나.
 
     템플릿을 썼더라도 단계는 **복사**한다 — 나중에 그 템플릿이 바뀌어도 이미
     올라간 결재의 결재선은 그대로여야 한다.
+
+    ``target_ref``
+        이 결재가 **무엇에 대한** 것인가 (``workflow:abc``, ``collection:사규``).
+        같은 대상에 진행 중인 결재가 있으면 거절한다 — 두 건이 떠 있으면 어느
+        쪽 승인이 그 대상을 바꾼 것인지 아무도 답할 수 없다.
+
+    ``via_user_api``
+        사람이 화면에서 직접 올린 것인가. 게이트 행위(배포·컬렉션 생성·도구
+        게시…)는 **여기로 들어올 수 없다** — payload 를 손으로 적어 올릴 수
+        있으면 남의 워크플로우를 배포시키는 길이 된다. 그 행위들은 기능 쪽
+        코드가 자기 맥락에서 올린다.
     """
     if not str(title or "").strip():
         raise E.ApprovalError("제목이 필요합니다")
     if not is_registered(action_type):
         raise E.ApprovalError(f"등록되지 않은 결재 종류입니다: {action_type}")
+    if via_user_api and not is_user_submittable(action_type):
+        raise E.ApprovalError(
+            "이 종류는 직접 올릴 수 없습니다 — 해당 기능 화면에서 올라갑니다")
+
+    ref = str(target_ref).strip()[:200] if target_ref else None
+    if ref:
+        dup = find_pending_for_target(app_db, action_type, ref)
+        if dup:
+            raise E.ApprovalError(
+                f"이미 진행 중인 결재가 있습니다 (#{dup['id']}) — 그 건이 끝난 뒤에 다시 올려 주세요")
 
     if steps:
         specs = list(steps)
@@ -136,12 +162,12 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         """
         INSERT INTO approval_requests
             (title, reason, action_type, payload, requester_id, line_id,
-             status, current_step_order)
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s) RETURNING id
+             status, current_step_order, target_ref)
+        VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id
         """,
         (str(title).strip()[:200], (reason or "").strip() or None, action_type,
          json.dumps(payload or {}, ensure_ascii=False), requester_id, line_id,
-         min(s["step_order"] for s in planned)),
+         min(s["step_order"] for s in planned), ref),
     )
     request_id = rows[0]["id"]
     for s in planned:
@@ -165,6 +191,7 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
         SELECT r.id, r.title, r.reason, r.action_type, r.payload, r.requester_id,
                r.line_id, r.status, r.current_step_order, r.decided_at,
                r.applied_at, r.apply_error, r.created_at,
+               r.target_ref, r.canceled_by, r.cancel_note,
                u.username AS requester_username, u.full_name AS requester_name
           FROM approval_requests r
           LEFT JOIN users u ON u.id = r.requester_id
@@ -261,8 +288,11 @@ def decide(app_db, request_id: int, actor_id: int, action: str, note: str = "") 
                """UPDATE approval_request_steps SET status = %s
                    WHERE request_id = %s AND step_order = %s AND status = %s""",
                (E.PENDING, request_id, next_order, E.WAITING))
-        elif status == E.APPROVED:
-            _apply(app_db, request_id, {"action_type": current.get("action_type")}, current)
+        if status in (E.APPROVED, E.REJECTED):
+            # 승인이면 적용하고, 거절이면 올려 둔 것을 치운다. **원장을 다시
+            # 읽어서** 넘긴다 — 방금 전이시킨 상태를 훅이 봐야 한다(옛 스냅샷을
+            # 주면 승인된 건에 거절 훅이 도는 종류의 사고가 난다).
+            _settle_hooks(app_db, request_id, get(app_db, request_id))
 
     out = get(app_db, request_id)
     # 알림은 결재의 **부산물**이다. 여기서 예외가 새면 사람이 이미 누른 승인이
@@ -284,33 +314,164 @@ def decide(app_db, request_id: int, actor_id: int, action: str, note: str = "") 
     return out
 
 
-def _apply(app_db, request_id: int, req: Dict[str, Any], loaded: Dict[str, Any]) -> None:
-    """최종 승인 뒤 실제 동작. **실패해도 승인은 그대로 둔다.**
+def _settle_hooks(app_db, request_id: int, loaded: Dict[str, Any]) -> None:
+    """결정이 난 뒤의 **뒤처리** — 적용(승인) 또는 치우기(거절·회수).
 
-    사람의 결재는 이미 일어난 사실이다. 적용이 실패했다고 그 사실을 지우면,
-    화면은 "승인되지 않음" 이라 말하는데 실제로는 세 사람이 승인한 상태가 된다.
-    실패는 숨기지 않고 ``apply_error`` 로 남긴다 — 그래야 누가 다시 시도한다.
+    여기서 바로 할지, 남겨 둘지를 가른다
+    ------------------------------------
+    결정은 core 한 곳에서 나지만 **행위는 남의 파드에 있다**. 지식 컬렉션을
+    실제로 여는 코드는 xgen-documents 에, 클라우드·도구는 xgen-workflow 에
+    있다. core 가 그 함수를 부를 수는 없으므로, 소유가 다른 건은 훅을 돌리지
+    않고 ``applied_at`` 을 비워 둔다 — 소유 서비스의 워커가 그것을 표식 삼아
+    가져간다(:func:`claim_settlements`).
+
+    **실패해도 결정은 그대로 둔다.** 사람의 결재는 이미 일어난 사실이다.
+    적용이 실패했다고 그 사실을 지우면, 화면은 "승인되지 않음" 이라 말하는데
+    실제로는 세 사람이 승인한 상태가 된다. 실패는 숨기지 않고 ``apply_error``
+    로 남긴다 — 그래야 누가 다시 시도한다.
     """
-    err = run_apply(req.get("action_type") or GENERIC, loaded.get("payload") or {}, loaded)
+    action_type = loaded.get("action_type") or GENERIC
+    status = str(loaded.get("status") or E.APPROVED)
+    mine = has_apply(action_type) or has_reject(action_type) or owner_of(action_type) == "core"
+    if not mine:
+        return                      # 소유 서비스의 워커가 가져간다
+    finish(app_db, request_id, action_type, loaded, status)
+
+
+def finish(app_db, request_id: int, action_type: str,
+           loaded: Dict[str, Any], status: str) -> str:
+    """훅을 돌리고 ``applied_at`` 을 찍는다. 사유 문자열을 돌려준다(빈 문자열 = 성공).
+
+    core 가 직접 부르기도 하고(자기 소유 행위), 위성 서비스의 워커가 부르기도
+    한다. 어느 쪽이든 **한 건에 한 번**이다 — ``applied_at IS NULL`` 조건부
+    쓰기가 그것을 지킨다.
+    """
+    payload = loaded.get("payload") or {}
+    if status == E.APPROVED:
+        err = run_apply(action_type, payload, loaded)
+    else:
+        err = run_reject(action_type, payload, loaded)
     _q(app_db,
-       "UPDATE approval_requests SET applied_at = %s, apply_error = %s WHERE id = %s",
+       "UPDATE approval_requests SET applied_at = %s, apply_error = %s "
+       " WHERE id = %s AND applied_at IS NULL",
        (_now(), err or None, request_id))
     if err:
-        logger.error("결재 #%s 승인됐으나 적용 실패: %s", request_id, err)
+        logger.error("결재 #%s 뒤처리 실패(%s): %s", request_id, status, err)
+    return err
 
 
 def cancel(app_db, request_id: int, actor_id: int) -> Dict[str, Any]:
+    """기안자의 회수 — **아무도 승인하지 않았을 때만**(engine 이 판정한다)."""
     current = get(app_db, request_id)
     now = _now()
-    new_req, new_steps = E.cancel(current, current["steps"], actor_id, now)
-    for s in new_steps:
-        _q(app_db,
-           "UPDATE approval_request_steps SET status = %s WHERE request_id = %s AND approver_id = %s",
-           (s["status"], request_id, s["approver_id"]))
+    E.cancel(current, current["steps"], actor_id, now)
+    return _close_as_canceled(app_db, request_id, now, by="requester", note="")
+
+
+def system_cancel(app_db, request_id: int, note: str) -> Dict[str, Any]:
+    """**시스템의 회수** — 결재의 전제가 사라졌을 때.
+
+    사람의 회수와 무엇이 다른가: 사람은 누군가 승인한 뒤에는 회수할 수 없다
+    (남의 승인을 없던 일로 만드는 길을 열지 않는다). 시스템은 할 수 있어야
+    한다 — 워크플로우가 수정되면 결재자들이 본 그 정의가 더는 존재하지 않고,
+    그 상태로 승인이 이어지면 **아무도 본 적 없는 것이 배포된다**.
+
+    그래서 사유를 반드시 남기고(``cancel_note``), 이미 처리한 결재자에게도
+    알린다 — 내가 승인한 건이 왜 사라졌는지는 알아야 한다.
+    """
+    current = get(app_db, request_id)
+    if str(current.get("status") or "") != E.PENDING:
+        return current              # 이미 끝난 건은 건드리지 않는다
+    now = _now()
+    out = _close_as_canceled(app_db, request_id, now, by="system",
+                             note=str(note or "")[:500])
+    logger.info("결재 #%s 시스템 회수: %s", request_id, note)
+    try:
+        told = [int(s["approver_id"]) for s in out.get("steps") or []
+                if s.get("status") in (E.APPROVED, E.SKIPPED)]
+        notifier.notify_system_canceled(app_db, out, told, note=str(note or ""))
+    except Exception as exc:  # noqa: BLE001 — 알림 실패가 회수를 막지 않는다
+        logger.warning("결재 #%s 회수 알림 실패: %s", request_id, exc)
+    return out
+
+
+def _close_as_canceled(app_db, request_id: int, now, *, by: str, note: str) -> Dict[str, Any]:
+    """아직 차례가 오지 않은 단계를 ``skipped`` 로 덮고 건을 닫는다.
+
+    ``pending``/``waiting`` 만 덮는다 — 이미 승인한 단계는 **일어난 일**이라
+    그대로 남는다(그래야 "회수 전에 누가 승인했었나" 를 나중에 답할 수 있다).
+    """
     _q(app_db,
-       "UPDATE approval_requests SET status = %s, decided_at = %s WHERE id = %s",
-       (new_req["status"], now, request_id))
+       "UPDATE approval_request_steps SET status = %s "
+       " WHERE request_id = %s AND status IN (%s, %s)",
+       (E.SKIPPED, request_id, E.WAITING, E.PENDING))
+    _q(app_db,
+       "UPDATE approval_requests SET status = %s, decided_at = %s, "
+       "       canceled_by = %s, cancel_note = %s "
+       " WHERE id = %s AND status = %s",
+       (E.CANCELED, now, by, note or None, request_id, E.PENDING))
+    out = get(app_db, request_id)
+    _settle_hooks(app_db, request_id, out)     # 올려 둔 것이 있으면 치운다
     return get(app_db, request_id)
+
+
+def find_pending_for_target(app_db, action_type: str, target_ref: str) -> Optional[Dict[str, Any]]:
+    """이 대상에 **떠 있는** 결재. 화면이 "결재 진행 중" 을 보여 줄 때도 쓴다."""
+    if not target_ref:
+        return None
+    rows = _q(app_db,
+              "SELECT id, title, status, current_step_order, requester_id, created_at "
+              "  FROM approval_requests "
+              " WHERE action_type = %s AND target_ref = %s AND status = %s "
+              " ORDER BY id DESC LIMIT 1",
+              (str(action_type), str(target_ref), E.PENDING))
+    return rows[0] if rows else None
+
+
+# ── 소유 서비스의 뒤처리 워커 ─────────────────────────────────────────
+
+
+def claim_settlements(app_db, action_types: Sequence[str], limit: int = 50) -> List[Dict[str, Any]]:
+    """**뒤처리가 남은 건들** — 결정은 났는데 훅이 아직 안 돈 것.
+
+    core 가 결정하고 소유 서비스가 적용하는 구조라, 그 사이를 잇는 것이 이
+    질의다. 결정 순간 Redis 로 신호를 보내지만 그것만 믿지 않는다 — 신호를
+    놓친 건이 영영 안 걸리면 "승인은 됐는데 아무 일도 안 일어나는" 상태가
+    되고, 그건 사용자 눈에 **승인이 안 된 것과 구별되지 않는다**.
+    """
+    if not action_types:
+        return []
+    marks = ", ".join(["%s"] * len(action_types))
+    return _q(app_db,
+              f"""SELECT id, action_type, status
+                    FROM approval_requests
+                   WHERE applied_at IS NULL
+                     AND status IN (%s, %s, %s)
+                     AND action_type IN ({marks})
+                   ORDER BY id
+                   LIMIT %s""",
+              (E.APPROVED, E.REJECTED, E.CANCELED, *action_types,
+               max(1, min(int(limit), 200))))
+
+
+def settle(app_db, request_id: int) -> Dict[str, Any]:
+    """워커가 한 건을 처리한다 — 훅을 돌리고 결과를 원장에 적는다.
+
+    실패는 ``apply_error`` 로 남고 기안자에게 알린다. 이 알림이 없으면
+    "승인됐는데 아무 일도 안 일어난" 상태를 **아무도 모른다**.
+    """
+    loaded = get(app_db, request_id)
+    status = str(loaded.get("status") or "")
+    if loaded.get("applied_at") or status == E.PENDING:
+        return loaded                                   # 이미 끝났거나 아직 이르다
+    err = finish(app_db, request_id, loaded.get("action_type") or GENERIC, loaded, status)
+    out = get(app_db, request_id)
+    if err and status == E.APPROVED:
+        try:
+            notifier.notify_apply_failed(app_db, out, err)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("결재 #%s 적용 실패 알림 실패: %s", request_id, exc)
+    return out
 
 
 # ── 목록 ──────────────────────────────────────────────────────────────
