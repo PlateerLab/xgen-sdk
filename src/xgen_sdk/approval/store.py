@@ -1308,6 +1308,23 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
     if step == 0:
         if int(row["requester_id"] or 0) != int(actor_id):
             raise E.ApprovalError("기안 칸은 기안자만 작성합니다")
+        # **누군가 승인한 뒤에는 기안 칸을 고칠 수 없다.**
+        #
+        # 2차가 기획서 A 를 보고 "저위험" 을 매겼는데 기안자가 B 로 바꿔치기하면,
+        # 3차는 B 를 보면서 A 에 대한 승인을 근거로 결정한다 — 2차의 승인이 하지
+        # 않은 말을 하게 되는 것이다. 회수를 "아무도 승인하기 전" 으로 묶어 둔
+        # 것과 같은 이유다(승인 뒤 회수는 남의 승인을 없던 일로 만든다).
+        #
+        # 고쳐야 한다면 길은 하나다: 반려받고 다시 올린다. 그래야 바뀐 내용을
+        # 모두가 **처음부터 다시** 본다.
+        acted = _q(app_db, """
+            SELECT 1 FROM approval_request_steps
+             WHERE request_id = %s AND status = %s LIMIT 1
+        """, (request_id, E.APPROVED))
+        if acted:
+            raise E.ApprovalError(
+                "이미 승인한 결재자가 있어 기안 칸을 고칠 수 없습니다 — "
+                "반려받은 뒤 다시 올려 주세요")
     else:
         mine = _q(app_db, """
             SELECT status FROM approval_request_steps

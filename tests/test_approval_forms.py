@@ -642,3 +642,57 @@ def test_a_line_without_a_form_can_be_trimmed_freely(db):
     out = store.submit(db, requester_id=1, title="자유롭게", line_id=line_id,
                        steps=[{"approver_id": 3, "step_order": 1}])
     assert len(out["steps"]) == 1
+
+
+# ── 승인 뒤에는 기안 칸이 잠긴다 ─────────────────────────────────────
+
+
+def test_the_draft_is_locked_once_someone_has_approved(db):
+    """2차가 기획서 A 를 보고 "저위험" 을 매겼는데 기안자가 B 로 바꿔치기하면,
+    3차는 B 를 보면서 A 에 대한 승인을 근거로 결정한다 — 2차의 승인이 하지 않은
+    말을 하게 된다. 회수를 "아무도 승인하기 전" 으로 묶어 둔 것과 같은 이유다.
+    """
+    registry.register_action("generic", lambda *a, **k: None)
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    rid = _submit_with_plan(db, line_id)["id"]
+
+    plan = next(b for b in store.get(db, rid)["blocks"]
+                if b["block_type"] == blocks.AGENT_DEV_PLAN)
+    # 아무도 승인하기 전에는 고칠 수 있다 — 올린 뒤 붙이는 길이 필요하다.
+    store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
+                     data={"plan_id": 9, "title": "고친 기획서"})
+
+    risk = next(b for b in store.get(db, rid)["blocks"]
+                if b["block_type"] == blocks.RISK_ASSESSMENT)
+    store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                     data={"risk_level": "low"})
+    store.decide(db, rid, actor_id=3, action="approved")
+
+    with pytest.raises(E.ApprovalError) as e:
+        store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
+                         data={"plan_id": 99, "title": "슬쩍 바꾼 기획서"})
+    assert "이미 승인한 결재자" in str(e.value)
+    assert "다시 올려" in str(e.value), "무엇을 하면 되는지 말해야 한다"
+
+    after = next(b for b in store.get(db, rid)["blocks"] if b["id"] == plan["id"])
+    assert blocks.parse_data(after["data"])["plan_id"] == 9, "값이 그대로여야 한다"
+
+
+def test_an_approver_cannot_edit_after_acting(db):
+    """자기 칸도 마찬가지다 — 누른 뒤에는 고칠 수 없다."""
+    registry.register_action("generic", lambda *a, **k: None)
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    rid = _submit_with_plan(db, line_id)["id"]
+    risk = next(b for b in store.get(db, rid)["blocks"]
+                if b["block_type"] == blocks.RISK_ASSESSMENT)
+    store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                     data={"risk_level": "low"})
+    store.decide(db, rid, actor_id=3, action="approved")
+
+    with pytest.raises(E.ApprovalError):
+        store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                         data={"risk_level": "critical"})

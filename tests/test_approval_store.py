@@ -283,6 +283,10 @@ class FakeDB:
                             "block_type": b["block_type"],
                             "requester_id": r["requester_id"], "status": r["status"]})
             return out
+        if s.startswith("SELECT 1 FROM approval_request_steps"):
+            return [{"?column?": 1}] if any(
+                x["request_id"] == p[0] and x["status"] == p[1]
+                for x in self.t["approval_request_steps"]) else []
         if s.startswith("SELECT status FROM approval_request_steps"):
             return [{"status": x["status"]} for x in self.t["approval_request_steps"]
                     if x["request_id"] == p[0] and x["step_order"] == p[1]
