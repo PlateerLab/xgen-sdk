@@ -21,6 +21,10 @@ class FakeDB:
     def __init__(self):
         self.t = {"approval_lines": [], "approval_line_steps": [],
                   "approval_requests": [], "approval_request_steps": [],
+                  # 결재 양식 — 결재선에 붙는 칸들과 그 스냅샷.
+                  "approval_forms": [], "approval_form_steps": [],
+                  "approval_form_blocks": [],
+                  "approval_request_blocks": [],
                   "users": []}
         self._seq = {k: 0 for k in self.t}
 
@@ -179,6 +183,95 @@ class FakeDB:
                             "my_status": as_approver[0]["status"] if as_approver else None,
                             "waiting_on": (pend or {}).get("approver_id")})
             return out
+        # ── 결재 양식 ──
+        if s.startswith("INSERT INTO approval_forms"):
+            fid = self._next("approval_forms")
+            self.t["approval_forms"].append({
+                "id": fid, "name": p[0], "description": p[1], "is_builtin": p[2],
+                "owner_id": p[3], "is_active": True,
+                "created_at": None, "updated_at": None})
+            return [{"id": fid}]
+        if s.startswith("SELECT id, name, description, is_builtin, owner_id, is_active"):
+            return [dict(f) for f in self.t["approval_forms"] if f["id"] == p[0]]
+        if s.startswith("SELECT id, step_index, block_type, label, config, required, sort_order"):
+            return sorted(
+                [dict(b) for b in self.t["approval_form_blocks"] if b["form_id"] == p[0]],
+                key=lambda b: (b["step_index"], b["sort_order"]))
+        if s.startswith("SELECT id, step_index, title, guide FROM approval_form_steps"):
+            return sorted([dict(x) for x in self.t["approval_form_steps"] if x["form_id"] == p[0]],
+                          key=lambda x: x["step_index"])
+        if s.startswith("DELETE FROM approval_form_steps WHERE form_id"):
+            self.t["approval_form_steps"] = [
+                x for x in self.t["approval_form_steps"] if x["form_id"] != p[0]]
+            return []
+        if s.startswith("INSERT INTO approval_form_steps"):
+            self.t["approval_form_steps"].append({
+                "id": self._next("approval_form_steps"), "form_id": p[0],
+                "step_index": p[1], "title": p[2], "guide": p[3]})
+            return []
+        if s.startswith("SELECT l.id, l.name,"):
+            return [{"id": l["id"], "name": l["name"],
+                     "n": len([x for x in self.t["approval_line_steps"] if x["line_id"] == l["id"]])}
+                    for l in self.t["approval_lines"] if l.get("form_id") == p[0]]
+        if s.startswith("DELETE FROM approval_form_blocks WHERE form_id"):
+            self.t["approval_form_blocks"] = [
+                b for b in self.t["approval_form_blocks"] if b["form_id"] != p[0]]
+            return []
+        if s.startswith("INSERT INTO approval_form_blocks"):
+            self.t["approval_form_blocks"].append({
+                "id": self._next("approval_form_blocks"), "form_id": p[0],
+                "step_index": p[1], "block_type": p[2], "label": p[3],
+                "config": p[4], "required": p[5], "sort_order": p[6]})
+            return []
+        if s.startswith("SELECT COUNT(*) AS n FROM approval_line_steps WHERE line_id"):
+            return [{"n": len([x for x in self.t["approval_line_steps"] if x["line_id"] == p[0]])}]
+        if s.startswith("UPDATE approval_lines SET form_id"):
+            for r in self.t["approval_lines"]:
+                if r["id"] == p[2]:
+                    r["form_id"] = p[0]
+            return []
+        if s.startswith("SELECT name FROM approval_lines WHERE form_id"):
+            return [{"name": r["name"]} for r in self.t["approval_lines"] if r.get("form_id") == p[0]]
+        if s.startswith("DELETE FROM approval_forms WHERE id"):
+            self.t["approval_forms"] = [f for f in self.t["approval_forms"] if f["id"] != p[0]]
+            return []
+        if s.startswith("SELECT b.id, b.step_order, b.block_type, r.requester_id, r.status"):
+            out = []
+            for b in self.t["approval_request_blocks"]:
+                if b["id"] != p[0] or b["request_id"] != p[1]:
+                    continue
+                r = next(x for x in self.t["approval_requests"] if x["id"] == b["request_id"])
+                out.append({"id": b["id"], "step_order": b["step_order"],
+                            "block_type": b["block_type"],
+                            "requester_id": r["requester_id"], "status": r["status"]})
+            return out
+        if s.startswith("SELECT status FROM approval_request_steps"):
+            return [{"status": x["status"]} for x in self.t["approval_request_steps"]
+                    if x["request_id"] == p[0] and x["step_order"] == p[1]
+                    and x["approver_id"] == p[2]]
+        if s.startswith("SELECT form_id FROM approval_lines WHERE id"):
+            return [{"form_id": r.get("form_id")}
+                    for r in self.t["approval_lines"] if r["id"] == p[0]]
+        if s.startswith("SELECT step_index, block_type, label, config, required, sort_order"):
+            return sorted(
+                [dict(b) for b in self.t["approval_form_blocks"] if b["form_id"] == p[0]],
+                key=lambda b: (b["step_index"], b["sort_order"]))
+        if s.startswith("SELECT id, step_order, block_type, label, config, required, sort_order"):
+            return sorted(
+                [dict(b) for b in self.t["approval_request_blocks"] if b["request_id"] == p[0]],
+                key=lambda b: (b["step_order"], b["sort_order"]))
+        if s.startswith("INSERT INTO approval_request_blocks"):
+            self.t["approval_request_blocks"].append({
+                "id": self._next("approval_request_blocks"), "request_id": p[0],
+                "step_order": p[1], "block_type": p[2], "label": p[3],
+                "config": p[4], "required": p[5], "sort_order": p[6],
+                "data": None, "filled_by": None, "filled_at": None})
+            return []
+        if s.startswith("UPDATE approval_request_blocks"):
+            for b in self.t["approval_request_blocks"]:
+                if b["id"] == p[3]:
+                    b.update(data=p[0], filled_by=p[1], filled_at=p[2])
+            return []
         raise AssertionError(f"가짜 DB 가 모르는 질의: {s[:90]}")
 
 

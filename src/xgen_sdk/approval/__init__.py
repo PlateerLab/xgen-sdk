@@ -27,16 +27,21 @@
     승인 순간의 판정과 알림이 두 곳에 살면 어긋난다.
 """
 from xgen_sdk.approval import (  # noqa: F401
-    catalog, directory, engine, models, notifier, policy, registry, sql, store,
+    blocks, catalog, directory, engine, models, notifier, policy, registry, sql,
+    store, templates,
 )
 from xgen_sdk.approval.catalog import ActionSpec, CATALOG  # noqa: F401
 from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired  # noqa: F401
 from xgen_sdk.approval.models import (  # noqa: F401
     ApprovalActionPolicy,
+    ApprovalForm,
+    ApprovalFormBlock,
+    ApprovalFormStep,
     ApprovalLine,
     ApprovalLineStep,
     ApprovalPolicyHistory,
     ApprovalRequest,
+    ApprovalRequestBlock,
     ApprovalRequestStep,
 )
 from xgen_sdk.approval.registry import (  # noqa: F401
@@ -52,11 +57,14 @@ from xgen_sdk.approval.registry import (  # noqa: F401
 )
 
 __all__ = [
-    "catalog", "directory", "engine", "models", "notifier", "policy", "registry",
+    "blocks", "catalog", "directory", "engine", "models", "notifier", "policy",
+    "registry", "templates",
     "sql", "store",
     "ActionSpec", "CATALOG", "ApprovalError", "ApprovalLineRequired",
-    "ApprovalActionPolicy", "ApprovalLine", "ApprovalLineStep",
-    "ApprovalPolicyHistory", "ApprovalRequest", "ApprovalRequestStep",
+    "ApprovalActionPolicy", "ApprovalForm", "ApprovalFormBlock", "ApprovalFormStep",
+    "ApprovalLine", "ApprovalLineStep",
+    "ApprovalPolicyHistory", "ApprovalRequest", "ApprovalRequestBlock",
+    "ApprovalRequestStep",
     "GENERIC", "TEST", "is_registered", "is_user_submittable", "known_actions",
     "register_action", "run_apply", "run_reject", "submittable_actions",
 ]
