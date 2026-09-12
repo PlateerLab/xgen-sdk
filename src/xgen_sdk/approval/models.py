@@ -47,6 +47,9 @@ class ApprovalLine(BaseModel):
         #: 공용 결재선인가. 개인이 만든 줄은 자기만 쓰고, 공용은 모두가 쓴다.
         self.is_shared = kwargs.get('is_shared', False)
         self.is_active = kwargs.get('is_active', True)
+        #: 이 결재선을 타는 결재가 채워야 할 양식. None 이면 **[기본 결재]** —
+        #: 결재선과 결재 내용만 적는다(지금까지의 동작 그대로).
+        self.form_id = kwargs.get('form_id')
 
     def get_table_name(self) -> str:
         return "approval_lines"
@@ -58,6 +61,9 @@ class ApprovalLine(BaseModel):
             'owner_id': 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
             'is_shared': 'BOOLEAN NOT NULL DEFAULT FALSE',
             'is_active': 'BOOLEAN NOT NULL DEFAULT TRUE',
+            # 이 결재선을 타는 결재가 채워야 할 양식. 없으면 [기본 결재]
+            # — 결재선과 결재 내용만 적는다(지금까지의 동작 그대로).
+            'form_id': 'INTEGER REFERENCES approval_forms(id) ON DELETE SET NULL',
         }
 
     def get_indexes(self) -> List[tuple]:
@@ -336,3 +342,180 @@ class ApprovalPolicyHistory(BaseModel):
 
     def get_indexes(self) -> List[tuple]:
         return [("idx_approval_policy_history_target", "target")]
+
+
+# ── 결재 양식 ─────────────────────────────────────────────────────────
+#
+# 결재는 원래 **결재선 + 사유** 뿐이었다. 그런데 실제 결재는 단계마다 하는 일이
+# 다르다 — 기안자는 기획서를 붙이고, 2차는 그것을 보고 위험도를 평가하고,
+# 최종은 보고 결정한다. 그 절차가 결재 밖(거버넌스 화면)에 따로 살아 있으면
+# 사람은 두 곳을 오가고, 어느 쪽이 진짜인지 아무도 말할 수 없다.
+#
+# 양식은 그 "단계마다 할 일" 을 **결재 안으로** 들여온다.
+
+
+class ApprovalForm(BaseModel):
+    """결재 양식 — 단계마다 무엇을 채워야 하는지.
+
+    결재선에 붙는다(:class:`ApprovalLine.form_id`). 붙지 않은 결재선은
+    **[기본 결재]** — 결재선과 결재 내용만 적는다. 지금까지의 동작 그대로다.
+
+    ``is_builtin`` 인 양식은 **고치지 못하고 복사만 된다.** 그래야 "기본" 이
+    언제나 존재한다 — 누군가 기본을 고쳐 놓으면 다음 사람은 무엇이 기본이었는지
+    알 수 없다.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.name = kwargs.get('name', '')
+        self.description = kwargs.get('description')
+        #: 시스템이 심은 양식. 고칠 수 없고 복사만 된다.
+        self.is_builtin = bool(kwargs.get('is_builtin', False))
+        self.owner_id = kwargs.get('owner_id')
+        self.is_active = bool(kwargs.get('is_active', True))
+
+    def get_table_name(self) -> str:
+        return "approval_forms"
+
+    def get_schema(self) -> Dict[str, str]:
+        return {
+            'name': 'VARCHAR(100) NOT NULL',
+            'description': 'VARCHAR(500)',
+            'is_builtin': 'BOOLEAN NOT NULL DEFAULT FALSE',
+            'owner_id': 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
+            'is_active': 'BOOLEAN NOT NULL DEFAULT TRUE',
+        }
+
+    def get_indexes(self) -> List[tuple]:
+        return [("idx_approval_forms_active", "is_active")]
+
+
+class ApprovalFormStep(BaseModel):
+    """양식의 한 **단계** — 몇 차에 누가 무엇을 하는가.
+
+    왜 단계가 1급인가
+    -----------------
+    칸만으로 양식을 표현하면 **칸이 없는 단계가 사라진다.** "3차 최종 결정자는
+    내용을 보고 승인/거절만 한다" 는 절차에서 3차는 적을 칸이 없다 — 그런데
+    그 사람이 없으면 절차가 성립하지 않는다. 칸에서 단계 수를 역산하면 그
+    사람은 편집기에도 안 보이고 결재선 대조에서도 빠진다.
+
+    단계에는 **이름과 안내**가 붙는다. "2차" 라고만 쓰여 있으면 그 자리에 선
+    사람은 자기가 무엇을 판단해야 하는지 모른다.
+
+    ``step_index``
+        0 = **기안**(1차), 1 = 2차, 2 = 3차 … 화면은 ``step_index + 1`` 을
+        "N차" 로 보여 준다. 사람이 세는 방식과 코드가 세는 방식을 한 군데서만
+        변환한다.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.form_id = kwargs.get('form_id')
+        self.step_index = int(kwargs.get('step_index', 0) or 0)
+        self.title = kwargs.get('title', '')
+        #: 이 단계에 선 사람에게 보여 줄 안내. 무엇을 보고 무엇을 판단하는지.
+        self.guide = kwargs.get('guide')
+
+    def get_table_name(self) -> str:
+        return "approval_form_steps"
+
+    def get_schema(self) -> Dict[str, str]:
+        return {
+            'form_id': 'INTEGER NOT NULL REFERENCES approval_forms(id) ON DELETE CASCADE',
+            'step_index': 'INTEGER NOT NULL DEFAULT 0',
+            'title': 'VARCHAR(100) NOT NULL',
+            'guide': 'VARCHAR(1000)',
+            'UNIQUE_form_step': 'UNIQUE(form_id, step_index)',
+        }
+
+    def get_indexes(self) -> List[tuple]:
+        return [("idx_approval_form_steps_form", "form_id, step_index")]
+
+
+class ApprovalFormBlock(BaseModel):
+    """양식의 한 칸 — **어느 단계의 누가** 무엇을 채우는가.
+
+    ``step_index`` 가 0 이면 **기안자**, 1 이상이면 결재선의 그 번째 결재자다.
+    기안자를 0 으로 둔 이유: 결재자 번호(1..N)를 그대로 쓰면서 기안을 함께
+    표현할 수 있는 유일한 자리다.
+
+    ``block_type`` 은 레지스트리 키다(:mod:`xgen_sdk.approval.blocks`).
+    새 종류는 코드로 더한다 — 자유 입력 스키마로 두면 화면이 그것을 그릴 수
+    없고, 그리지 못하는 칸은 아무도 못 채운다.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.form_id = kwargs.get('form_id')
+        self.step_index = int(kwargs.get('step_index', 0) or 0)
+        self.block_type = kwargs.get('block_type', '')
+        self.label = kwargs.get('label', '')
+        #: 종류별 설정(JSON 문자열). 스키마는 그 종류가 소유한다.
+        self.config = kwargs.get('config')
+        self.required = bool(kwargs.get('required', True))
+        self.sort_order = int(kwargs.get('sort_order', 1) or 1)
+
+    def get_table_name(self) -> str:
+        return "approval_form_blocks"
+
+    def get_schema(self) -> Dict[str, str]:
+        return {
+            'form_id': 'INTEGER NOT NULL REFERENCES approval_forms(id) ON DELETE CASCADE',
+            'step_index': 'INTEGER NOT NULL DEFAULT 0',
+            'block_type': 'VARCHAR(40) NOT NULL',
+            'label': 'VARCHAR(200) NOT NULL',
+            'config': 'TEXT',
+            'required': 'BOOLEAN NOT NULL DEFAULT TRUE',
+            'sort_order': 'INTEGER NOT NULL DEFAULT 1',
+        }
+
+    def get_indexes(self) -> List[tuple]:
+        return [("idx_approval_form_blocks_form", "form_id, step_index, sort_order")]
+
+
+class ApprovalRequestBlock(BaseModel):
+    """올라간 결재의 한 칸 — **스냅샷과 그 안의 값.**
+
+    상신할 때 양식을 복사해 넣는다. 결재 단계(:class:`ApprovalRequestStep`)와
+    같은 규칙이다 — 양식이 바뀌거나 지워져도 **진행 중인 결재는 영향을 받지
+    않는다.** 심사 중에 요구 서류가 바뀌면 이미 승인한 사람의 판단 근거가
+    뒤바뀐다.
+
+    ``step_order`` 는 request step 의 번호와 같은 축이다(0 = 기안).
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.request_id = kwargs.get('request_id')
+        self.step_order = int(kwargs.get('step_order', 0) or 0)
+        self.block_type = kwargs.get('block_type', '')
+        self.label = kwargs.get('label', '')
+        self.config = kwargs.get('config')
+        self.required = bool(kwargs.get('required', True))
+        self.sort_order = int(kwargs.get('sort_order', 1) or 1)
+        #: 채워진 값(JSON 문자열). 비어 있으면 아직 안 채운 것이다.
+        self.data = kwargs.get('data')
+        self.filled_by = kwargs.get('filled_by')
+        self.filled_at = kwargs.get('filled_at')
+
+    def get_table_name(self) -> str:
+        return "approval_request_blocks"
+
+    def get_schema(self) -> Dict[str, str]:
+        return {
+            'request_id': 'INTEGER NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE',
+            'step_order': 'INTEGER NOT NULL DEFAULT 0',
+            'block_type': 'VARCHAR(40) NOT NULL',
+            'label': 'VARCHAR(200) NOT NULL',
+            'config': 'TEXT',
+            'required': 'BOOLEAN NOT NULL DEFAULT TRUE',
+            'sort_order': 'INTEGER NOT NULL DEFAULT 1',
+            'data': 'TEXT',
+            # 기록이므로 users FK 를 걸지 않는다 — 결재 단계와 같은 이유다.
+            'filled_by': 'INTEGER',
+            'filled_at': 'TIMESTAMP',
+        }
+
+    def get_indexes(self) -> List[tuple]:
+        return [("idx_approval_request_blocks_req", "request_id, step_order, sort_order")]
