@@ -263,6 +263,13 @@ class FakeDB:
             return []
         if s.startswith("SELECT name FROM approval_lines WHERE form_id"):
             return [{"name": r["name"]} for r in self.t["approval_lines"] if r.get("form_id") == p[0]]
+        if s.startswith("UPDATE approval_forms SET"):
+            assigns = s[len("UPDATE approval_forms SET "):].split(" WHERE ")[0].split(", ")
+            for f in self.t["approval_forms"]:
+                if f["id"] == p[-1]:
+                    for i, a in enumerate(assigns):
+                        f[a.split(" = ")[0]] = p[i]
+            return []
         if s.startswith("DELETE FROM approval_forms WHERE id"):
             self.t["approval_forms"] = [f for f in self.t["approval_forms"] if f["id"] != p[0]]
             return []

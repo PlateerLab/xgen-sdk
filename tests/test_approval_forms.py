@@ -535,3 +535,72 @@ def test_a_line_without_a_form_is_not_restricted(db):
     line_id = _line(db, approvers=(3, 4))
     store.update_line(db, line_id, steps=[{"approver_id": 4, "step_order": 1}])
     assert [s["approver_id"] for s in store.get_line(db, line_id)["steps"]] == [4]
+
+
+# ── 내리는 것은 지우는 것과 같은 무게다 ──────────────────────────────
+
+
+def test_a_form_in_use_cannot_be_quietly_retired(db):
+    """목록에서만 사라지고 결재선은 계속 그것을 가리키면, 관리자는 내렸다고
+    믿는데 새 결재는 그대로 그 칸을 받는다 — 효력은 남고 보이지만 않는다."""
+    form_id = store.copy_form(db, _from_template(db), name="내릴 양식", owner_id=1)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+
+    with pytest.raises(E.ApprovalError) as e:
+        store.update_form(db, form_id, is_active=False)
+    assert "결재선이 있어 내릴 수 없습니다" in str(e.value)
+    assert store.get_form(db, form_id)["is_active"] is True
+
+    store.set_line_form(db, line_id, None)
+    store.update_form(db, form_id, is_active=False)
+    assert store.get_form(db, form_id)["is_active"] is False
+
+
+# ── 양식이 내건 제한은 실제로 지켜진다 ───────────────────────────────
+
+
+def test_the_attachment_limit_the_form_declares_is_enforced(db):
+    """지키지 않을 값이면 적게 두지 말아야 하고, 적게 뒀으면 지켜야 한다."""
+    form_id = store.create_form(
+        db, name="첨부 제한", owner_id=1,
+        steps=[{"step_index": 0}, {"step_index": 1}],
+        blocks=[{"step_index": 0, "block_type": blocks.ATTACHMENTS, "label": "자료",
+                 "required": True, "config": {"max_count": 2, "extensions": ["pdf"]}}])
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+
+    with pytest.raises(E.ApprovalError, match="2개까지"):
+        store.submit(db, requester_id=1, title="너무 많이", line_id=line_id,
+                     block_values=[{"sort_order": 1, "data": {
+                         "attachment_ids": [1, 2, 3],
+                         "files": [{"id": i, "original_name": f"{i}.pdf"} for i in (1, 2, 3)]}}])
+
+    with pytest.raises(E.ApprovalError, match="허용되지 않은 파일"):
+        store.submit(db, requester_id=1, title="확장자 다름", line_id=line_id,
+                     block_values=[{"sort_order": 1, "data": {
+                         "attachment_ids": [1],
+                         "files": [{"id": 1, "original_name": "계획.exe"}]}}])
+
+    ok = store.submit(db, requester_id=1, title="괜찮은 것", line_id=line_id,
+                      block_values=[{"sort_order": 1, "data": {
+                          "attachment_ids": [1, 2],
+                          "files": [{"id": 1, "original_name": "a.pdf"},
+                                    {"id": 2, "original_name": "b.PDF"}]}}])
+    assert ok["status"] == "pending"
+
+
+def test_a_block_without_limits_takes_anything(db):
+    """제한을 안 적은 칸(대부분)은 아무 제약도 받지 않는다."""
+    form_id = store.create_form(
+        db, name="제한 없음", owner_id=1,
+        steps=[{"step_index": 0}, {"step_index": 1}],
+        blocks=[{"step_index": 0, "block_type": blocks.ATTACHMENTS, "label": "자료",
+                 "required": True}])
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    out = store.submit(db, requester_id=1, title="많이 붙임", line_id=line_id,
+                       block_values=[{"sort_order": 1, "data": {
+                           "attachment_ids": list(range(1, 21)),
+                           "files": [{"id": i, "original_name": f"{i}.zip"} for i in range(1, 21)]}}])
+    assert out["status"] == "pending"
