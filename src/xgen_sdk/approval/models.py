@@ -274,9 +274,13 @@ class ApprovalActionPolicy(BaseModel):
         super().__init__(**kwargs)
         self.action_type = kwargs.get('action_type', '')
         self.required = kwargs.get('required', False)
-        #: 결재를 올릴 때 **미리 채워지는** 결재선. 요청자가 바꿀 수 있다 —
-        #: 잠그지 않는다(무제한 원칙). 없으면 요청자가 직접 고른다.
+        #: 결재를 올릴 때 **미리 채워지는** 결재선. 없으면 요청자가 직접 고른다.
         self.default_line_id = kwargs.get('default_line_id')
+        #: 관리자가 결재선을 **고정**했는가. 고정이면 요청자는 결재선을 바꿀 수
+        #: 없고 그 줄로만 올라간다. 고정하지 않으면 default_line_id 는 모달을
+        #: 미리 채우는 편의일 뿐이고 요청자가 바꾼다. 기본은 고정 안 함 —
+        #: 잠그는 것은 관리자의 명시적 선택이어야 한다(무제한 원칙).
+        self.line_locked = kwargs.get('line_locked', False)
         self.updated_by = kwargs.get('updated_by')
         self.updated_at = kwargs.get('updated_at')
 
@@ -291,6 +295,7 @@ class ApprovalActionPolicy(BaseModel):
             'action_type': 'VARCHAR(64) NOT NULL',
             'required': 'BOOLEAN NOT NULL DEFAULT FALSE',
             'default_line_id': 'INTEGER REFERENCES approval_lines(id) ON DELETE SET NULL',
+            'line_locked': 'BOOLEAN NOT NULL DEFAULT FALSE',
             'updated_by': 'INTEGER',
             'updated_at': 'TIMESTAMP',
             'UNIQUE_action': 'UNIQUE(action_type)',
