@@ -219,6 +219,18 @@ class FakeDB:
         if s.startswith("SELECT id, step_index, title, guide FROM approval_form_steps"):
             return sorted([dict(x) for x in self.t["approval_form_steps"] if x["form_id"] == p[0]],
                           key=lambda x: x["step_index"])
+        if s.startswith("DELETE FROM approval_line_steps WHERE line_id"):
+            self.t["approval_line_steps"] = [
+                x for x in self.t["approval_line_steps"] if x["line_id"] != int(p[0])]
+            return []
+        if s.startswith("UPDATE approval_lines SET name") or (
+                s.startswith("UPDATE approval_lines SET") and "form_id" not in s):
+            for r in self.t["approval_lines"]:
+                if r["id"] == p[-1]:
+                    assigns = s[len("UPDATE approval_lines SET "):].split(" WHERE ")[0].split(", ")
+                    for i, a in enumerate(assigns):
+                        r[a.split(" = ")[0]] = p[i]
+            return []
         if s.startswith("DELETE FROM approval_form_steps WHERE form_id"):
             self.t["approval_form_steps"] = [
                 x for x in self.t["approval_form_steps"] if x["form_id"] != p[0]]
@@ -268,6 +280,29 @@ class FakeDB:
             return [{"status": x["status"]} for x in self.t["approval_request_steps"]
                     if x["request_id"] == p[0] and x["step_order"] == p[1]
                     and x["approver_id"] == p[2]]
+        if s.startswith("SELECT l.id, l.name, l.description, l.owner_id") and "WHERE l.id = %s" in s:
+            out = []
+            for l in self.t["approval_lines"]:
+                if l["id"] != p[0]:
+                    continue
+                f = next((x for x in self.t["approval_forms"] if x["id"] == l.get("form_id")), None)
+                out.append({**l, "form_id": l.get("form_id"),
+                            "form_name": f["name"] if f else None})
+            return out
+        if s.startswith("SELECT s.step_order, s.approver_id, u.username, u.full_name"):
+            rows = [r for r in self.t["approval_line_steps"] if r["line_id"] == p[0]]
+            rows.sort(key=lambda r: (r["step_order"], r["id"]))
+            out = []
+            for r in rows:
+                u = next((x for x in self.t["users"] if x["id"] == r["approver_id"]), {})
+                out.append({"step_order": r["step_order"], "approver_id": r["approver_id"],
+                            "username": u.get("username"), "full_name": u.get("full_name")})
+            return out
+        if s.startswith("SELECT COALESCE(MAX(step_index), 0) AS need"):
+            steps = [x for x in self.t["approval_form_steps"] if x["form_id"] == p[0]]
+            f = next((x for x in self.t["approval_forms"] if x["id"] == p[1]), None)
+            return [{"need": max([x["step_index"] for x in steps] or [0]),
+                     "name": f["name"] if f else None}]
         if s.startswith("SELECT f.id, f.name FROM approval_lines l"):
             out = []
             for l in self.t["approval_lines"]:

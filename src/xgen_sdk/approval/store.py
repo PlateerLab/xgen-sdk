@@ -133,6 +133,9 @@ def update_line(app_db, line_id: int, *, name: Optional[str] = None,
     결재자를 주면 **통째로 갈아 끼운다**(부분 수정이 아니다). 순서는
     :func:`engine.plan_steps` 가 검증한다 — 같은 사람이 두 번 서거나 빈 줄이면
     거기서 걸린다.
+
+    양식이 붙어 있으면 **줄을 그 양식보다 짧게 만들 수 없다**
+    (:func:`_guard_form_still_fits`).
     """
     line = get_line(app_db, line_id)
     if not line:
@@ -156,6 +159,7 @@ def update_line(app_db, line_id: int, *, name: Optional[str] = None,
 
     if steps is not None:
         planned = E.plan_steps(steps)   # 규칙 검증은 engine 이 한다
+        _guard_form_still_fits(app_db, line, len(planned))
         _q(app_db, "DELETE FROM approval_line_steps WHERE line_id = %s", (int(line_id),))
         for st in planned:
             _q(app_db,
@@ -164,6 +168,36 @@ def update_line(app_db, line_id: int, *, name: Optional[str] = None,
                (int(line_id), st["step_order"], st["approver_id"]))
 
     return get_line(app_db, line_id)
+
+
+def _guard_form_still_fits(app_db, line: Dict[str, Any], approver_count: int) -> None:
+    """줄을 **붙어 있는 양식보다 짧게** 만들지 못하게 한다.
+
+    반대 방향(양식을 늘리는 것)은 :func:`_guard_lines_still_fit` 이 이미 막는다.
+    한쪽만 막으면 같은 불변을 뒷문으로 깰 수 있다: 3차에 할 일이 있는 양식을
+    3명 줄에 붙여 두고 줄을 2명으로 줄이면, 그 줄로 올라간 결재는 **3차 칸을
+    지닌 채 3차가 없는** 문서가 된다. 그러면 필수 칸이 아무에게도 안 가고,
+    마지막 결재자는 자기 단계까지만 검사받으므로 **그 칸을 건너뛴 채 승인이
+    끝난다** — 요구했던 서류 한 장이 조용히 사라지는 셈이다.
+
+    줄이려면 양식을 먼저 떼라고 말한다(그 편이 무슨 일이 일어나는지 분명하다).
+    """
+    form_id = line.get("form_id")
+    if not form_id:
+        return
+    rows = _q(app_db, """
+        SELECT COALESCE(MAX(step_index), 0) AS need, (SELECT name FROM approval_forms WHERE id = %s) AS name
+          FROM approval_form_steps WHERE form_id = %s
+    """, (int(form_id), int(form_id)))
+    if not rows:
+        return
+    need = int(rows[0].get("need") or 0)
+    if approver_count >= need:
+        return
+    name = rows[0].get("name") or f"#{form_id}"
+    raise E.ApprovalError(
+        f"이 결재선에 붙은 양식 [{name}] 은 결재자 {need}명이 필요합니다 "
+        f"({approver_count}명으로 줄일 수 없습니다). 양식을 먼저 떼세요")
 
 
 def list_all_shared_lines(app_db) -> List[Dict[str, Any]]:
