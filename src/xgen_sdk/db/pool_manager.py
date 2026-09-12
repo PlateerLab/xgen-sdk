@@ -1202,6 +1202,17 @@ class DatabaseManagerPsycopg3:
                     instance = model_class()
                     expected_schema = instance.get_schema()
                     column_names = set(instance.get_column_names())
+                    # get_indexes() 의 세 번째 원소가 True 인 단일 컬럼 유일 인덱스도
+                    # "유일이 기대됨" 이다 — 제약 동기화가 그것을 떨어뜨리면 안 된다.
+                    declared_unique_columns = set()
+                    try:
+                        for index_def in instance.get_indexes():
+                            if len(index_def) > 2 and index_def[2]:
+                                cols = [c.strip() for c in str(index_def[1]).split(',') if c.strip()]
+                                if len(cols) == 1:
+                                    declared_unique_columns.add(cols[0])
+                    except Exception:  # noqa: BLE001 — 인덱스 선언이 없거나 이상해도 동기화는 간다
+                        pass
 
                     current_columns = self._get_table_columns(table_name)
 
@@ -1264,7 +1275,9 @@ class DatabaseManagerPsycopg3:
 
                     # 제약조건(NOT NULL, UNIQUE, DEFAULT) 동기화
                     try:
-                        self._run_constraint_migrations(table_name, expected_schema, column_names)
+                        self._run_constraint_migrations(
+                            table_name, expected_schema, column_names,
+                            declared_unique_columns=declared_unique_columns)
                     except Exception as ce:
                         any_failure = True
                         self.logger.error(f"Constraint migration error for {table_name}: {ce}")
@@ -1426,8 +1439,33 @@ class DatabaseManagerPsycopg3:
             'default': default_val,
         }
 
+    @staticmethod
+    def _declared_table_unique_columns(expected_schema: dict) -> set:
+        """모델이 **테이블 레벨**로 선언한 단일 컬럼 UNIQUE — ``UNIQUE_x: 'UNIQUE(col)'``.
+
+        컬럼 정의(``col VARCHAR UNIQUE``)가 아니라 이렇게 선언한 유일 제약은
+        ``get_create_table_query`` 가 ``CONSTRAINT … UNIQUE(col)`` 로 만든다. 그런데
+        이 동기화는 컬럼 정의만 보고 "모델에 UNIQUE 가 없는데 DB 에는 있다" 로
+        판단해 **그 제약을 떨어뜨렸다** — 만든 직후 지우는 셈이라, ``ON CONFLICT
+        (col)`` 을 쓰는 코드가 "no unique or exclusion constraint" 로 죽는다(결재
+        정책 표가 그렇게 죽었다). 여기서 선언을 읽어 지키게 한다.
+        """
+        import re as _re
+        out = set()
+        for key, definition in (expected_schema or {}).items():
+            if not str(key).startswith('UNIQUE_'):
+                continue
+            m = _re.search(r'\(\s*([^)]+?)\s*\)', str(definition))
+            if not m:
+                continue
+            cols = [c.strip().strip('"') for c in m.group(1).split(',') if c.strip()]
+            if len(cols) == 1:
+                out.add(cols[0])
+        return out
+
     def _run_constraint_migrations(self, table_name: str, expected_schema: dict,
-                                    column_names: set) -> bool:
+                                    column_names: set,
+                                    declared_unique_columns: set = None) -> bool:
         """기존 컬럼의 제약조건(NOT NULL, UNIQUE, DEFAULT)을 모델 정의에 맞게 동기화합니다."""
         if self.db_type != "postgresql":
             return True
@@ -1438,6 +1476,11 @@ class DatabaseManagerPsycopg3:
                 return True
 
             current_unique = self._get_unique_columns(table_name)
+            # 컬럼 정의 밖에서 선언된 단일 컬럼 유일 제약 — 테이블 레벨 UNIQUE_* 키와
+            # get_indexes() 의 유일 인덱스. 컬럼 정의에 UNIQUE 가 없어도 **유일이 맞다**:
+            # 떨어뜨리면 안 되고, 없으면 만들어 준다.
+            declared_unique = set(declared_unique_columns or set()) | \
+                self._declared_table_unique_columns(expected_schema)
             base_columns = {'id', 'created_at', 'updated_at'}
             changes_made = False
 
@@ -1450,6 +1493,8 @@ class DatabaseManagerPsycopg3:
                     continue  # 기본 컬럼은 건드리지 않음
 
                 expected = self._parse_column_constraints(column_def)
+                if column_name in declared_unique:
+                    expected = dict(expected, unique=True)
                 current = full_columns[column_name]
                 current_nullable = current['is_nullable'] == 'YES'
                 current_default = current.get('column_default')
