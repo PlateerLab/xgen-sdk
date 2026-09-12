@@ -419,3 +419,79 @@ def test_rejection_never_waits_for_paperwork(db):
     rid = store.submit(db, requester_id=1, title="배포", line_id=line_id)["id"]
     store.decide(db, rid, actor_id=3, action="rejected", note="대상이 아님")
     assert store.get(db, rid)["status"] == "rejected"
+
+
+# ── 승인 뒤: 칸 값이 제자리로 간다 ────────────────────────────────────
+
+
+def test_a_filled_block_is_applied_when_the_approval_lands(db):
+    """2차가 적은 위험도 평가는 **거버넌스 원장으로** 가야 한다.
+
+    칸이 결재 안에만 남으면 대시보드도 이력도 그 평가를 모른다 — 평가를
+    결재로 옮긴 의미가 없어진다. 어디로 가는지는 그 표를 가진 서비스가 꽂는다.
+    """
+    seen = []
+    blocks.register_applier(blocks.RISK_ASSESSMENT,
+                            lambda app_db, req, block, data: seen.append((req["id"], data)))
+    try:
+        registry.register_action("generic", lambda *a, **k: None)
+        form_id = _from_template(db)
+        line_id = _line(db)
+        store.set_line_form(db, line_id, form_id)
+        rid = _submit_with_plan(db, line_id)["id"]
+        risk = next(b for b in store.get(db, rid)["blocks"]
+                    if b["block_type"] == blocks.RISK_ASSESSMENT)
+        store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                         data={"risk_level": "high"})
+        store.decide(db, rid, actor_id=3, action="approved")
+        assert seen == [], "중간 승인에서는 아직 아니다 — 최종이 나야 적용한다"
+        store.decide(db, rid, actor_id=4, action="approved")
+        assert seen == [(rid, {"risk_level": "high"})]
+    finally:
+        blocks._APPLIERS.pop(blocks.RISK_ASSESSMENT, None)
+
+
+def test_a_failing_block_applier_does_not_undo_the_approval(db):
+    """사람의 결재는 이미 일어난 사실이다. 적용 실패는 **숨기지 않고** 남긴다."""
+    def boom(app_db, req, block, data):
+        raise RuntimeError("거버넌스 원장이 막혔다")
+
+    blocks.register_applier(blocks.RISK_ASSESSMENT, boom)
+    try:
+        registry.register_action("generic", lambda *a, **k: None)
+        form_id = _from_template(db)
+        line_id = _line(db)
+        store.set_line_form(db, line_id, form_id)
+        rid = _submit_with_plan(db, line_id)["id"]
+        risk = next(b for b in store.get(db, rid)["blocks"]
+                    if b["block_type"] == blocks.RISK_ASSESSMENT)
+        store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                         data={"risk_level": "low"})
+        store.decide(db, rid, actor_id=3, action="approved")
+        store.decide(db, rid, actor_id=4, action="approved")
+        out = store.get(db, rid)
+        assert out["status"] == "approved"
+        assert "거버넌스 원장이 막혔다" in str(out["apply_error"])
+    finally:
+        blocks._APPLIERS.pop(blocks.RISK_ASSESSMENT, None)
+
+
+def test_an_unfilled_optional_block_has_nothing_to_apply(db):
+    calls = []
+    blocks.register_applier(blocks.ATTACHMENTS,
+                            lambda app_db, req, block, data: calls.append(data))
+    try:
+        registry.register_action("generic", lambda *a, **k: None)
+        form_id = _from_template(db)
+        line_id = _line(db)
+        store.set_line_form(db, line_id, form_id)
+        rid = _submit_with_plan(db, line_id)["id"]
+        risk = next(b for b in store.get(db, rid)["blocks"]
+                    if b["block_type"] == blocks.RISK_ASSESSMENT)
+        store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                         data={"risk_level": "low"})
+        store.decide(db, rid, actor_id=3, action="approved")
+        store.decide(db, rid, actor_id=4, action="approved")
+        assert calls == [], "안 채운 선택 칸은 보낼 것이 없다"
+    finally:
+        blocks._APPLIERS.pop(blocks.ATTACHMENTS, None)

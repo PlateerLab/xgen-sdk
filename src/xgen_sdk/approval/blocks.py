@@ -128,6 +128,33 @@ def is_known(block_type: str) -> bool:
     return str(block_type or "") in REGISTRY
 
 
+#: 칸 종류별 **적용 함수** — 최종 승인이 났을 때 그 칸의 값으로 무엇을 할 것인가.
+#:
+#: 왜 레지스트리인가: 값이 갈 곳을 아는 것은 그 표를 가진 서비스다. AI 위험도
+#: 평가는 ``governance_risk_assessments`` 로 가야 하는데 그 표는 core 의 것이고,
+#: SDK 는 그 표의 모양을 모른다. 그래서 SDK 는 **부를 자리**만 정해 두고, 무엇을
+#: 할지는 표를 가진 쪽이 기동할 때 꽂는다(``registry.register_action`` 과 같은
+#: 방식이다).
+_APPLIERS: Dict[str, Callable[..., None]] = {}
+
+
+def register_applier(block_type: str, fn: Callable[..., None]) -> None:
+    """``fn(app_db, request, block, data)`` — 최종 승인 시 이 종류의 칸마다 불린다.
+
+    두 번 불릴 수 있다고 보고 **멱등하게** 써라. 뒤처리는 한 건에 한 번이
+    원칙이지만, 워커 둘이 같은 찰나에 집으면 훅이 두 번 돌 수 있다.
+    """
+    _APPLIERS[str(block_type)] = fn
+
+
+def has_applier(block_type: str) -> bool:
+    return str(block_type or "") in _APPLIERS
+
+
+def applier(block_type: str) -> Optional[Callable[..., None]]:
+    return _APPLIERS.get(str(block_type or ""))
+
+
 def catalog() -> List[Dict[str, Any]]:
     """화면이 [칸 추가] 목록을 그릴 재료.
 
