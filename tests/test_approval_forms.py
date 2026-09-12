@@ -604,3 +604,41 @@ def test_a_block_without_limits_takes_anything(db):
                            "attachment_ids": list(range(1, 21)),
                            "files": [{"id": i, "original_name": f"{i}.zip"} for i in range(1, 21)]}}])
     assert out["status"] == "pending"
+
+
+# ── 상신도 양식을 덮어야 한다 ────────────────────────────────────────
+
+
+def test_the_submitted_line_must_cover_the_form(db):
+    """결재선 관리에서 두 방향을 막아 뒀어도 **상신 화면은 그 줄을 불러온 뒤
+    결재자를 뺄 수 있다.** 그 길로 빠져나가면 3차에 할 일이 있는 양식인데
+    결재자가 둘뿐인 결재가 만들어지고, 그 칸은 아무에게도 가지 않는다 —
+    마지막 사람은 자기 단계까지만 검사받으므로 **필수 칸이 빈 채로 승인이
+    끝난다.** (실측으로 재현한 구멍이다.)
+    """
+    form_id = store.create_form(
+        db, name="3차 필수", owner_id=1,
+        steps=[{"step_index": 0}, {"step_index": 1}, {"step_index": 2}],
+        blocks=[{"step_index": 2, "block_type": blocks.TEXT, "label": "3차 의견",
+                 "required": True}])
+    line_id = _line(db, approvers=(3, 4))
+    store.set_line_form(db, line_id, form_id)
+
+    with pytest.raises(E.ApprovalError) as e:
+        store.submit(db, requester_id=1, title="결재자를 줄여 상신", line_id=line_id,
+                     steps=[{"approver_id": 3, "step_order": 1}])
+    assert "결재자 2명" in str(e.value)
+
+    # 줄 그대로면 올라간다.
+    out = store.submit(db, requester_id=1, title="그대로 상신", line_id=line_id,
+                       steps=[{"approver_id": 3, "step_order": 1},
+                              {"approver_id": 4, "step_order": 2}])
+    assert out["status"] == "pending"
+
+
+def test_a_line_without_a_form_can_be_trimmed_freely(db):
+    """양식이 없는 결재선(대부분)은 결재자를 빼고 올려도 된다 — 그게 원래 동작이다."""
+    line_id = _line(db, approvers=(3, 4))
+    out = store.submit(db, requester_id=1, title="자유롭게", line_id=line_id,
+                       steps=[{"approver_id": 3, "step_order": 1}])
+    assert len(out["steps"]) == 1

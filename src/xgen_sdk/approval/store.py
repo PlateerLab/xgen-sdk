@@ -340,6 +340,7 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         raise E.ApprovalError("자기 자신을 결재선에 넣을 수 없습니다")
 
     form = _line_form(app_db, line_id)
+    _guard_steps_cover_form(app_db, form, len(planned))
 
     rows = _q(
         app_db,
@@ -1188,6 +1189,32 @@ def _line_form(app_db, line_id: Optional[int]) -> Optional[Dict[str, Any]]:
          WHERE l.id = %s
     """, (int(line_id),))
     return dict(rows[0]) if rows else None
+
+
+def _guard_steps_cover_form(app_db, form: Optional[Dict[str, Any]], approver_count: int) -> None:
+    """올리는 결재선이 **양식을 덮는지** 본다. 모자라면 올리지 못한다.
+
+    결재선 관리 쪽에서 이미 두 방향을 막아 뒀지만(양식을 늘릴 때 / 줄을 줄일 때),
+    **상신 화면은 그 줄을 불러온 뒤 결재자를 뺄 수 있다.** 그 길로 빠져나가면
+    3차에 할 일이 있는 양식인데 결재자가 둘뿐인 결재가 만들어지고, 그 칸은
+    아무에게도 가지 않는다 — 마지막 사람은 자기 단계까지만 검사받으므로
+    **필수 칸이 빈 채로 승인이 끝난다.** 실측으로 재현한 구멍이다.
+
+    막는 자리를 여기로 둔 이유는 여기가 **모든 상신이 지나는 한 곳**이기 때문이다
+    (사람이 올리든 기능 코드가 올리든).
+    """
+    if not form:
+        return
+    form_id = form.get("id")
+    rows = _q(app_db,
+              "SELECT COALESCE(MAX(step_index), 0) AS need FROM approval_form_steps WHERE form_id = %s",
+              (int(form_id),))
+    need = int(rows[0]["need"]) if rows else 0
+    if approver_count >= need:
+        return
+    raise E.ApprovalError(
+        f"이 결재선의 양식 [{form.get('name') or form_id}] 은 결재자 {need}명이 필요합니다 "
+        f"(지금 {approver_count}명) — 그만큼 세우거나 다른 결재선으로 올려 주세요")
 
 
 def _apply_draft_values(app_db, *, request_id: int, requester_id: int,
