@@ -495,3 +495,43 @@ def test_an_unfilled_optional_block_has_nothing_to_apply(db):
         assert calls == [], "안 채운 선택 칸은 보낼 것이 없다"
     finally:
         blocks._APPLIERS.pop(blocks.ATTACHMENTS, None)
+
+
+# ── 결재선을 줄이는 쪽도 같은 불변을 지킨다 ──────────────────────────
+
+
+def test_a_bound_line_cannot_be_shortened_below_the_form(db):
+    """양식을 늘리는 것만 막으면 **뒷문**이 남는다.
+
+    3차에 할 일이 있는 양식을 3명 줄에 붙여 두고 줄을 2명으로 줄이면, 그 줄로
+    올라간 결재는 3차 칸을 지닌 채 3차가 없는 문서가 된다 — 마지막 결재자는
+    자기 단계까지만 검사받으므로 **그 칸을 건너뛴 채 승인이 끝난다.** 요구했던
+    서류 한 장이 조용히 사라지는 것이다.
+    """
+    form_id = _from_template(db)                      # 결재자 2명 요구
+    line_id = _line(db, approvers=(3, 4))
+    store.set_line_form(db, line_id, form_id)
+
+    with pytest.raises(E.ApprovalError) as e:
+        store.update_line(db, line_id, steps=[{"approver_id": 3, "step_order": 1}])
+    assert "결재자 2명" in str(e.value)
+    assert "양식을 먼저" in str(e.value), "무엇을 하면 되는지 말해야 한다"
+
+    # 줄은 그대로여야 한다 — 막았는데 절반만 지워지면 그게 더 나쁘다.
+    assert len(store.get_line(db, line_id)["steps"]) == 2
+
+
+def test_shortening_is_fine_once_the_form_is_off(db):
+    form_id = _from_template(db)
+    line_id = _line(db, approvers=(3, 4))
+    store.set_line_form(db, line_id, form_id)
+    store.set_line_form(db, line_id, None)
+    store.update_line(db, line_id, steps=[{"approver_id": 3, "step_order": 1}])
+    assert len(store.get_line(db, line_id)["steps"]) == 1
+
+
+def test_a_line_without_a_form_is_not_restricted(db):
+    """대부분의 결재선은 양식이 없다 — 그 길이 막히면 안 된다."""
+    line_id = _line(db, approvers=(3, 4))
+    store.update_line(db, line_id, steps=[{"approver_id": 4, "step_order": 1}])
+    assert [s["approver_id"] for s in store.get_line(db, line_id)["steps"]] == [4]
