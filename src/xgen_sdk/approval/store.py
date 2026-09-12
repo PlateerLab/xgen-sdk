@@ -512,7 +512,11 @@ def finish(app_db, request_id: int, action_type: str,
     """
     payload = loaded.get("payload") or {}
     if status == E.APPROVED:
-        err = run_apply(action_type, payload, loaded)
+        # 칸의 값부터 제자리로 보낸다 — 2차가 적은 위험도 평가가 거버넌스
+        # 원장에 남는 것이 그 예다. 행위 적용(배포 등)보다 먼저 하는 이유는,
+        # 적용이 실패해 사람이 다시 시도할 때 **판단의 근거는 이미 남아 있어야**
+        # 하기 때문이다.
+        err = _join(_apply_blocks(app_db, loaded), run_apply(action_type, payload, loaded))
     else:
         err = run_reject(action_type, payload, loaded)
     _q(app_db,
@@ -522,6 +526,37 @@ def finish(app_db, request_id: int, action_type: str,
     if err:
         logger.error("결재 #%s 뒤처리 실패(%s): %s", request_id, status, err)
     return err
+
+
+def _join(*errs: Optional[str]) -> str:
+    return " / ".join(e for e in errs if e)
+
+
+def _apply_blocks(app_db, loaded: Dict[str, Any]) -> str:
+    """승인된 결재의 **칸 값을 제자리로** 보낸다. 사유 문자열(빈 문자열 = 성공).
+
+    칸 종류마다 갈 곳이 다르고 그 표를 아는 것은 SDK 가 아니라 각 서비스라,
+    무엇을 할지는 :func:`blocks.register_applier` 로 꽂힌 것만 한다. 아무것도
+    안 꽂혀 있으면 아무 일도 하지 않는다 — 그것이 정상이다(대부분의 칸은 읽히는
+    것으로 제 몫을 다한다).
+
+    한 칸이 실패해도 **나머지는 계속** 보낸다. 첫 실패에서 멈추면 뒤 칸들은
+    시도조차 되지 않은 채 "적용 실패" 하나로 뭉뚱그려진다.
+    """
+    errs: List[str] = []
+    for b in loaded.get("blocks") or []:
+        fn = blocks_mod.applier(b.get("block_type"))
+        if fn is None:
+            continue
+        data = blocks_mod.parse_data(b.get("data"))
+        if data is None:
+            continue                      # 안 채운 칸(선택 칸)은 보낼 것이 없다
+        try:
+            fn(app_db, loaded, b, data)
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"{b.get('label') or b.get('block_type')}: {exc}")
+            logger.exception("결재 #%s 칸 적용 실패 (%s)", loaded.get("id"), b.get("block_type"))
+    return " / ".join(errs)
 
 
 def cancel(app_db, request_id: int, actor_id: int) -> Dict[str, Any]:
