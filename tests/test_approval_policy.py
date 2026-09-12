@@ -270,39 +270,68 @@ def test_the_log_is_newest_first(logdb):
     assert ids == sorted(ids, reverse=True)
 
 
-# ── 결재선 없이 켤 수 없는 행위 ───────────────────────────────────────
+# ── 결재선은 요청하는 사람이 그 자리에서 고른다 ──────────────────────
 
 
-def test_an_action_without_a_picker_needs_a_default_line(db):
-    """지식 컬렉션 생성은 버튼 하나다 — "누구에게 올릴까요" 를 물을 자리가 없다.
+def test_a_gate_can_be_turned_on_without_a_default_line(db):
+    """**관리자가 모든 행위의 결재선을 미리 정해 둘 이유가 없다.**
 
-    기본 결재선 없이 켜면 결재는 아무에게도 가지 않고, 사용자는 이유 없이
-    "실패했습니다" 만 본다. 그건 통제가 아니라 고장이다.
+    한때 "결재선을 고를 자리가 없는 행위는 기본 결재선 없이 켤 수 없다" 는
+    제약을 뒀었다. 자리가 없으면 만들면 되는 것이지, 켜는 것 자체를 막을 일이
+    아니다 — 지금은 요청하는 화면이 결재선 모달을 띄운다.
     """
-    with pytest.raises(ValueError, match="기본 결재선"):
-        policy.set_policy(db, "collection.create", actor_id=1, required=True)
-
-
-def test_it_can_be_turned_on_together_with_a_line(db):
-    policy.set_policy(db, "collection.create", actor_id=1, required=True, default_line_id=3)
+    policy.set_policy(db, "collection.create", actor_id=1, required=True)
     assert policy.is_required(db, "collection.create") is True
+    assert policy.get(db, "collection.create")["default_line_id"] is None
 
 
-def test_deploy_can_be_turned_on_without_one(db):
-    """배포 모달에는 결재자를 고르는 자리가 있다 — 사용자가 그때 고른다."""
-    policy.set_policy(db, "agent.deploy", actor_id=1, required=True)
-    assert policy.is_required(db, "agent.deploy") is True
+def test_the_requesters_own_steps_win(db):
+    """요청자가 그 자리에서 고른 결재선이 언제나 이긴다 — 기본값은 미리
+    채워 주는 것이지 강제가 아니다. 잠그면 부서가 다른 사람이 남의 결재선을 탄다."""
+    policy.set_policy(db, "collection.create", actor_id=1, default_line_id=9)
+    line, steps = policy.resolve_line(
+        db, "collection.create", steps=[{"approver_id": 3, "step_order": 1}])
+    assert line is None and steps == [{"approver_id": 3, "step_order": 1}]
 
 
-def test_the_line_cannot_be_removed_while_it_is_on(db):
-    """켜 둔 채로 결재선만 지우면 그 순간부터 조용히 고장 난다."""
-    policy.set_policy(db, "tool.publish", actor_id=1, required=True, default_line_id=3)
-    with pytest.raises(ValueError, match="기본 결재선"):
-        policy.set_policy(db, "tool.publish", actor_id=1, default_line_id=None)
+def test_an_explicit_line_also_wins(db):
+    policy.set_policy(db, "collection.create", actor_id=1, default_line_id=9)
+    assert policy.resolve_line(db, "collection.create", line_id=4) == (4, None)
 
 
-def test_turning_it_off_frees_the_line(db):
-    policy.set_policy(db, "tool.publish", actor_id=1, required=True, default_line_id=3)
-    policy.set_policy(db, "tool.publish", actor_id=1, required=False)
-    policy.set_policy(db, "tool.publish", actor_id=1, default_line_id=None)
-    assert policy.get(db, "tool.publish")["default_line_id"] is None
+def test_the_default_line_fills_in_when_nothing_was_picked(db):
+    policy.set_policy(db, "collection.create", actor_id=1, default_line_id=9)
+    assert policy.resolve_line(db, "collection.create") == (9, None)
+
+
+def test_nothing_anywhere_asks_the_user(db):
+    """**실패가 아니라 한 단계 덜 온 것**이다 — 화면은 오류창이 아니라
+    결재선 모달을 띄우고, 사용자가 고르면 같은 요청이 그대로 진행된다."""
+    from xgen_sdk.approval.engine import ApprovalLineRequired
+
+    with pytest.raises(ApprovalLineRequired) as err:
+        policy.resolve_line(db, "collection.create")
+    assert err.value.action_type == "collection.create"
+    assert err.value.action_label == "지식 컬렉션 생성", "화면에 띄울 이름이 없다"
+
+
+def test_the_line_required_error_is_still_an_approval_error(db):
+    """호출부가 ApprovalError 하나로 잡고 있어도 흐름이 깨지지 않아야 한다."""
+    from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired
+
+    assert issubclass(ApprovalLineRequired, ApprovalError)
+
+
+def test_the_screen_can_ask_what_needs_approval_before_acting(db):
+    """화면이 **행동 전에** 알아야 사용자가 요청을 보낸 뒤 거절당하는 대신
+    처음부터 결재선을 고르고 보낼 수 있다."""
+    policy.set_policy(db, "collection.create", actor_id=1, required=True)
+    out = policy.required_for(db)
+    assert out["collection.create"] is True
+    assert out["tool.publish"] is False
+    assert set(out) == {s.action_type for s in catalog.gated_specs()}
+
+
+def test_required_for_can_be_narrowed(db):
+    policy.set_policy(db, "tool.publish", actor_id=1, required=True)
+    assert policy.required_for(db, ["tool.publish"]) == {"tool.publish": True}

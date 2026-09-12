@@ -139,16 +139,9 @@ def set_policy(app_db, action_type: str, *, actor_id: Optional[int],
     new_line = (before["default_line_id"] if default_line_id is _SENTINEL
                 else (int(default_line_id) if default_line_id else None))
 
-    # 결재선을 고를 자리가 없는 행위는 **기본 결재선 없이 켤 수 없다.**
-    #
-    # 지식 컬렉션 생성이나 도구 게시는 버튼 하나다 — 거기서 "누구에게 결재를
-    # 올릴까요" 를 물을 자리가 없다. 기본 결재선 없이 켜면 결재는 아무에게도
-    # 가지 않고, 사용자는 이유 없이 "실패했습니다" 만 본다. 그건 통제가 아니라
-    # 고장이다.
-    if new_required and not sp.picks_line and not new_line:
-        raise ValueError(
-            f"{sp.label} 은(는) 기본 결재선을 함께 지정해야 켤 수 있습니다 — "
-            "이 행위를 하는 화면에는 결재자를 고를 자리가 없습니다")
+    # 기본 결재선은 **선택**이다. 없으면 요청하는 사람이 그 자리에서 고른다
+    # (화면이 결재선 모달을 띄운다). 여기 있는 값은 그 모달을 미리 채워 주는
+    # 편의일 뿐이다.
 
     _q(app_db,
        """INSERT INTO approval_action_policies
@@ -194,3 +187,55 @@ def history(app_db, limit: int = 200) -> List[Dict[str, Any]]:
               "  LEFT JOIN users u ON u.id = h.changed_by "
               " ORDER BY h.id DESC LIMIT %s",
               (max(1, min(int(limit), 1000)),))
+
+
+# ── 결재선 정하기 ─────────────────────────────────────────────────────
+
+
+def resolve_line(app_db, action_type: str, *,
+                 line_id: Optional[int] = None,
+                 steps: Optional[List[Dict[str, Any]]] = None):
+    """이 결재를 **누가** 처리하는가 — 요청이 들고 온 것 → 기본 결재선 → 없음.
+
+    순서에 뜻이 있다: 요청자가 그 자리에서 고른 결재선이 언제나 이긴다. 관리자가
+    [결재 목록 설정] 에 정해 둔 것은 **모달을 미리 채우는 기본값**이지 강제가
+    아니다 — 잠그면 부서가 다른 사람이 남의 결재선을 타게 된다.
+
+    셋 다 없으면 :class:`ApprovalLineRequired` 다. 이건 실패가 아니라 한 단계
+    덜 온 것이라, 화면은 오류창 대신 **결재선 모달**을 띄우고 사용자가 고른 뒤
+    같은 요청을 다시 보낸다.
+
+    반환: ``(line_id, steps)`` — 둘 중 하나만 채워져 있다.
+    """
+    from xgen_sdk.approval import catalog
+    from xgen_sdk.approval.engine import ApprovalLineRequired
+
+    if steps:
+        return None, list(steps)
+    if line_id:
+        return int(line_id), None
+
+    default_line = None
+    try:
+        default_line = get(app_db, action_type).get("default_line_id")
+    except Exception as exc:  # noqa: BLE001 — 못 읽어도 "결재선을 고르세요" 로 끝난다
+        logger.warning("기본 결재선 조회 실패 (%s): %s", action_type, exc)
+    if default_line:
+        return int(default_line), None
+
+    sp = catalog.spec(action_type)
+    raise ApprovalLineRequired(action_type, sp.label if sp else action_type, None)
+
+
+def required_for(app_db, action_types: Optional[List[str]] = None) -> Dict[str, bool]:
+    """행위 → 지금 결재를 타는가. 화면이 **행동 전에** 물어보는 자리다.
+
+    화면은 이 답으로 "버튼을 누르면 결재선 모달을 띄울지" 를 정한다. 서버도
+    같은 판정을 하지만(그쪽이 최종), 화면이 미리 알아야 사용자가 요청을 보낸
+    뒤에 거절당하는 대신 **처음부터 결재선을 고르고** 보낼 수 있다.
+    """
+    from xgen_sdk.approval import catalog
+
+    wanted = list(action_types) if action_types else [s.action_type for s in catalog.gated_specs()]
+    on = set(required_actions(app_db))
+    return {a: (a in on) for a in wanted}

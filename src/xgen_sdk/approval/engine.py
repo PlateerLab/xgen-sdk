@@ -49,6 +49,26 @@ class ApprovalError(Exception):
     """규칙 위반. 메시지는 **사람이 읽고 다음에 무엇을 할지 아는** 문장이다."""
 
 
+class ApprovalLineRequired(ApprovalError):
+    """**결재선을 아직 안 골랐다** — 사용자가 고르면 그대로 진행되는 상태.
+
+    다른 ApprovalError 와 구분하는 이유: 이건 실패가 아니라 **한 단계 덜 온
+    것**이다. 화면은 이 오류를 받으면 오류창이 아니라 **결재선 모달**을 띄우고,
+    사용자가 결재자를 고른 뒤 같은 요청을 다시 보낸다.
+
+    한 문장으로 뭉뚱그리면(그냥 400 "결재선을 지정하세요") 화면은 그것이
+    "사용자가 할 수 있는 일" 인지 "관리자에게 문의할 일" 인지 알 수 없다.
+    """
+
+    def __init__(self, action_type: str, action_label: str = "",
+                 default_line_id: Any = None):
+        self.action_type = action_type
+        self.action_label = action_label or action_type
+        #: 관리자가 [결재 목록 설정] 에 정해 둔 결재선 — 모달을 미리 채운다.
+        self.default_line_id = default_line_id
+        super().__init__(f"{self.action_label} 은(는) 결재를 거쳐야 합니다 — 결재선을 지정해 주세요")
+
+
 # ── 결재선 만들기 ─────────────────────────────────────────────────────
 
 

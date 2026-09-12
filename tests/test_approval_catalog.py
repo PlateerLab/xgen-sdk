@@ -106,3 +106,10 @@ def test_registering_an_apply_does_not_erase_the_label():
     registry.register_action("agent.deploy", lambda p, q: None)
     assert registry.known_actions()["agent.deploy"] == catalog.spec("agent.deploy").label
     assert registry.has_apply("agent.deploy")
+
+
+def test_a_gated_action_no_longer_needs_a_pre_set_line():
+    """결재선은 요청하는 사람이 그 자리에서 고른다 — 카탈로그에 "이 화면은
+    결재선을 고를 자리가 있다" 는 표시를 둘 이유가 없어졌다."""
+    for sp in catalog.CATALOG:
+        assert not hasattr(sp, "picks_line"), "옛 제약의 잔재가 남아 있다"
