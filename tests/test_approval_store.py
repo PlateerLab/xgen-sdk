@@ -306,10 +306,14 @@ class FakeDB:
                             "username": u.get("username"), "full_name": u.get("full_name")})
             return out
         if s.startswith("SELECT COALESCE(MAX(step_index), 0) AS need"):
+            # 이름까지 함께 묻는 질의(축소 가드)와 단계 수만 묻는 질의(상신 가드)가
+            # 같은 모양으로 온다 — 파라미터 개수로 가른다.
             steps = [x for x in self.t["approval_form_steps"] if x["form_id"] == p[0]]
-            f = next((x for x in self.t["approval_forms"] if x["id"] == p[1]), None)
-            return [{"need": max([x["step_index"] for x in steps] or [0]),
-                     "name": f["name"] if f else None}]
+            row = {"need": max([x["step_index"] for x in steps] or [0])}
+            if len(p) > 1:
+                f = next((x for x in self.t["approval_forms"] if x["id"] == p[1]), None)
+                row["name"] = f["name"] if f else None
+            return [row]
         if s.startswith("SELECT f.id, f.name FROM approval_lines l"):
             out = []
             for l in self.t["approval_lines"]:
