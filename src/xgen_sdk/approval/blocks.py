@@ -196,6 +196,58 @@ def is_filled(block: Dict[str, Any]) -> bool:
     return bool(s.is_filled(parse_data(block.get("data"))))
 
 
+def validate_data(block: Dict[str, Any], data: Any) -> None:
+    """칸에 들어온 값이 **그 칸이 내건 조건**을 지키는지 본다. 어기면 던진다.
+
+    왜 필요한가
+    -----------
+    양식이 "첨부는 3개까지" 라고 적어 뒀는데 아무도 그것을 보지 않으면, 그 설정은
+    적어 둔 사람에게 거짓말을 한다 — 화면은 제한이 걸린 줄 알고, 실제로는 무엇이든
+    들어간다. 지키지 않을 값이면 애초에 적게 두지 말아야 하고, 적게 뒀으면 지켜야
+    한다.
+
+    파일 확장자는 **올리는 문**이 이미 한 번 본다(그쪽이 진짜 관문이다). 여기서
+    보는 것은 그 위에 양식이 더 좁힌 조건이라, 값에 실린 이름으로 판단한다.
+    """
+    cfg = parse_data(block.get("config")) or {}
+    if not isinstance(cfg, dict):
+        return
+    if str(block.get("block_type") or "") != ATTACHMENTS:
+        return
+    if not isinstance(data, dict):
+        return
+
+    ids = data.get("attachment_ids")
+    ids = ids if isinstance(ids, list) else []
+    max_count = cfg.get("max_count")
+    try:
+        max_count = int(max_count) if max_count is not None else None
+    except (TypeError, ValueError):
+        max_count = None
+    if max_count is not None and max_count > 0 and len(ids) > max_count:
+        raise ValueError(
+            f"{block.get('label') or '첨부'} 는 {max_count}개까지 붙일 수 있습니다 (지금 {len(ids)}개)")
+
+    exts = cfg.get("extensions")
+    exts = [str(e).lower().lstrip(".") for e in exts] if isinstance(exts, list) else []
+    if not exts:
+        return
+    files = data.get("files")
+    files = files if isinstance(files, list) else []
+    bad = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        name = str(f.get("original_name") or f.get("file_name") or "")
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if ext not in exts:
+            bad.append(name or "이름 없는 파일")
+    if bad:
+        raise ValueError(
+            f"{block.get('label') or '첨부'} 에 허용되지 않은 파일이 있습니다: "
+            f"{', '.join(bad[:3])} (허용: {', '.join(exts)})")
+
+
 def unfilled_required(blocks: Any, step_order: int) -> List[Dict[str, Any]]:
     """그 단계에서 **아직 안 채운 필수 칸**들.
 

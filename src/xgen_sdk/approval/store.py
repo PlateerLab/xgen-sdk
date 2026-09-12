@@ -1047,6 +1047,16 @@ def update_form(app_db, form_id: int, *, name: Optional[str] = None,
         # 기본 양식을 고치면 다음 사람은 무엇이 기본이었는지 알 수 없다.
         raise E.ApprovalError("기본 양식은 고칠 수 없습니다 — 복사해서 쓰세요")
 
+    if is_active is False:
+        # **내리는 것은 지우는 것과 같은 무게다.** 목록에서만 사라지고 결재선은
+        # 계속 그 양식을 가리키면, 관리자는 내렸다고 믿는데 새 결재는 그대로
+        # 그 칸을 받는다 — 효력은 남고 보이지만 않는, 가장 나쁜 종류의 상태다.
+        used = _q(app_db, "SELECT name FROM approval_lines WHERE form_id = %s", (form_id,))
+        if used:
+            names = ", ".join(str(r["name"]) for r in used[:5])
+            raise E.ApprovalError(
+                f"이 양식을 쓰는 결재선이 있어 내릴 수 없습니다: {names} — 먼저 그 결재선에서 떼세요")
+
     if steps is not None or blocks is not None:
         next_steps = steps if steps is not None else form["steps"]
         next_blocks = blocks if blocks is not None else [{
@@ -1204,11 +1214,20 @@ def _apply_draft_values(app_db, *, request_id: int, requester_id: int,
         if block is None:
             raise E.ApprovalError(f"이 양식에 없는 칸입니다 (기안 {key}번)")
         data = v.get("data")
+        _check_block_value(block, data)
         _q(app_db, """
             UPDATE approval_request_blocks
                SET data = %s, filled_by = %s, filled_at = %s WHERE id = %s
         """, (json.dumps(data, ensure_ascii=False) if data is not None else None,
               requester_id, now, block["id"]))
+
+
+def _check_block_value(block: Dict[str, Any], data: Any) -> None:
+    """양식이 내건 조건을 어기면 **사람이 읽는 오류**로 바꿔 던진다."""
+    try:
+        blocks_mod.validate_data(block, data)
+    except ValueError as exc:
+        raise E.ApprovalError(str(exc)) from None
 
 
 def snapshot_form_blocks(app_db, *, request_id: int, line_id: Optional[int] = None,
@@ -1271,6 +1290,10 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
             raise E.ApprovalError("이 단계의 결재자가 아닙니다")
         if str(mine[0]["status"]) != "pending":
             raise E.ApprovalError("아직 차례가 아닙니다")
+    full = next((b for b in list_request_blocks(app_db, request_id)
+                 if int(b["id"]) == int(block_id)), None)
+    if full is not None:
+        _check_block_value(full, data)
     _q(app_db, """
         UPDATE approval_request_blocks
         SET data = %s, filled_by = %s, filled_at = %s WHERE id = %s
