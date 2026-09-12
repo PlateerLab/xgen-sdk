@@ -696,3 +696,30 @@ def test_an_approver_cannot_edit_after_acting(db):
     with pytest.raises(E.ApprovalError):
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                          data={"risk_level": "critical"})
+
+
+# ── 결재자를 손대도 양식은 따라온다 (실사고) ─────────────────────────
+
+
+def test_the_form_survives_when_the_requester_edits_the_approvers(db):
+    """배포 모달은 기본 결재선으로 결재자를 **미리 채운 뒤 손대게** 한다.
+    그 순간 결재선이 버려지면 그 줄에 붙은 양식도 함께 사라져, 관리자가
+    "이 행위는 이 파이프라인으로" 라고 정해 둔 것이 아무 효력도 없게 된다
+    — 배포 결재에 기안 칸이 하나도 붙지 않았던 실사고다(2026-09-13).
+
+    여기서는 ``(line_id, steps)`` 가 **둘 다** 왔을 때 양식이 따라오는지 본다.
+    그 둘을 함께 돌려주기로 한 결정 자체는 ``test_approval_policy.py`` 가 본다.
+    """
+    registry.register_action("generic", lambda *a, **k: None)
+    form_id = _from_template(db)                    # 결재자 2명 요구
+    line_id = _line(db, approvers=(3, 4))
+    store.set_line_form(db, line_id, form_id)
+
+    # 요청자가 순서를 바꿔 올린다 — 줄(양식의 출처)은 그대로 따라온다.
+    out = store.submit(db, requester_id=1, title="결재자를 손봐서", line_id=line_id,
+                       steps=[{"approver_id": 4, "step_order": 1},
+                              {"approver_id": 3, "step_order": 2}])
+    assert out["form_name"] == "AI Agent 배포 결재", "양식이 따라와야 한다"
+    assert [b["block_type"] for b in out["blocks"]] == [
+        blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.RISK_ASSESSMENT]
+    assert [s["approver_id"] for s in out["steps"]] == [4, 3], "결재자는 고른 대로"

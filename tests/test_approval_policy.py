@@ -290,12 +290,38 @@ def test_a_gate_can_be_turned_on_without_a_default_line(db):
 
 
 def test_the_requesters_own_steps_win(db):
-    """요청자가 그 자리에서 고른 결재선이 언제나 이긴다 — 기본값은 미리
-    채워 주는 것이지 강제가 아니다. 잠그면 부서가 다른 사람이 남의 결재선을 탄다."""
+    """요청자가 그 자리에서 고른 **결재자**가 언제나 이긴다 — 기본값은 미리
+    채워 주는 것이지 강제가 아니다. 잠그면 부서가 다른 사람이 남의 결재선을 탄다.
+
+    다만 그 결재가 **무슨 절차인가**(어느 결재선의 양식을 따르는가)는 함께
+    돌려준다 — 아래 시험이 그 이유를 설명한다.
+    """
     policy.set_policy(db, "collection.create", actor_id=1, default_line_id=9)
     line, steps = policy.resolve_line(
         db, "collection.create", steps=[{"approver_id": 3, "step_order": 1}])
-    assert line is None and steps == [{"approver_id": 3, "step_order": 1}]
+    assert steps == [{"approver_id": 3, "step_order": 1}], "고른 사람이 결재자다"
+    assert line == 9, "절차(양식)는 이 행위의 기본 결재선에서 온다"
+
+
+def test_editing_an_approver_does_not_throw_the_form_away(db):
+    """예전에는 ``(None, steps)`` 였다. 결재선이 **양식**을 지니게 되면서 그
+    규칙이 기능을 망가뜨렸다 — 요청자가 결재자를 한 명이라도 손대면 결재선이
+    사라지고, 그와 함께 양식도 사라졌다. 관리자가 "이 행위는 이 파이프라인으로"
+    라고 정해 뒀는데 배포 요청에 기안 칸이 하나도 붙지 않는, 정확히 그 사고다.
+    """
+    policy.set_policy(db, "agent.deploy", actor_id=1, default_line_id=7)
+    line, steps = policy.resolve_line(
+        db, "agent.deploy",
+        steps=[{"approver_id": 3, "step_order": 1}, {"approver_id": 4, "step_order": 2}])
+    assert line == 7, "양식을 찾을 수 있어야 한다"
+    assert len(steps) == 2
+
+
+def test_a_hand_picked_line_has_no_form(db):
+    """어느 줄에서도 오지 않은 결재선은 양식이 없다 — 그것이 맞다."""
+    line, steps = policy.resolve_line(
+        db, "collection.create", steps=[{"approver_id": 3, "step_order": 1}])
+    assert line is None and len(steps) == 1
 
 
 def test_an_explicit_line_also_wins(db):
@@ -364,10 +390,12 @@ def test_a_line_is_not_locked_by_default(db):
     lid = _line(db)
     policy.set_policy(db, "collection.create", actor_id=9, required=True, default_line_id=lid)
     assert policy.get(db, "collection.create")["line_locked"] is False
-    # 요청자가 다른 사람을 골라 왔다 — 그것이 이긴다
-    got = policy.resolve_line(db, "collection.create",
-                              steps=[{"approver_id": 3, "step_order": 1}])
-    assert got == (None, [{"approver_id": 3, "step_order": 1}])
+    # 요청자가 다른 사람을 골라 왔다 — 그 사람들이 결재자가 된다.
+    # (절차는 여전히 그 행위의 기본 결재선에서 온다 — 양식이 사라지지 않게.)
+    got_line, got_steps = policy.resolve_line(
+        db, "collection.create", steps=[{"approver_id": 3, "step_order": 1}])
+    assert got_steps == [{"approver_id": 3, "step_order": 1}]
+    assert got_line == lid
 
 
 def test_nothing_can_be_locked_without_a_line(db):

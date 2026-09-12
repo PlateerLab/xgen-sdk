@@ -235,7 +235,22 @@ def resolve_line(app_db, action_type: str, *,
     :class:`ApprovalLineRequired` — 실패가 아니라 한 단계 덜 온 것이라, 화면은
     오류창 대신 결재선 모달을 띄우고 사용자가 고른 뒤 같은 요청을 다시 보낸다.
 
-    반환: ``(line_id, steps)`` — 둘 중 하나만 채워져 있다.
+    반환: ``(line_id, steps)``.
+
+    **둘 다 채워질 수 있다** — 예전에는 "둘 중 하나" 였는데, 결재선이 **양식**을
+    지니게 되면서 그 규칙이 기능을 망가뜨렸다: 요청자가 결재자를 한 명이라도
+    손대면 ``(None, steps)`` 가 되어 **결재선이 사라지고, 그와 함께 양식도
+    사라졌다.** 관리자가 "이 행위는 이 파이프라인(결재선+양식)으로" 라고 정해
+    뒀는데 배포 요청에는 기안 칸이 하나도 붙지 않는, 정확히 그 사고다
+    (2026-09-13 실측).
+
+    그래서 **누가 처리하는가**(steps)와 **무슨 절차인가**(line_id)를 갈라 둔다:
+    요청자가 고른 사람이 결재자가 되고, 그 사람들이 어느 줄에서 왔는지는
+    양식을 찾는 데 쓴다. 결재자 수가 양식을 못 덮으면 :func:`store.submit` 이
+    거절한다.
+
+    줄에서 오지 않은 결재선(사용자가 처음부터 손으로 고른 것)은 line_id 가
+    ``None`` 이고, 그때는 양식도 없다 — 그것이 맞다.
     """
     from xgen_sdk.approval import catalog
     from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired
@@ -256,7 +271,10 @@ def resolve_line(app_db, action_type: str, *,
         return int(default_line), None
 
     if steps:
-        return None, list(steps)
+        # 요청이 어느 줄에서 왔는지 말해 주면 그것을, 아니면 이 행위의 기본
+        # 결재선을 **양식의 출처**로 삼는다. 결재자는 어디까지나 steps 다.
+        origin = line_id if line_id else default_line
+        return (int(origin) if origin else None), list(steps)
     if line_id:
         return int(line_id), None
     if default_line:
