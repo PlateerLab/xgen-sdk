@@ -33,13 +33,17 @@ class PolicyDB(FakeDB):
         if s.startswith("INSERT INTO approval_action_policies"):
             for r in self.t["approval_action_policies"]:
                 if r["action_type"] == p[0]:
-                    r.update(required=p[1], default_line_id=p[2],
-                             updated_by=p[3], updated_at=p[4])
+                    r.update(required=p[1], default_line_id=p[2], line_locked=p[3],
+                             updated_by=p[4], updated_at=p[5])
                     return []
             self.t["approval_action_policies"].append(
                 {"action_type": p[0], "required": p[1], "default_line_id": p[2],
-                 "updated_by": p[3], "updated_at": p[4]})
+                 "line_locked": p[3], "updated_by": p[4], "updated_at": p[5]})
             return []
+        if s.startswith("SELECT action_type, default_line_id FROM approval_action_policies"):
+            return [{"action_type": r["action_type"], "default_line_id": r["default_line_id"]}
+                    for r in self.t["approval_action_policies"]
+                    if r.get("line_locked") and r.get("default_line_id")]
         if s.startswith("INSERT INTO approval_policy_history"):
             self._seq["approval_policy_history"] += 1
             self.t["approval_policy_history"].append(
@@ -335,3 +339,90 @@ def test_the_screen_can_ask_what_needs_approval_before_acting(db):
 def test_required_for_can_be_narrowed(db):
     policy.set_policy(db, "tool.publish", actor_id=1, required=True)
     assert policy.required_for(db, ["tool.publish"]) == {"tool.publish": True}
+
+
+
+# ── 결재선 고정 ───────────────────────────────────────────────────────
+#
+# 관리자는 결재선을 **고정**할 수 있다. 고정이면 요청자는 그 줄로만 올린다.
+# 고정하지 않으면(기본) 기본 결재선은 모달을 미리 채우는 편의일 뿐이고
+# 요청자가 바꾼다. 잠그는 것은 관리자의 명시적 선택이어야 한다.
+
+
+def _line(db, name="L", approvers=(1, 2)):
+    from xgen_sdk.approval import store
+
+    db.add_user(1, "kim"); db.add_user(2, "lee"); db.add_user(3, "park")
+    return store.create_line(
+        db, name=name, description="", owner_id=9, is_shared=True,
+        steps=[{"approver_id": a, "step_order": i + 1} for i, a in enumerate(approvers)],
+    )["id"]
+
+
+def test_a_line_is_not_locked_by_default(db):
+    """기본은 무제한 — 결재선을 정해 둬도 요청자가 바꿀 수 있다."""
+    lid = _line(db)
+    policy.set_policy(db, "collection.create", actor_id=9, required=True, default_line_id=lid)
+    assert policy.get(db, "collection.create")["line_locked"] is False
+    # 요청자가 다른 사람을 골라 왔다 — 그것이 이긴다
+    got = policy.resolve_line(db, "collection.create",
+                              steps=[{"approver_id": 3, "step_order": 1}])
+    assert got == (None, [{"approver_id": 3, "step_order": 1}])
+
+
+def test_nothing_can_be_locked_without_a_line(db):
+    """아무것도 없는 것을 고정할 수는 없다."""
+    with pytest.raises(ValueError):
+        policy.set_policy(db, "collection.create", actor_id=9, line_locked=True)
+
+
+def test_a_locked_line_is_the_only_line(db):
+    lid = _line(db)
+    policy.set_policy(db, "collection.create", actor_id=9, required=True,
+                      default_line_id=lid, line_locked=True)
+    assert policy.get(db, "collection.create")["line_locked"] is True
+    # 아무것도 안 들고 와도 그 줄로 간다 — 모달이 고르는 자리를 안 보여 준다
+    assert policy.resolve_line(db, "collection.create") == (lid, None)
+    # 같은 줄을 들고 오는 것은 괜찮다
+    assert policy.resolve_line(db, "collection.create", line_id=lid) == (lid, None)
+
+
+def test_a_different_line_is_refused_when_locked(db):
+    """조용히 바꿔치기하면 화면은 '내가 고른 사람에게 갔다' 고 믿는데 실제로는
+    다른 사람에게 가 있다. 소리를 내야 한다."""
+    from xgen_sdk.approval.engine import ApprovalError
+
+    lid = _line(db)
+    other = _line(db, "other", approvers=(3,))
+    policy.set_policy(db, "collection.create", actor_id=9, required=True,
+                      default_line_id=lid, line_locked=True)
+    with pytest.raises(ApprovalError):
+        policy.resolve_line(db, "collection.create", line_id=other)
+    with pytest.raises(ApprovalError):
+        policy.resolve_line(db, "collection.create",
+                            steps=[{"approver_id": 3, "step_order": 1}])
+
+
+def test_clearing_the_line_also_unlocks(db):
+    """줄을 지우면 고정도 풀린다 — '고정됐는데 아무것도 없는' 상태를 남기지 않는다."""
+    lid = _line(db)
+    policy.set_policy(db, "collection.create", actor_id=9, default_line_id=lid, line_locked=True)
+    policy.set_policy(db, "collection.create", actor_id=9, default_line_id=None)
+    row = policy.get(db, "collection.create")
+    assert row["default_line_id"] is None
+    assert row["line_locked"] is False
+
+
+def test_locking_is_recorded(db):
+    """[결재 로그 → 설정 변경 이력] 이 '그날 왜 그 사람들에게 갔나' 를 답해야 한다."""
+    lid = _line(db)
+    policy.set_policy(db, "collection.create", actor_id=9, default_line_id=lid, line_locked=True)
+    targets = [h["target"] for h in policy.history(db)]
+    assert "collection.create:line_locked" in targets
+
+
+def test_the_screen_can_see_which_lines_are_locked(db):
+    lid = _line(db)
+    policy.set_policy(db, "collection.create", actor_id=9, default_line_id=lid, line_locked=True)
+    policy.set_policy(db, "db.create", actor_id=9, default_line_id=lid)   # 고정 안 함
+    assert policy.locked_lines(db) == {"collection.create": lid}

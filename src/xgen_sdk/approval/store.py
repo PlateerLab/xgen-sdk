@@ -223,7 +223,7 @@ def delete_line(app_db, line_id: int, actor_id: int, is_superuser: bool,
             "이 결재선을 기본 결재선으로 쓰는 행위가 있습니다: " + ", ".join(used_by))
     if used_by:
         _q(app_db,
-           "UPDATE approval_action_policies SET default_line_id = NULL "
+           "UPDATE approval_action_policies SET default_line_id = NULL, line_locked = FALSE "
            "WHERE default_line_id = %s", (int(line_id),))
 
     _q(app_db, "UPDATE approval_lines SET is_active = FALSE WHERE id = %s", (line_id,))

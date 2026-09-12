@@ -62,14 +62,18 @@ def superuser_exempt(value: Any) -> bool:
 def get(app_db, action_type: str) -> Dict[str, Any]:
     """한 행위의 정책. 표에 없으면 **결재 불필요**가 답이다."""
     rows = _q(app_db,
-              "SELECT action_type, required, default_line_id, updated_by, updated_at "
+              "SELECT action_type, required, default_line_id, line_locked, updated_by, updated_at "
               "FROM approval_action_policies WHERE action_type = %s",
               (str(action_type or ""),))
     if not rows:
         return {"action_type": action_type, "required": False,
-                "default_line_id": None, "updated_by": None, "updated_at": None}
+                "default_line_id": None, "line_locked": False,
+                "updated_by": None, "updated_at": None}
     row = dict(rows[0])
     row["required"] = bool(row.get("required"))
+    # 고정은 결재선이 있을 때만 뜻이 있다 — 줄이 지워졌는데(FK SET NULL) 고정
+    # 플래그만 남으면 "고정됐는데 아무것도 없는" 상태가 된다.
+    row["line_locked"] = bool(row.get("line_locked")) and bool(row.get("default_line_id"))
     return row
 
 
@@ -86,7 +90,8 @@ def list_all(app_db) -> List[Dict[str, Any]]:
     """
     saved = {r["action_type"]: r for r in _q(
         app_db,
-        "SELECT p.action_type, p.required, p.default_line_id, p.updated_by, p.updated_at, "
+        "SELECT p.action_type, p.required, p.default_line_id, p.line_locked, "
+        "       p.updated_by, p.updated_at, "
         "       l.name AS default_line_name, "
         "       COALESCE(u.full_name, u.username) AS updated_by_name "
         "  FROM approval_action_policies p "
@@ -100,6 +105,7 @@ def list_all(app_db) -> List[Dict[str, Any]]:
             **sp.to_dict(),
             "required": bool(row.get("required")),
             "default_line_id": row.get("default_line_id"),
+            "line_locked": bool(row.get("line_locked")) and bool(row.get("default_line_id")),
             "default_line_name": row.get("default_line_name"),
             "updated_by": row.get("updated_by"),
             "updated_by_name": row.get("updated_by_name"),
@@ -120,11 +126,15 @@ def required_actions(app_db) -> List[str]:
 
 def set_policy(app_db, action_type: str, *, actor_id: Optional[int],
                required: Optional[bool] = None,
-               default_line_id: Any = _SENTINEL) -> Dict[str, Any]:
+               default_line_id: Any = _SENTINEL,
+               line_locked: Optional[bool] = None) -> Dict[str, Any]:
     """정책 한 줄을 바꾼다. 바뀐 것만 이력에 남는다.
 
     ``default_line_id`` 는 ``None`` 을 **지우라는 뜻**으로 써야 해서 기본값을
     따로 뒀다 — 안 주면 그대로, ``None`` 을 주면 없앤다.
+
+    ``line_locked`` 는 결재선이 있어야만 켤 수 있다 — 아무것도 없는 것을 고정할
+    수는 없다. 결재선을 지우면 고정도 함께 풀린다.
     """
     key = str(action_type or "").strip()
     if not catalog.spec(key):
@@ -139,20 +149,30 @@ def set_policy(app_db, action_type: str, *, actor_id: Optional[int],
     new_line = (before["default_line_id"] if default_line_id is _SENTINEL
                 else (int(default_line_id) if default_line_id else None))
 
-    # 기본 결재선은 **선택**이다. 없으면 요청하는 사람이 그 자리에서 고른다
-    # (화면이 결재선 모달을 띄운다). 여기 있는 값은 그 모달을 미리 채워 주는
-    # 편의일 뿐이다.
+    # 결재선은 두 모드다.
+    #   고정 안 함(기본): 여기 있는 줄은 요청 화면의 모달을 **미리 채우는** 편의일
+    #                    뿐이고, 요청자가 바꿀 수 있다. 없어도 된다.
+    #   고정:            요청자는 이 줄로만 올릴 수 있다. 관리자의 명시적 선택이다.
+    new_locked = before["line_locked"] if line_locked is None else bool(line_locked)
+    if not new_line:
+        # 줄이 없으면 고정도 없다. 지금 **고정하라고** 온 요청이면 거절하고,
+        # 줄을 지우러 온 요청이면 고정을 함께 푼다 — "고정됐는데 아무것도 없는"
+        # 상태를 남기지 않는다.
+        if line_locked is True:
+            raise ValueError("결재선을 먼저 지정해야 고정할 수 있습니다")
+        new_locked = False
 
     _q(app_db,
        """INSERT INTO approval_action_policies
-              (action_type, required, default_line_id, updated_by, updated_at)
-          VALUES (%s, %s, %s, %s, %s)
+              (action_type, required, default_line_id, line_locked, updated_by, updated_at)
+          VALUES (%s, %s, %s, %s, %s, %s)
           ON CONFLICT (action_type) DO UPDATE
              SET required = EXCLUDED.required,
                  default_line_id = EXCLUDED.default_line_id,
+                 line_locked = EXCLUDED.line_locked,
                  updated_by = EXCLUDED.updated_by,
                  updated_at = EXCLUDED.updated_at""",
-       (key, new_required, new_line, actor_id, now))
+       (key, new_required, new_line, new_locked, actor_id, now))
 
     if new_required != before["required"]:
         record_change(app_db, key,
@@ -163,6 +183,11 @@ def set_policy(app_db, action_type: str, *, actor_id: Optional[int],
         record_change(app_db, f"{key}:default_line",
                       str(before["default_line_id"] or "없음"),
                       str(new_line or "없음"), actor_id)
+    if new_locked != before["line_locked"]:
+        record_change(app_db, f"{key}:line_locked",
+                      "결재선 고정" if before["line_locked"] else "요청자가 선택",
+                      "결재선 고정" if new_locked else "요청자가 선택",
+                      actor_id)
     return get(app_db, key)
 
 
@@ -195,36 +220,58 @@ def history(app_db, limit: int = 200) -> List[Dict[str, Any]]:
 def resolve_line(app_db, action_type: str, *,
                  line_id: Optional[int] = None,
                  steps: Optional[List[Dict[str, Any]]] = None):
-    """이 결재를 **누가** 처리하는가 — 요청이 들고 온 것 → 기본 결재선 → 없음.
+    """이 결재를 **누가** 처리하는가.
 
-    순서에 뜻이 있다: 요청자가 그 자리에서 고른 결재선이 언제나 이긴다. 관리자가
-    [결재 목록 설정] 에 정해 둔 것은 **모달을 미리 채우는 기본값**이지 강제가
-    아니다 — 잠그면 부서가 다른 사람이 남의 결재선을 타게 된다.
+    두 모드가 있고, 관리자가 [결재 목록 설정] 에서 정한다.
 
-    셋 다 없으면 :class:`ApprovalLineRequired` 다. 이건 실패가 아니라 한 단계
-    덜 온 것이라, 화면은 오류창 대신 **결재선 모달**을 띄우고 사용자가 고른 뒤
-    같은 요청을 다시 보낸다.
+    **결재선 고정** — 그 줄로만 올라간다. 요청이 다른 결재선을 들고 왔으면
+    거절한다(:class:`ApprovalError`). 조용히 바꿔치기하면 화면은 "내가 고른
+    결재자에게 갔다" 고 믿는데 실제로는 다른 사람에게 가 있다. 우리 화면은
+    고정이면 고르는 자리 자체를 보여 주지 않으므로, 여기 걸리는 것은 낡은
+    화면이거나 손으로 만든 요청이다 — 그건 소리를 내야 한다.
+
+    **고정 안 함**(기본) — 요청자가 그 자리에서 고른 결재선이 이긴다. 관리자가
+    정해 둔 기본 결재선은 모달을 **미리 채우는** 편의일 뿐이다. 둘 다 없으면
+    :class:`ApprovalLineRequired` — 실패가 아니라 한 단계 덜 온 것이라, 화면은
+    오류창 대신 결재선 모달을 띄우고 사용자가 고른 뒤 같은 요청을 다시 보낸다.
 
     반환: ``(line_id, steps)`` — 둘 중 하나만 채워져 있다.
     """
     from xgen_sdk.approval import catalog
-    from xgen_sdk.approval.engine import ApprovalLineRequired
+    from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired
+
+    pol: Dict[str, Any] = {}
+    try:
+        pol = get(app_db, action_type)
+    except Exception as exc:  # noqa: BLE001 — 못 읽으면 고정도 기본도 없는 것으로
+        logger.warning("결재 정책 조회 실패 (%s): %s", action_type, exc)
+    default_line = pol.get("default_line_id")
+
+    if pol.get("line_locked") and default_line:
+        if steps or (line_id and int(line_id) != int(default_line)):
+            sp = catalog.spec(action_type)
+            raise ApprovalError(
+                f"{sp.label if sp else action_type} 은(는) 결재선이 고정된 행위입니다 — "
+                "결재선을 고를 수 없습니다")
+        return int(default_line), None
 
     if steps:
         return None, list(steps)
     if line_id:
         return int(line_id), None
-
-    default_line = None
-    try:
-        default_line = get(app_db, action_type).get("default_line_id")
-    except Exception as exc:  # noqa: BLE001 — 못 읽어도 "결재선을 고르세요" 로 끝난다
-        logger.warning("기본 결재선 조회 실패 (%s): %s", action_type, exc)
     if default_line:
         return int(default_line), None
 
     sp = catalog.spec(action_type)
     raise ApprovalLineRequired(action_type, sp.label if sp else action_type, None)
+
+
+def locked_lines(app_db) -> Dict[str, int]:
+    """행위 → 고정된 결재선 id. 화면이 **고르는 자리를 아예 보여 주지 않기** 위해 본다."""
+    return {r["action_type"]: int(r["default_line_id"]) for r in _q(
+        app_db,
+        "SELECT action_type, default_line_id FROM approval_action_policies "
+        "WHERE line_locked = TRUE AND default_line_id IS NOT NULL")}
 
 
 def required_for(app_db, action_types: Optional[List[str]] = None) -> Dict[str, bool]:
