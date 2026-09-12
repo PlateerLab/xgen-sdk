@@ -90,14 +90,142 @@ def create_line(app_db, *, name: str, description: str, owner_id: int,
     return {"id": line_id, "name": name, "steps": planned}
 
 
-def delete_line(app_db, line_id: int, actor_id: int, is_superuser: bool) -> None:
+def get_line(app_db, line_id: int) -> Optional[Dict[str, Any]]:
+    """결재선 한 줄 + 결재자 순서. 내려간(비활성) 줄도 돌려준다 —
+    "그때 어느 결재선으로 올렸나" 를 답해야 하기 때문이다."""
+    rows = _q(app_db,
+              "SELECT id, name, description, owner_id, is_shared, is_active "
+              "FROM approval_lines WHERE id = %s", (int(line_id),))
+    if not rows:
+        return None
+    line = dict(rows[0])
+    line["steps"] = _q(
+        app_db,
+        """
+        SELECT s.step_order, s.approver_id, u.username, u.full_name
+          FROM approval_line_steps s
+          LEFT JOIN users u ON u.id = s.approver_id
+         WHERE s.line_id = %s
+         ORDER BY s.step_order, s.id
+        """,
+        (int(line_id),),
+    )
+    return line
+
+
+def update_line(app_db, line_id: int, *, name: Optional[str] = None,
+                description: Optional[str] = None,
+                is_shared: Optional[bool] = None,
+                steps: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """결재선을 고친다 — 이름·설명·공용 여부·결재자 순서.
+
+    ⚠ **이미 올라간 결재는 따라 바뀌지 않는다.** 상신 시점에 결재선을 건마다
+    복제(스냅샷)해 두기 때문이다. 결재가 도는 중에 템플릿을 고쳤다고 결재자가
+    바뀌면, 이미 누른 사람의 승인이 무슨 뜻인지 알 수 없게 된다.
+
+    결재자를 주면 **통째로 갈아 끼운다**(부분 수정이 아니다). 순서는
+    :func:`engine.plan_steps` 가 검증한다 — 같은 사람이 두 번 서거나 빈 줄이면
+    거기서 걸린다.
+    """
+    line = get_line(app_db, line_id)
+    if not line:
+        raise E.ApprovalError("결재선을 찾을 수 없습니다")
+
+    sets, params = [], []
+    if name is not None:
+        if not str(name).strip():
+            raise E.ApprovalError("결재선 이름이 필요합니다")
+        sets.append("name = %s")
+        params.append(str(name).strip()[:100])
+    if description is not None:
+        sets.append("description = %s")
+        params.append((str(description).strip()[:500] or None))
+    if is_shared is not None:
+        sets.append("is_shared = %s")
+        params.append(bool(is_shared))
+    if sets:
+        params.append(int(line_id))
+        _q(app_db, f"UPDATE approval_lines SET {', '.join(sets)} WHERE id = %s", tuple(params))
+
+    if steps is not None:
+        planned = E.plan_steps(steps)   # 규칙 검증은 engine 이 한다
+        _q(app_db, "DELETE FROM approval_line_steps WHERE line_id = %s", (int(line_id),))
+        for st in planned:
+            _q(app_db,
+               "INSERT INTO approval_line_steps (line_id, step_order, approver_id) "
+               "VALUES (%s, %s, %s)",
+               (int(line_id), st["step_order"], st["approver_id"]))
+
+    return get_line(app_db, line_id)
+
+
+def list_all_shared_lines(app_db) -> List[Dict[str, Any]]:
+    """**공용 결재선 전부** — 관리자 화면이 보는 목록.
+
+    :func:`list_lines` 는 "내가 쓸 수 있는 것"(공용 + 내 것)이라 관리자에게도
+    남이 만든 개인 결재선은 안 보인다. 여기는 소유자와 무관하게 공용 줄만
+    본다 — 관리자가 손대는 대상이 딱 그것이기 때문이다.
+    """
+    lines = _q(app_db,
+               "SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active, "
+               "       COALESCE(u.full_name, u.username) AS owner_name "
+               "  FROM approval_lines l "
+               "  LEFT JOIN users u ON u.id = l.owner_id "
+               " WHERE l.is_active = TRUE AND l.is_shared = TRUE "
+               " ORDER BY l.name")
+    for ln in lines:
+        ln["steps"] = _q(
+            app_db,
+            """
+            SELECT s.step_order, s.approver_id, u.username, u.full_name
+              FROM approval_line_steps s
+              LEFT JOIN users u ON u.id = s.approver_id
+             WHERE s.line_id = %s
+             ORDER BY s.step_order, s.id
+            """,
+            (ln["id"],),
+        )
+    return lines
+
+
+def default_policies_using_line(app_db, line_id: int) -> List[str]:
+    """이 결재선을 **기본 결재선으로 쓰고 있는** 행위들.
+
+    내리기 전에 물어봐야 한다. 그냥 내리면 그 행위의 기본 결재선이 죽은 줄을
+    가리키고, 사용자는 모달이 빈 채로 뜨는 것을 본다 — 화면 어디에도 이유가
+    안 나온다.
+    """
+    rows = _q(app_db,
+              "SELECT action_type FROM approval_action_policies WHERE default_line_id = %s",
+              (int(line_id),))
+    return [str(r["action_type"]) for r in rows]
+
+
+def delete_line(app_db, line_id: int, actor_id: int, is_superuser: bool,
+                *, force: bool = False) -> None:
     """**지우지 않고 내린다.** 이 줄을 쓴 결재 기록의 line_id 가 가리킬 곳이
-    사라지면, 나중에 "어느 결재선으로 올렸는가" 를 답할 수 없다."""
+    사라지면, 나중에 "어느 결재선으로 올렸는가" 를 답할 수 없다.
+
+    어떤 행위의 **기본 결재선**으로 쓰이는 줄은 그냥 내리지 않는다. 내리면 그
+    행위의 모달이 빈 채로 뜨는데 화면 어디에도 이유가 안 나온다. ``force`` 를
+    주면 그 행위들의 기본 결재선을 **함께 비우고** 내린다 — 호출부가 사용자에게
+    무엇이 비는지 보여 준 뒤에 쓰라는 뜻이다.
+    """
     owner = _q(app_db, "SELECT owner_id FROM approval_lines WHERE id = %s", (line_id,))
     if not owner:
         raise E.ApprovalError("결재선을 찾을 수 없습니다")
     if not is_superuser and int(owner[0]["owner_id"] or 0) != int(actor_id):
         raise E.ApprovalError("내가 만든 결재선만 지울 수 있습니다")
+
+    used_by = default_policies_using_line(app_db, line_id)
+    if used_by and not force:
+        raise E.ApprovalError(
+            "이 결재선을 기본 결재선으로 쓰는 행위가 있습니다: " + ", ".join(used_by))
+    if used_by:
+        _q(app_db,
+           "UPDATE approval_action_policies SET default_line_id = NULL "
+           "WHERE default_line_id = %s", (int(line_id),))
+
     _q(app_db, "UPDATE approval_lines SET is_active = FALSE WHERE id = %s", (line_id,))
 
 
