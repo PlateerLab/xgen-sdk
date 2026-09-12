@@ -60,8 +60,9 @@ class FakeDB:
         if s.startswith("INSERT INTO approval_requests"):
             row = {"id": self._next("approval_requests"), "title": p[0], "reason": p[1],
                    "action_type": p[2], "payload": p[3], "requester_id": p[4],
-                   "line_id": p[5], "status": "pending", "current_step_order": p[6],
-                   "target_ref": p[7], "canceled_by": None, "cancel_note": None,
+                   "line_id": p[5], "form_id": p[6], "form_name": p[7],
+                   "status": "pending", "current_step_order": p[8],
+                   "target_ref": p[9], "canceled_by": None, "cancel_note": None,
                    "decided_at": None, "applied_at": None, "apply_error": None,
                    "created_at": "T0"}
             self.t["approval_requests"].append(row)
@@ -191,6 +192,24 @@ class FakeDB:
                 "owner_id": p[3], "is_active": True,
                 "created_at": None, "updated_at": None})
             return [{"id": fid}]
+        if s.startswith("SELECT f.id, f.name, f.description, f.is_builtin"):
+            out = []
+            for f in self.t["approval_forms"]:
+                if "WHERE f.is_active = TRUE" in s and not f["is_active"]:
+                    continue
+                steps = [x for x in self.t["approval_form_steps"] if x["form_id"] == f["id"]]
+                out.append({
+                    **f,
+                    "approver_steps": max([x["step_index"] for x in steps] or [0]),
+                    "block_count": len([b for b in self.t["approval_form_blocks"]
+                                        if b["form_id"] == f["id"]]),
+                    "line_count": len([l for l in self.t["approval_lines"]
+                                       if l.get("form_id") == f["id"]]),
+                })
+            out.sort(key=lambda r: (not r["is_builtin"], r["id"]))
+            return out
+        if s.startswith("SELECT name FROM approval_forms"):
+            return [{"name": f["name"]} for f in self.t["approval_forms"]]
         if s.startswith("SELECT id, name, description, is_builtin, owner_id, is_active"):
             return [dict(f) for f in self.t["approval_forms"] if f["id"] == p[0]]
         if s.startswith("SELECT id, step_index, block_type, label, config, required, sort_order"):
@@ -209,7 +228,7 @@ class FakeDB:
                 "id": self._next("approval_form_steps"), "form_id": p[0],
                 "step_index": p[1], "title": p[2], "guide": p[3]})
             return []
-        if s.startswith("SELECT l.id, l.name,"):
+        if s.startswith("SELECT l.id, l.name, (SELECT COUNT(*)"):
             return [{"id": l["id"], "name": l["name"],
                      "n": len([x for x in self.t["approval_line_steps"] if x["line_id"] == l["id"]])}
                     for l in self.t["approval_lines"] if l.get("form_id") == p[0]]
@@ -249,9 +268,15 @@ class FakeDB:
             return [{"status": x["status"]} for x in self.t["approval_request_steps"]
                     if x["request_id"] == p[0] and x["step_order"] == p[1]
                     and x["approver_id"] == p[2]]
-        if s.startswith("SELECT form_id FROM approval_lines WHERE id"):
-            return [{"form_id": r.get("form_id")}
-                    for r in self.t["approval_lines"] if r["id"] == p[0]]
+        if s.startswith("SELECT f.id, f.name FROM approval_lines l"):
+            out = []
+            for l in self.t["approval_lines"]:
+                if l["id"] != p[0] or not l.get("form_id"):
+                    continue
+                f = next((x for x in self.t["approval_forms"] if x["id"] == l["form_id"]), None)
+                if f is not None:
+                    out.append({"id": f["id"], "name": f["name"]})
+            return out
         if s.startswith("SELECT step_index, block_type, label, config, required, sort_order"):
             return sorted(
                 [dict(b) for b in self.t["approval_form_blocks"] if b["form_id"] == p[0]],

@@ -128,6 +128,22 @@ def is_known(block_type: str) -> bool:
     return str(block_type or "") in REGISTRY
 
 
+def catalog() -> List[Dict[str, Any]]:
+    """화면이 [칸 추가] 목록을 그릴 재료.
+
+    레지스트리를 그대로 내보내는 이유는 관리 화면이 **코드가 아는 것만**
+    보여 주게 하기 위해서다. 화면에 따로 적어 두면 SDK 가 종류를 더할 때
+    화면이 모르고, 뺄 때는 그릴 수 없는 칸을 권한다.
+    """
+    return [{
+        "block_type": s.block_type,
+        "label": s.label,
+        "description": s.description,
+        "default_config": dict(s.default_config),
+        "actor": s.actor,
+    } for s in REGISTRY.values()]
+
+
 def parse_data(raw: Any) -> Any:
     """저장된 값을 파이썬으로. 깨진 JSON 은 **빈 값**으로 본다.
 
@@ -154,10 +170,38 @@ def is_filled(block: Dict[str, Any]) -> bool:
 
 
 def unfilled_required(blocks: Any, step_order: int) -> List[Dict[str, Any]]:
-    """그 단계에서 **아직 안 채운 필수 칸**들."""
+    """그 단계에서 **아직 안 채운 필수 칸**들.
+
+    화면이 "지금 내가 뭘 더 써야 하나" 를 물을 때 쓴다 — 내 칸만 본다.
+    """
+    return _unfilled(blocks, lambda s: s == int(step_order))
+
+
+def unfilled_upto(blocks: Any, step_order: int) -> List[Dict[str, Any]]:
+    """그 단계 **까지**(0..step_order) 안 채운 필수 칸들 — 승인 직전의 판정.
+
+    왜 제 단계만 보지 않는가
+    ------------------------
+    기안(0단계)의 칸은 **아무도 승인하지 않는다.** 기안자는 상신을 할 뿐이라
+    승인 판정을 거치지 않으므로, 제 단계만 보는 규칙에서는 기획서가 비어 있어도
+    2차가 승인해 버린다 — "기획서를 보고 위험도를 평가한다" 는 절차가 통째로
+    빈다.
+
+    앞 단계까지 함께 보는 것은 공짜다. 이미 승인한 단계는 그때 이 판정을
+    통과했으므로 여기서 다시 걸릴 일이 없고, 걸린다면 그건 누군가 승인 뒤에
+    칸을 비웠다는 뜻이라 어차피 막아야 한다.
+    """
+    return _unfilled(blocks, lambda s: s <= int(step_order))
+
+
+def _unfilled(blocks: Any, want) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for b in blocks or []:
-        if int(b.get("step_order", -1)) != int(step_order):
+        try:
+            step = int(b.get("step_order", -1))
+        except (TypeError, ValueError):
+            continue
+        if not want(step):
             continue
         if not b.get("required"):
             continue

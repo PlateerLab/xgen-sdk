@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from xgen_sdk.approval import blocks as blocks_mod
 from xgen_sdk.approval import engine as E
 from xgen_sdk.approval import notifier
+from xgen_sdk.approval import templates
 from xgen_sdk.approval.registry import (
     GENERIC, has_apply, has_reject, is_registered, is_user_submittable,
     owner_of, run_apply, run_reject,
@@ -50,8 +51,10 @@ def _notify_turn(app_db, req: Dict[str, Any]) -> None:
 def list_lines(app_db, user_id: int, include_private: bool = True) -> List[Dict[str, Any]]:
     """쓸 수 있는 결재선 — 공용 + 내가 만든 것."""
     sql = """
-        SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active
+        SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active,
+               l.form_id, f.name AS form_name
           FROM approval_lines l
+          LEFT JOIN approval_forms f ON f.id = l.form_id
          WHERE l.is_active = TRUE
            AND (l.is_shared = TRUE %s)
          ORDER BY l.is_shared DESC, l.name
@@ -95,8 +98,11 @@ def get_line(app_db, line_id: int) -> Optional[Dict[str, Any]]:
     """결재선 한 줄 + 결재자 순서. 내려간(비활성) 줄도 돌려준다 —
     "그때 어느 결재선으로 올렸나" 를 답해야 하기 때문이다."""
     rows = _q(app_db,
-              "SELECT id, name, description, owner_id, is_shared, is_active "
-              "FROM approval_lines WHERE id = %s", (int(line_id),))
+              "SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active, "
+              "       l.form_id, f.name AS form_name "
+              "  FROM approval_lines l "
+              "  LEFT JOIN approval_forms f ON f.id = l.form_id "
+              " WHERE l.id = %s", (int(line_id),))
     if not rows:
         return None
     line = dict(rows[0])
@@ -169,9 +175,11 @@ def list_all_shared_lines(app_db) -> List[Dict[str, Any]]:
     """
     lines = _q(app_db,
                "SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active, "
+               "       l.form_id, f.name AS form_name, "
                "       COALESCE(u.full_name, u.username) AS owner_name "
                "  FROM approval_lines l "
                "  LEFT JOIN users u ON u.id = l.owner_id "
+               "  LEFT JOIN approval_forms f ON f.id = l.form_id "
                " WHERE l.is_active = TRUE AND l.is_shared = TRUE "
                " ORDER BY l.name")
     for ln in lines:
@@ -238,6 +246,7 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
            line_id: Optional[int] = None,
            steps: Optional[Sequence[Dict[str, Any]]] = None,
            target_ref: Optional[str] = None,
+           block_values: Sequence[Dict[str, Any]] = (),
            via_user_api: bool = False) -> Dict[str, Any]:
     """결재를 올린다. 템플릿(``line_id``) 또는 직접 지정(``steps``) 중 하나.
 
@@ -248,6 +257,16 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         이 결재가 **무엇에 대한** 것인가 (``workflow:abc``, ``collection:사규``).
         같은 대상에 진행 중인 결재가 있으면 거절한다 — 두 건이 떠 있으면 어느
         쪽 승인이 그 대상을 바꾼 것인지 아무도 답할 수 없다.
+
+    ``block_values``
+        결재선에 양식이 붙어 있을 때 **기안 칸을 상신과 한 번에** 채운다.
+        각 항목은 ``{"sort_order": 1, "data": {...}}`` — 양식에서 본 기안
+        단계의 순번이 그대로 이름이다(``step_index`` 를 주면 0 이어야 한다).
+
+        상신을 먼저 하고 칸을 따로 채워도 된다(:func:`fill_block`). 그래서
+        여기서 안 채웠다고 막지 않는다 — 옛 상신 경로(배포·지식 등 기능 쪽
+        코드)가 이 인자를 모르는 채로도 계속 올라가야 하기 때문이다. 대신
+        빈 필수 칸이 있으면 :func:`engine.decide` 가 **승인을 막는다**.
 
     ``via_user_api``
         사람이 화면에서 직접 올린 것인가. 게이트 행위(배포·컬렉션 생성·도구
@@ -286,16 +305,19 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         # 자기 결재를 자기가 승인하면 결재가 아니다.
         raise E.ApprovalError("자기 자신을 결재선에 넣을 수 없습니다")
 
+    form = _line_form(app_db, line_id)
+
     rows = _q(
         app_db,
         """
         INSERT INTO approval_requests
             (title, reason, action_type, payload, requester_id, line_id,
-             status, current_step_order, target_ref)
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id
+             form_id, form_name, status, current_step_order, target_ref)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id
         """,
         (str(title).strip()[:200], (reason or "").strip() or None, action_type,
          json.dumps(payload or {}, ensure_ascii=False), requester_id, line_id,
+         (form or {}).get("id"), (form or {}).get("name"),
          min(s["step_order"] for s in planned), ref),
     )
     request_id = rows[0]["id"]
@@ -307,7 +329,11 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
            (request_id, s["step_order"], s["approver_id"], s["status"]))
     # 결재선에 양식이 붙어 있으면 **복사해 넣는다.** 단계와 같은 규칙이다 —
     # 심사 중에 요구 서류가 바뀌면 이미 승인한 사람의 판단 근거가 뒤바뀐다.
-    snapshot_form_blocks(app_db, request_id=request_id, line_id=line_id)
+    snapshot_form_blocks(app_db, request_id=request_id, line_id=line_id,
+                         form_id=(form or {}).get("id"))
+    if block_values:
+        _apply_draft_values(app_db, request_id=request_id,
+                            requester_id=requester_id, values=block_values)
     logger.info("결재 상신 #%s '%s' (기안 %s, 단계 %s)", request_id, title, requester_id, len(planned))
     out = get(app_db, request_id)
     # 첫 차례에게 알린다. 결재함을 주기적으로 열어 보는 사람은 없다 — 알림이
@@ -321,7 +347,8 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
         app_db,
         """
         SELECT r.id, r.title, r.reason, r.action_type, r.payload, r.requester_id,
-               r.line_id, r.status, r.current_step_order, r.decided_at,
+               r.line_id, r.form_id, r.form_name,
+               r.status, r.current_step_order, r.decided_at,
                r.applied_at, r.apply_error, r.created_at,
                r.target_ref, r.canceled_by, r.cancel_note,
                u.username AS requester_username, u.full_name AS requester_name
@@ -856,7 +883,7 @@ def validate_form_shape(steps: Sequence[Dict[str, Any]],
     if idx[-1] < 1:
         raise E.ApprovalError("결재자가 없습니다 — 2차 이상을 한 단계 이상 두세요")
 
-    out: List[Dict[str, Any]] = []
+    checked: List[Dict[str, Any]] = []
     for i, b in enumerate(blocks or []):
         btype = str(b.get("block_type") or "")
         if not blocks_mod.is_known(btype):
@@ -866,8 +893,22 @@ def validate_form_shape(steps: Sequence[Dict[str, Any]],
             raise E.ApprovalError(
                 f"{step + 1}차 단계가 없는데 그 단계에 칸이 있습니다: "
                 f"{b.get('label') or btype}")
-        out.append({**b, "block_type": btype, "step_index": step,
-                    "sort_order": int(b.get("sort_order") or (i + 1))})
+        checked.append({**b, "block_type": btype, "step_index": step,
+                        "_given": (int(b.get("sort_order") or 0), i)})
+
+    #: ``sort_order`` 는 **단계 안에서 1부터 빈틈없이** 다시 매긴다.
+    #:
+    #: 보기 순서를 맞추려는 게 아니다. 상신하며 칸 값을 함께 보낼 때 화면이
+    #: "양식의 이 칸" 을 가리키는 이름이 ``(단계, 순번)`` 이기 때문이다
+    #: (스냅샷 행은 상신 전에는 id 가 없다). 관리자가 순번을 겹쳐 적어 두면
+    #: 그 이름이 두 칸을 가리켜 값이 엉뚱한 칸에 들어간다.
+    out: List[Dict[str, Any]] = []
+    for step in idx:
+        mine = [b for b in checked if b["step_index"] == step]
+        mine.sort(key=lambda b: b["_given"])
+        for n, b in enumerate(mine, start=1):
+            b.pop("_given", None)
+            out.append({**b, "sort_order": n})
     return out
 
 
@@ -1014,6 +1055,29 @@ def delete_form(app_db, form_id: int) -> None:
     _q(app_db, "DELETE FROM approval_forms WHERE id = %s", (form_id,))
 
 
+def seed_builtin_forms(app_db) -> List[str]:
+    """XGEN 이 제공하는 템플릿을 **없는 것만** 심는다. 심은 이름들을 돌려준다.
+
+    이미 있는 것은 **손대지 않는다.** 같은 이름을 덮어쓰면, 그 양식을 쓰던
+    결재선이 어느 날 배포만으로 요구 서류가 달라진다 — 조직이 고쳐 쓰라고 준
+    것을 우리가 도로 바꾸는 셈이다. 템플릿 내용이 달라지면 **새 이름**으로
+    항목을 하나 더 둔다(옛 이름을 쓰던 조직은 그대로 간다).
+
+    기동 때마다 부를 수 있게 멱등이다.
+    """
+    have = {str(r["name"]) for r in _q(app_db, "SELECT name FROM approval_forms")}
+    made: List[str] = []
+    for t in templates.BUILTIN_TEMPLATES:
+        if t["name"] in have:
+            continue
+        create_form(app_db, name=t["name"], description=t.get("description") or "",
+                    owner_id=None, steps=t["steps"], blocks=t["blocks"], is_builtin=True)
+        made.append(t["name"])
+    if made:
+        logger.info("내장 결재 양식 %d벌 심음: %s", len(made), ", ".join(made))
+    return made
+
+
 def set_line_form(app_db, line_id: int, form_id: Optional[int]) -> None:
     """결재선에 양식을 붙이거나 뗀다.
 
@@ -1035,12 +1099,55 @@ def set_line_form(app_db, line_id: int, form_id: Optional[int]) -> None:
        (form_id, _now(), line_id))
 
 
-def snapshot_form_blocks(app_db, *, request_id: int, line_id: Optional[int]) -> None:
-    """상신 시 양식을 복사해 넣는다. 양식이 없으면 아무것도 하지 않는다."""
+def _line_form(app_db, line_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    """결재선에 붙은 양식 ``{"id", "name"}``. 없으면 ``None`` — [기본 결재]."""
     if not line_id:
-        return
-    rows = _q(app_db, "SELECT form_id FROM approval_lines WHERE id = %s", (line_id,))
-    form_id = rows[0]["form_id"] if rows else None
+        return None
+    rows = _q(app_db, """
+        SELECT f.id, f.name FROM approval_lines l
+          JOIN approval_forms f ON f.id = l.form_id
+         WHERE l.id = %s
+    """, (int(line_id),))
+    return dict(rows[0]) if rows else None
+
+
+def _apply_draft_values(app_db, *, request_id: int, requester_id: int,
+                        values: Sequence[Dict[str, Any]]) -> None:
+    """상신과 함께 온 **기안 칸** 값을 넣는다.
+
+    이름은 ``(0단계, 순번)`` 이다 — 스냅샷 행의 id 는 상신 전에는 없으므로
+    화면이 가리킬 수 있는 이름이 그것뿐이다(:func:`validate_form_shape` 가
+    순번을 단계마다 1부터 다시 매겨 그 이름이 한 칸만 가리키게 한다).
+
+    모르는 순번은 **조용히 버리지 않고** 막는다. 기획서를 붙였다고 믿은 채
+    상신됐는데 실제로는 빈 칸이면, 그 사실은 2차가 승인을 눌러 거절당할 때에야
+    드러난다.
+    """
+    snapped = {int(b["sort_order"]): b for b in list_request_blocks(app_db, request_id)
+               if int(b["step_order"]) == 0}
+    now = _now()
+    for v in values or []:
+        step = int(v.get("step_index") or 0)
+        if step != 0:
+            raise E.ApprovalError("상신할 때는 기안(1차) 칸만 채울 수 있습니다")
+        key = int(v.get("sort_order") or 0)
+        block = snapped.get(key)
+        if block is None:
+            raise E.ApprovalError(f"이 양식에 없는 칸입니다 (기안 {key}번)")
+        data = v.get("data")
+        _q(app_db, """
+            UPDATE approval_request_blocks
+               SET data = %s, filled_by = %s, filled_at = %s WHERE id = %s
+        """, (json.dumps(data, ensure_ascii=False) if data is not None else None,
+              requester_id, now, block["id"]))
+
+
+def snapshot_form_blocks(app_db, *, request_id: int, line_id: Optional[int] = None,
+                         form_id: Optional[int] = None) -> None:
+    """상신 시 양식을 복사해 넣는다. 양식이 없으면 아무것도 하지 않는다."""
+    if not form_id:
+        form = _line_form(app_db, line_id)
+        form_id = (form or {}).get("id")
     if not form_id:
         return
     for b in _q(app_db, """

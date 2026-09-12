@@ -16,7 +16,9 @@ XGEN 은 그런 절차를 **템플릿**으로 몇 벌 제공하고, 조직은 �
   · 칸은 **있는 단계에만** 놓인다 — 줄이면서 칸을 남기면 아무도 못 채운다.
   · 기본 템플릿은 고치지 못하고 **복사만** 된다.
   · 상신하면 **복사**된다. 뒤에 양식이 바뀌어도 진행 중인 결재는 그대로.
-  · 승인은 내 단계의 필수 칸을 다 채워야. **거절은 절대 막지 않는다.**
+  · 승인은 **내 단계까지**의 필수 칸을 다 채워야 — 기안 칸은 아무도 승인하지
+    않으므로 제 단계만 보면 기획서가 빈 채로 2차가 승인해 버린다.
+  · **거절은 절대 막지 않는다.**
 """
 
 from __future__ import annotations
@@ -70,6 +72,32 @@ def test_the_ai_deploy_template_is_the_three_step_procedure(db):
         (1, blocks.RISK_ASSESSMENT, True),
     ]
     assert form["steps"][2]["title"], "칸이 없는 3차도 이름을 갖는다 — 없으면 편집기에서 사라진다"
+
+
+def test_seeding_is_idempotent_and_never_overwrites(db):
+    """기동 때마다 불린다. 두 번째부터는 아무것도 하지 않아야 한다."""
+    made = store.seed_builtin_forms(db)
+    assert set(made) == {t["name"] for t in templates.BUILTIN_TEMPLATES}
+    assert store.seed_builtin_forms(db) == []
+    assert len(store.list_forms(db)) == len(templates.BUILTIN_TEMPLATES)
+
+
+def test_seeding_leaves_an_existing_name_alone(db):
+    """조직이 그 이름으로 자기 양식을 만들어 뒀다면 그것이 이긴다 — 덮으면 남의 절차를 바꾼다."""
+    mine = store.create_form(
+        db, name="AI Agent 배포 결재", owner_id=1,
+        steps=[{"step_index": 0}, {"step_index": 1}],
+        blocks=[{"step_index": 0, "block_type": blocks.TEXT, "label": "내 칸"}])
+    store.seed_builtin_forms(db)
+    form = store.get_form(db, mine)
+    assert [b["label"] for b in form["blocks"]] == ["내 칸"]
+
+
+def test_the_block_catalog_is_what_the_code_knows(db):
+    """화면은 코드가 아는 종류만 권할 수 있어야 한다 — 못 그리는 칸은 아무도 못 채운다."""
+    kinds = {c["block_type"] for c in blocks.catalog()}
+    assert kinds == set(blocks.known_types())
+    assert all(c["label"] and "actor" in c for c in blocks.catalog())
 
 
 # ── 모양 검증 ─────────────────────────────────────────────────────────
@@ -269,12 +297,79 @@ def test_only_the_drafter_fills_step_one(db):
                      data={"plan_id": 5})
 
 
-def test_the_second_approver_must_assess_before_approving(db):
+def _submit_with_plan(db, line_id, *, requester_id=1, title="배포"):
+    """기획서를 붙여 상신한다 — 기안 칸을 상신과 한 번에 채우는 길."""
+    return store.submit(db, requester_id=requester_id, title=title, line_id=line_id,
+                        block_values=[{"sort_order": 1, "data": {"plan_id": 5}}])
+
+
+def test_the_draft_can_be_filled_in_the_same_breath_as_the_submission(db):
+    """화면이 기획서를 받아 상신까지 한 번에 — 반쯤 빈 결재가 떠 있는 순간이 없다."""
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    req = _submit_with_plan(db, line_id)
+    plan = next(b for b in req["blocks"] if b["block_type"] == blocks.AGENT_DEV_PLAN)
+    filled = next(b for b in store.get(db, req["id"])["blocks"] if b["id"] == plan["id"])
+    assert blocks.parse_data(filled["data"]) == {"plan_id": 5}
+    assert filled["filled_by"] == 1
+
+
+def test_a_value_for_a_slot_the_form_does_not_have_is_refused(db):
+    """조용히 버리면 '붙였다고 믿은 채' 상신되고, 그 사실은 2차가 막힐 때야 드러난다."""
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    with pytest.raises(E.ApprovalError, match="없는 칸"):
+        store.submit(db, requester_id=1, title="배포", line_id=line_id,
+                     block_values=[{"sort_order": 99, "data": {"plan_id": 5}}])
+
+
+def test_the_submission_cannot_fill_someone_elses_step(db):
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    with pytest.raises(E.ApprovalError, match="기안"):
+        store.submit(db, requester_id=1, title="배포", line_id=line_id,
+                     block_values=[{"step_index": 1, "sort_order": 1,
+                                    "data": {"risk_level": "low"}}])
+
+
+def test_nobody_can_approve_while_the_draft_is_empty(db):
+    """기안 칸은 **아무도 승인하지 않는다** — 제 단계만 보면 그 칸은 영영 안 걸린다.
+
+    2차가 "기획서를 보고 위험도를 평가한다" 는 절차라, 기획서가 비어 있는데
+    승인이 되면 그 절차는 이름만 남는다.
+    """
     registry.register_action("generic", lambda *a, **k: None)
     form_id = _from_template(db)
     line_id = _line(db)
     store.set_line_form(db, line_id, form_id)
     rid = store.submit(db, requester_id=1, title="배포", line_id=line_id)["id"]
+
+    risk = next(b for b in store.get(db, rid)["blocks"]
+                if b["block_type"] == blocks.RISK_ASSESSMENT)
+    store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                     data={"risk_level": "medium"})
+    with pytest.raises(E.ApprovalError) as e:
+        store.decide(db, rid, actor_id=3, action="approved")
+    assert "Agent 기획서" in str(e.value)
+    assert "1차" in str(e.value), "누가 채워야 하는 칸인지 알 수 있어야 한다"
+
+    # 기안자가 뒤늦게 붙이면 그대로 이어서 돈다 — 결재가 죽지 않는다.
+    plan = next(b for b in store.get(db, rid)["blocks"]
+                if b["block_type"] == blocks.AGENT_DEV_PLAN)
+    store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
+                     data={"plan_id": 7})
+    store.decide(db, rid, actor_id=3, action="approved")
+
+
+def test_the_second_approver_must_assess_before_approving(db):
+    registry.register_action("generic", lambda *a, **k: None)
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    rid = _submit_with_plan(db, line_id)["id"]
 
     with pytest.raises(E.ApprovalError) as e:
         store.decide(db, rid, actor_id=3, action="approved")
@@ -287,6 +382,33 @@ def test_the_second_approver_must_assess_before_approving(db):
     store.decide(db, rid, actor_id=3, action="approved")
     store.decide(db, rid, actor_id=4, action="approved")
     assert store.get(db, rid)["status"] == "approved"
+
+
+def test_the_request_remembers_which_form_it_was_raised_on(db):
+    """양식이 지워져도 "무슨 양식이었나" 는 답할 수 있어야 한다 — 이름도 베낀다."""
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
+    assert req["form_id"] == form_id
+    assert req["form_name"] == "AI Agent 배포 결재"
+
+
+def test_a_line_with_no_form_records_no_form(db):
+    req = store.submit(db, requester_id=1, title="그냥 결재", line_id=_line(db))
+    assert req["form_id"] is None and req["form_name"] is None
+
+
+def test_slot_numbers_are_renumbered_so_one_name_means_one_slot(db):
+    """순번은 상신 때 칸을 가리키는 **이름**이다 — 겹치면 값이 엉뚱한 칸에 들어간다."""
+    fid = store.create_form(
+        db, name="겹친 순번", owner_id=1,
+        steps=[{"step_index": 0}, {"step_index": 1}],
+        blocks=[{"step_index": 0, "block_type": blocks.TEXT, "label": "가", "sort_order": 1},
+                {"step_index": 0, "block_type": blocks.TEXT, "label": "나", "sort_order": 1},
+                {"step_index": 1, "block_type": blocks.TEXT, "label": "다", "sort_order": 7}])
+    form = store.get_form(db, fid)
+    assert [(b["step_index"], b["sort_order"]) for b in form["blocks"]] == [(0, 1), (0, 2), (1, 1)]
 
 
 def test_rejection_never_waits_for_paperwork(db):

@@ -57,9 +57,12 @@ class LineDB:
         if s.startswith("DELETE FROM approval_line_steps"):
             self.steps = [x for x in self.steps if x["line_id"] != int(p[0])]
             return []
-        if s.startswith("SELECT id, name, description, owner_id, is_shared, is_active"):
+        # 한 줄 조회(get_line) — 공용 목록과 앞부분이 같아 뒷조건으로 가른다.
+        if s.startswith("SELECT l.id, l.name, l.description") and "WHERE l.id = %s" in s:
             ln = self._line(p[0])
-            return [dict(ln)] if ln else []
+            if not ln:
+                return []
+            return [{**ln, "form_id": ln.get("form_id"), "form_name": None}]
         if s.startswith("SELECT s.step_order, s.approver_id"):
             return self._steps_of(p[0])
         if s.startswith("SELECT owner_id FROM approval_lines"):
@@ -76,12 +79,13 @@ class LineDB:
             for i, a in enumerate(assigns):
                 ln[a.split(" = ")[0]] = p[i]
             return []
-        if s.startswith("SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active,"):
+        if s.startswith("SELECT l.id, l.name, l.description") and "AS owner_name" in s:
             out = []
             for ln in self.lines:
                 if ln["is_active"] and ln["is_shared"]:
                     u = self.users.get(ln["owner_id"], {})
-                    out.append({**ln, "owner_name": u.get("full_name") or u.get("username")})
+                    out.append({**ln, "form_id": ln.get("form_id"), "form_name": None,
+                                "owner_name": u.get("full_name") or u.get("username")})
             out.sort(key=lambda r: r["name"])
             return out
         if s.startswith("SELECT action_type FROM approval_action_policies"):

@@ -134,6 +134,11 @@ class ApprovalRequest(BaseModel):
         #: 어느 템플릿에서 왔는지(참고용). 단계는 스냅샷이라 이 값이 바뀌거나
         #: 템플릿이 지워져도 진행 중인 결재는 영향을 받지 않는다.
         self.line_id = kwargs.get('line_id')
+        #: 어느 **양식**으로 올라갔나 — 칸은 스냅샷이라 판정에는 쓰이지 않는다.
+        #: 화면이 단계 이름·안내문을 다시 읽어 오는 데만 쓴다. 양식이 지워져도
+        #: "무슨 양식이었나" 는 답할 수 있어야 해서 이름도 함께 베낀다.
+        self.form_id = kwargs.get('form_id')
+        self.form_name = kwargs.get('form_name')
         self.status = kwargs.get('status', 'pending')
         #: 지금 차례인 단계 번호(= 그 한 사람). 종결되면 마지막 값에서 멈춘다.
         self.current_step_order = kwargs.get('current_step_order', 1)
@@ -160,6 +165,10 @@ class ApprovalRequest(BaseModel):
             'payload': 'TEXT',
             'requester_id': 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
             'line_id': 'INTEGER REFERENCES approval_lines(id) ON DELETE SET NULL',
+            # 양식이 지워져도 결재 기록은 남아야 하므로 FK 는 SET NULL,
+            # 이름은 지워지지 않게 **값으로** 베껴 둔다.
+            'form_id': 'INTEGER REFERENCES approval_forms(id) ON DELETE SET NULL',
+            'form_name': 'VARCHAR(100)',
             'status': 'VARCHAR(20) NOT NULL DEFAULT \'pending\'',
             'current_step_order': 'INTEGER NOT NULL DEFAULT 1',
             'decided_at': 'TIMESTAMP',

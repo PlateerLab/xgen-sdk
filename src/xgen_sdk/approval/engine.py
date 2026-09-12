@@ -159,15 +159,24 @@ def decide(
         raise ApprovalError("이미 처리한 결재입니다")
     if mine["status"] != PENDING:
         raise ApprovalError("아직 차례가 아닙니다")
-    # 양식이 붙은 결재는 **내 단계의 필수 칸을 다 채워야** 승인할 수 있다.
+    # 양식이 붙은 결재는 **내 단계까지의 필수 칸이 다 차야** 승인할 수 있다.
+    #
+    # 기안(0단계)까지 함께 보는 이유는 기안자가 승인 판정을 거치지 않기
+    # 때문이다 — 제 단계만 보면 기획서가 빈 채로 2차가 승인해 버린다
+    # (:func:`blocks.unfilled_upto` 의 설명 참조).
     #
     # 거절은 막지 않는다. 거절에 서류를 요구하면 "이 건은 못 받는다" 는 말을
     # 하기 위해 먼저 그 건의 서류를 다 만들어야 한다 — 아무도 거절하지 못한다.
     if action == APPROVED:
-        missing = blocks_mod.unfilled_required(blocks, int(mine.get("step_order") or 0))
+        missing = blocks_mod.unfilled_upto(blocks, int(mine.get("step_order") or 0))
         if missing:
-            names = ", ".join(str(b.get("label") or b.get("block_type")) for b in missing[:5])
-            raise ApprovalError(f"이 단계에서 먼저 작성해야 합니다: {names}")
+            mystep = int(mine.get("step_order") or 0)
+            names = ", ".join(
+                (str(b.get("label") or b.get("block_type"))
+                 if int(b.get("step_order", 0)) == mystep
+                 else f"{int(b.get('step_order', 0)) + 1}차 {b.get('label') or b.get('block_type')}")
+                for b in missing[:5])
+            raise ApprovalError(f"아직 채우지 않은 칸이 있습니다: {names}")
 
     out_steps = [dict(s) for s in steps]
     target = _step_of(out_steps, actor_id)
