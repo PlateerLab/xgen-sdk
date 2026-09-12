@@ -30,7 +30,7 @@ from xgen_sdk.approval import (  # noqa: F401
     catalog, directory, engine, models, notifier, policy, registry, sql, store,
 )
 from xgen_sdk.approval.catalog import ActionSpec, CATALOG  # noqa: F401
-from xgen_sdk.approval.engine import ApprovalError  # noqa: F401
+from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired  # noqa: F401
 from xgen_sdk.approval.models import (  # noqa: F401
     ApprovalActionPolicy,
     ApprovalLine,
@@ -54,7 +54,7 @@ from xgen_sdk.approval.registry import (  # noqa: F401
 __all__ = [
     "catalog", "directory", "engine", "models", "notifier", "policy", "registry",
     "sql", "store",
-    "ActionSpec", "CATALOG", "ApprovalError",
+    "ActionSpec", "CATALOG", "ApprovalError", "ApprovalLineRequired",
     "ApprovalActionPolicy", "ApprovalLine", "ApprovalLineStep",
     "ApprovalPolicyHistory", "ApprovalRequest", "ApprovalRequestStep",
     "GENERIC", "TEST", "is_registered", "is_user_submittable", "known_actions",

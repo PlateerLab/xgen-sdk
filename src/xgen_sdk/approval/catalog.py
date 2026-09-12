@@ -11,6 +11,16 @@ documents, 클라우드·DB·도구는 workflow). 그런데 관리자가 "무엇
 그래서 목록은 SDK 에 선언하고, 세 레포가 같은 것을 본다. 여기에 없는
 ``action_type`` 은 결재로 올라가지 않는다.
 
+결재선은 누가 정하나
+--------------------
+**요청하는 사람이 그 자리에서 정한다.** 행위가 결재 필수로 켜져 있으면 화면이
+결재선 모달을 띄우고, 사용자가 결재자를 순서대로 고른 뒤에야 요청이 나간다.
+
+관리자가 [결재 목록 설정] 에서 지정하는 기본 결재선은 그 모달을 **미리 채워
+주는** 편의일 뿐, 없어도 된다. (한때 "결재선을 고를 자리가 없는 행위는 기본
+결재선 없이 켤 수 없다" 는 제약을 뒀다가 걷어냈다 — 자리가 없으면 만들면 되는
+것이지, 관리자가 모든 행위의 결재선을 미리 정해 두어야 할 이유가 없다.)
+
 무엇이 여기 없나
 ----------------
 사용자가 마이페이지에서 직접 올리는 자유 결재(``generic``·``test``)는 **게이트가
@@ -50,13 +60,6 @@ class ActionSpec:
     gated: bool = True
     #: 사람이 마이페이지에서 **직접** 올릴 수 있는가.
     user_submittable: bool = False
-    #: 이 행위를 하는 화면이 **결재선을 고를 자리**를 갖고 있는가.
-    #:
-    #: 배포는 모달이 있어서 사용자가 결재자를 고른다. 지식 컬렉션 생성이나 도구
-    #: 게시는 버튼 하나다 — 거기서 결재선을 물을 자리가 없다. 그런 행위를
-    #: 기본 결재선 없이 켜면 결재가 **아무에게도 가지 않고** 사용자는 그냥
-    #: "실패했습니다" 만 본다. 그래서 정책이 켜질 때 기본 결재선을 요구한다.
-    picks_line: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -67,7 +70,6 @@ class ActionSpec:
             "domain": self.domain,
             "gated": self.gated,
             "user_submittable": self.user_submittable,
-            "picks_line": self.picks_line,
         }
 
 
@@ -92,7 +94,7 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         AGENT_DEPLOY, "에이전트 배포",
         "에이전트를 외부(URL·임베드·API)로 여는 것",
-        OWNER_CORE, DOMAIN_DEPLOY, picks_line=True,
+        OWNER_CORE, DOMAIN_DEPLOY,
     ),
 
     # ── 지식 ──
