@@ -63,6 +63,10 @@ class XgenDB:
         self.config_db_manager = DatabaseManagerPsycopg3(database_config)
         self.logger = logger
         self._models_registry: List[Type[BaseModel]] = []
+        #: 만들지 **못한** 유일 인덱스 — 기존 데이터에 중복이 남아 있다는 뜻이다.
+        #: 비어 있지 않으면 그 불변은 지금 DB 가 집행하지 않는다. 값으로 들고
+        #: 있어야 운영이 "제약이 걸린 줄 알았다" 로 끝나지 않는다.
+        self._unenforced_unique_indexes: List[Dict[str, Any]] = []
 
         # 복구 및 재시도 설정
         self._max_retries = 3
@@ -311,14 +315,38 @@ class XgenDB:
                 self.logger.info("Creating table: %s", table_name)
                 self.config_db_manager.execute_query(create_query)
 
-                # 모델에 정의된 인덱스 자동 생성
-                for idx_name, columns in instance.get_indexes():
+                # 모델에 정의된 인덱스 자동 생성.
+                #
+                # 세 번째 원소가 True 면 **유일 인덱스**다. 유일 인덱스는 성능
+                # 장치가 아니라 불변의 집행이므로, 실패를 warning 으로 삼키면
+                # "있다고 믿는데 없는 제약" 이 남는다 — 그게 제약이 아예 없는
+                # 것보다 나쁘다. 기존 데이터에 중복이 있어서 못 만든 것인지
+                # 관리자가 알 수 있게 ERROR 로 남기고 이유를 함께 적는다.
+                for index_def in instance.get_indexes():
+                    idx_name, columns = index_def[0], index_def[1]
+                    unique = bool(index_def[2]) if len(index_def) > 2 else False
+                    kind = "UNIQUE INDEX" if unique else "INDEX"
                     try:
-                        idx_query = f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name}({columns})"
+                        idx_query = (
+                            f"CREATE {kind} IF NOT EXISTS {idx_name} "
+                            f"ON {table_name}({columns})"
+                        )
                         self.config_db_manager.execute_query(idx_query)
-                        self.logger.info("Created index %s for table: %s", idx_name, table_name)
+                        self.logger.info("Created %s %s for table: %s", kind.lower(), idx_name, table_name)
                     except Exception as e:
-                        self.logger.warning("Failed to create index %s for %s: %s", idx_name, table_name, e)
+                        if unique:
+                            # 집행되지 않은 불변은 조용히 넘어가면 안 된다.
+                            self.logger.error(
+                                "유일 제약을 만들지 못했습니다 — %s.%s 에 중복이 남아 있을 수 있습니다. "
+                                "해당 데이터를 정리한 뒤 재시작해야 제약이 집행됩니다: %s",
+                                table_name, columns, e,
+                            )
+                            self._unenforced_unique_indexes.append(
+                                {"table": table_name, "index": idx_name,
+                                 "columns": columns, "reason": str(e)}
+                            )
+                        else:
+                            self.logger.warning("Failed to create index %s for %s: %s", idx_name, table_name, e)
 
                 if hasattr(model_class, '__name__') and model_class.__name__ == 'PersistentConfigModel':
                     index_query = "CREATE INDEX IF NOT EXISTS idx_config_path ON persistent_configs(config_path)"
@@ -1273,6 +1301,14 @@ class XgenDB:
         except Exception as e:
             self.logger.error("Failed to find records in %s: %s", table_name, e)
             return {"success": False, "data": [], "row_count": 0, "error": str(e)}
+
+    def unenforced_unique_indexes(self) -> List[Dict[str, Any]]:
+        """만들지 못한 유일 인덱스 목록. 비어 있으면 전부 집행 중이다.
+
+        테이블 생성 시점의 결과를 그대로 들고 있는다 — 데이터를 정리한 뒤에는
+        재시작해야 다시 시도한다(그때 이 목록이 비워진다).
+        """
+        return list(self._unenforced_unique_indexes)
 
     def find_records_by_condition(self, table_name: str, conditions: Dict[str, Any],
                                    limit: int = 500, offset: int = 0,
