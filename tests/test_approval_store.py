@@ -210,6 +210,9 @@ class FakeDB:
             return out
         if s.startswith("SELECT name FROM approval_forms"):
             return [{"name": f["name"]} for f in self.t["approval_forms"]]
+        if s.startswith("SELECT id, name, notice, is_builtin FROM approval_forms"):
+            return [{"id": f["id"], "name": f["name"], "notice": f.get("notice"),
+                     "is_builtin": f.get("is_builtin")} for f in self.t["approval_forms"]]
         if s.startswith("SELECT id, name, description, notice, is_builtin, owner_id, is_active"):
             return [dict(f) for f in self.t["approval_forms"] if f["id"] == p[0]]
         if s.startswith("SELECT id, step_index, block_type, label, config, required, sort_order"):
