@@ -377,7 +377,16 @@ class ApprovalForm(BaseModel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.name = kwargs.get('name', '')
+        #: 관리자끼리 보는 한 줄 — 목록에서 "이게 무슨 양식인가" 를 말한다.
         self.description = kwargs.get('description')
+        #: **결재 문서에 그대로 실리는 안내.** 사내 품의서 아래쪽의 "■ 주 단위
+        #: 마감에 따라 …" 같은 것 — 기안자와 결재자가 **문서를 보면서** 읽는다.
+        #:
+        #: description 과 나누는 이유: 저쪽은 양식을 **고르는 사람**(관리자)에게
+        #: 하는 말이고, 이쪽은 그 양식으로 **결재를 올리고 받는 사람**에게 하는
+        #: 말이다. 한 칸에 합치면 목록이 문단으로 뭉개지거나, 문서에 "이 양식은
+        #: 3단계입니다" 같은 관리용 문장이 실린다.
+        self.notice = kwargs.get('notice')
         #: 시스템이 심은 양식. 고칠 수 없고 복사만 된다.
         self.is_builtin = bool(kwargs.get('is_builtin', False))
         self.owner_id = kwargs.get('owner_id')
@@ -390,6 +399,9 @@ class ApprovalForm(BaseModel):
         return {
             'name': 'VARCHAR(100) NOT NULL',
             'description': 'VARCHAR(500)',
+            # 여러 줄 안내라 길이를 묶지 않는다 — 사내 품의서의 하단 유의사항은
+            # 대여섯 줄이 예사고, 잘리면 잘린 줄이 가장 중요한 줄일 수 있다.
+            'notice': 'TEXT',
             'is_builtin': 'BOOLEAN NOT NULL DEFAULT FALSE',
             'owner_id': 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
             'is_active': 'BOOLEAN NOT NULL DEFAULT TRUE',
