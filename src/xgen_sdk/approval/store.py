@@ -1159,12 +1159,13 @@ def seed_builtin_forms(app_db) -> List[str]:
     기동 때마다 부를 수 있게 멱등이다.
     """
     have = {str(r["name"]): r for r in _q(
-        app_db, "SELECT id, name, notice, is_builtin FROM approval_forms")}
+        app_db, "SELECT id, name, description, notice, is_builtin FROM approval_forms")}
     made: List[str] = []
     for t in templates.BUILTIN_TEMPLATES:
         row = have.get(t["name"])
         if row is not None:
             _backfill_builtin_notice(app_db, row, t)
+            _refresh_builtin_texts(app_db, row, t)
             continue
         create_form(app_db, name=t["name"], description=t.get("description") or "",
                     notice=t.get("notice") or "",
@@ -1201,6 +1202,49 @@ def _backfill_builtin_notice(app_db, row: Dict[str, Any], template: Dict[str, An
     _q(app_db, "UPDATE approval_forms SET notice = %s, updated_at = %s WHERE id = %s",
        (notice, _now(), row["id"]))
     logger.info("내장 결재 양식 '%s' 의 빈 문서 안내를 채웠다", row.get("name"))
+
+
+def _refresh_builtin_texts(app_db, row: Dict[str, Any], template: Dict[str, Any]) -> None:
+    """우리가 심은 양식에 **예전 글이 글자 그대로** 남아 있으면 지금 글로 바꾼다.
+
+    절차가 바뀌었는데(위험도 평가를 거버넌스와 같은 기준으로) 이미 돌아가는
+    조직의 문서에는 "등급만 정하면 된다" 가 남으면, 문서가 사람에게 틀린 절차를
+    가르친다. 바꾸는 것은 **글**(설명·안내·단계 안내문)뿐이다 — 단계·칸·필수 여부는
+    결재선이 붙잡고 있는 절차라 건드리지 않는다.
+
+    조건은 :func:`_backfill_builtin_notice` 와 같다: 우리가 심은 양식만, 그리고
+    :data:`templates.LEGACY_TEXTS` 에 적힌 **예전 글과 정확히 같을 때만**.
+    """
+    if not row.get("is_builtin"):
+        return
+    legacy = templates.LEGACY_TEXTS.get(str(row.get("name") or ""))
+    if not legacy:
+        return
+    changed: List[str] = []
+    for field in ("description", "notice"):
+        now = str(row.get(field) or "")
+        new = str(template.get(field) or "").strip()
+        if new and now != new and now in (legacy.get(field) or []):
+            # field 는 위 튜플의 두 이름뿐이다 — 사용자 입력이 SQL 에 들어가지 않는다.
+            _q(app_db, f"UPDATE approval_forms SET {field} = %s, updated_at = %s WHERE id = %s",
+               (new, _now(), row["id"]))
+            changed.append(field)
+    old_guides = legacy.get("guides") or {}
+    if old_guides:
+        new_by_index = {int(s["step_index"]): str(s.get("guide") or "") for s in template["steps"]}
+        for step in _q(app_db, """
+            SELECT id, step_index, title, guide FROM approval_form_steps
+             WHERE form_id = %s ORDER BY step_index
+        """, (row["id"],)):
+            idx = int(step["step_index"])
+            now = str(step.get("guide") or "")
+            new = new_by_index.get(idx, "")
+            if new and now != new and now in (old_guides.get(idx) or []):
+                _q(app_db, "UPDATE approval_form_steps SET guide = %s WHERE id = %s",
+                   (new, step["id"]))
+                changed.append(f"{idx + 1}차 안내")
+    if changed:
+        logger.info("내장 결재 양식 '%s' 의 예전 글을 바꿨다: %s", row.get("name"), ", ".join(changed))
 
 
 def set_line_form(app_db, line_id: int, form_id: Optional[int]) -> None:

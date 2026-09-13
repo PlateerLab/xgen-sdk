@@ -29,6 +29,17 @@ from xgen_sdk.approval import blocks, engine as E, registry, store, templates
 from tests.test_approval_store import FakeDB
 
 
+def _assessed(level):
+    """거버넌스 기준을 **다 채운** 위험도 평가 — 등급만 있는 값은 채운 것이 아니다(1.61.0)."""
+    return {
+        "risk_level": level, "rationale": "근거", "impact_scope": "EMPLOYEES",
+        "item_scores": {"categories": [{"name": "합법성", "weight": "100",
+                                        "items": [{"id": "a", "name": "법", "score": 3,
+                                                   "risk_mitigation": 1}]}],
+                        "risk_traits": []},
+    }
+
+
 @pytest.fixture
 def db():
     d = FakeDB()
@@ -350,7 +361,7 @@ def test_nobody_can_approve_while_the_draft_is_empty(db):
     risk = next(b for b in store.get(db, rid)["blocks"]
                 if b["block_type"] == blocks.RISK_ASSESSMENT)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                     data={"risk_level": "medium"})
+                     data=_assessed("medium"))
     with pytest.raises(E.ApprovalError) as e:
         store.decide(db, rid, actor_id=3, action="approved")
     assert "Agent 기획서" in str(e.value)
@@ -378,7 +389,7 @@ def test_the_second_approver_must_assess_before_approving(db):
     risk = next(b for b in store.get(db, rid)["blocks"]
                 if b["block_type"] == blocks.RISK_ASSESSMENT)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                     data={"risk_level": "medium", "item_scores": {"a": 3}})
+                     data=_assessed("medium"))
     store.decide(db, rid, actor_id=3, action="approved")
     store.decide(db, rid, actor_id=4, action="approved")
     assert store.get(db, rid)["status"] == "approved"
@@ -442,11 +453,11 @@ def test_a_filled_block_is_applied_when_the_approval_lands(db):
         risk = next(b for b in store.get(db, rid)["blocks"]
                     if b["block_type"] == blocks.RISK_ASSESSMENT)
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                         data={"risk_level": "high"})
+                         data=_assessed("high"))
         store.decide(db, rid, actor_id=3, action="approved")
         assert seen == [], "중간 승인에서는 아직 아니다 — 최종이 나야 적용한다"
         store.decide(db, rid, actor_id=4, action="approved")
-        assert seen == [(rid, {"risk_level": "high"})]
+        assert seen == [(rid, _assessed("high"))]
     finally:
         blocks._APPLIERS.pop(blocks.RISK_ASSESSMENT, None)
 
@@ -466,7 +477,7 @@ def test_a_failing_block_applier_does_not_undo_the_approval(db):
         risk = next(b for b in store.get(db, rid)["blocks"]
                     if b["block_type"] == blocks.RISK_ASSESSMENT)
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                         data={"risk_level": "low"})
+                         data=_assessed("low"))
         store.decide(db, rid, actor_id=3, action="approved")
         store.decide(db, rid, actor_id=4, action="approved")
         out = store.get(db, rid)
@@ -489,7 +500,7 @@ def test_an_unfilled_optional_block_has_nothing_to_apply(db):
         risk = next(b for b in store.get(db, rid)["blocks"]
                     if b["block_type"] == blocks.RISK_ASSESSMENT)
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                         data={"risk_level": "low"})
+                         data=_assessed("low"))
         store.decide(db, rid, actor_id=3, action="approved")
         store.decide(db, rid, actor_id=4, action="approved")
         assert calls == [], "안 채운 선택 칸은 보낼 것이 없다"
@@ -667,7 +678,7 @@ def test_the_draft_is_locked_once_someone_has_approved(db):
     risk = next(b for b in store.get(db, rid)["blocks"]
                 if b["block_type"] == blocks.RISK_ASSESSMENT)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                     data={"risk_level": "low"})
+                     data=_assessed("low"))
     store.decide(db, rid, actor_id=3, action="approved")
 
     with pytest.raises(E.ApprovalError) as e:
@@ -690,12 +701,12 @@ def test_an_approver_cannot_edit_after_acting(db):
     risk = next(b for b in store.get(db, rid)["blocks"]
                 if b["block_type"] == blocks.RISK_ASSESSMENT)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                     data={"risk_level": "low"})
+                     data=_assessed("low"))
     store.decide(db, rid, actor_id=3, action="approved")
 
     with pytest.raises(E.ApprovalError):
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
-                         data={"risk_level": "critical"})
+                         data=_assessed("critical"))
 
 
 # ── 결재자를 손대도 양식은 따라온다 (실사고) ─────────────────────────
@@ -826,3 +837,69 @@ def test_seeding_does_not_touch_a_form_someone_else_made(db):
     )
     store.seed_builtin_forms(db)
     assert store.get_form(db, mine)["notice"] is None
+
+
+# ── 예전 글이 남은 내장 양식 (1.61.0) ────────────────────────────────
+
+
+def _legacy(name):
+    return templates.LEGACY_TEXTS[name]
+
+
+def test_seeding_replaces_our_old_wording_left_untouched(db):
+    """위험도 평가 기준이 거버넌스와 같아졌는데 이미 돌아가는 조직의 문서에
+    "등급만 정하면 된다" 가 남으면, 문서가 틀린 절차를 가르친다."""
+    store.seed_builtin_forms(db)
+    target = next(f for f in store.list_forms(db) if f["name"] == "AI Agent 배포 결재")
+    old = _legacy("AI Agent 배포 결재")
+    # 예전 버전이 심은 그대로인 것처럼 되돌린다.
+    db.execute_raw_query("UPDATE approval_forms SET description = %s, updated_at = %s WHERE id = %s",
+                         (old["description"][0], None, target["id"]))
+    db.execute_raw_query("UPDATE approval_forms SET notice = %s, updated_at = %s WHERE id = %s",
+                         (old["notice"][0], None, target["id"]))
+    for step in db.t["approval_form_steps"]:
+        if step["form_id"] == target["id"] and step["step_index"] in old["guides"]:
+            step["guide"] = old["guides"][step["step_index"]][0]
+
+    store.seed_builtin_forms(db)
+    now = templates.by_name("AI Agent 배포 결재")
+    form = store.get_form(db, target["id"])
+    assert form["description"] == now["description"]
+    assert form["notice"] == now["notice"]
+    guides = {s["step_index"]: s["guide"] for s in form["steps"]}
+    assert guides[1] == now["steps"][1]["guide"]
+    assert guides[2] == now["steps"][2]["guide"]
+    assert guides[0] == now["steps"][0]["guide"], "바뀌지 않은 단계는 그대로"
+
+
+def test_seeding_never_replaces_wording_that_differs_even_by_a_letter(db):
+    """글자 하나라도 다르면 **우리가 넣은 글인지 알 수 없다** — 건드리지 않는다."""
+    store.seed_builtin_forms(db)
+    target = next(f for f in store.list_forms(db) if f["name"] == "AI Agent 배포 결재")
+    db.execute_raw_query("UPDATE approval_forms SET notice = %s, updated_at = %s WHERE id = %s",
+                         ("■ 우리 조직이 적은 안내", None, target["id"]))
+    store.seed_builtin_forms(db)
+    assert store.get_form(db, target["id"])["notice"] == "■ 우리 조직이 적은 안내"
+
+
+def test_old_wording_on_a_form_someone_else_made_is_theirs(db):
+    """이름이 같고 글도 예전 것과 같아도 **사용자가 만든 양식**은 그의 것이다."""
+    old = _legacy("AI Agent 배포 결재")
+    mine = store.create_form(
+        db, name="AI Agent 배포 결재", description=old["description"][0], notice=old["notice"][0],
+        steps=[{"step_index": 0, "title": "1차 기안"},
+               {"step_index": 1, "title": "2차 결재", "guide": old["guides"][1][0]}],
+        blocks=[],
+    )
+    store.seed_builtin_forms(db)
+    form = store.get_form(db, mine)
+    assert form["notice"] == old["notice"][0]
+    assert {s["step_index"]: s["guide"] for s in form["steps"]}[1] == old["guides"][1][0]
+
+
+def test_the_shipped_deploy_template_passes_the_governance_standard_only_when_complete():
+    """우리가 주는 배포 템플릿의 평가 칸은 **거버넌스와 같은 기준**으로 채워져야 한다."""
+    t = templates.by_name("AI Agent 배포 결재")
+    risk = next(b for b in t["blocks"] if b["block_type"] == blocks.RISK_ASSESSMENT)
+    assert risk["required"] is True and risk["step_index"] == 1
+    assert not blocks.is_filled({"block_type": blocks.RISK_ASSESSMENT, "data": {"risk_level": "low"}})
