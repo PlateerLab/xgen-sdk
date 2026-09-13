@@ -47,11 +47,58 @@ def test_each_type_decides_what_filled_means():
     assert blocks.is_filled(_block(0, blocks.AGENT_DEV_PLAN, data='{"plan_id":3}'))
 
 
-def test_a_risk_assessment_without_a_grade_is_not_filled():
-    """항목 점수만 있고 등급이 없으면 읽는 사람은 결론을 모른다."""
-    scored = '{"item_scores":{"a":3,"b":5}}'
-    assert not blocks.is_filled(_block(1, blocks.RISK_ASSESSMENT, data=scored))
-    assert blocks.is_filled(_block(1, blocks.RISK_ASSESSMENT, data='{"risk_level":"high"}'))
+#: 거버넌스 [AI 위험도 평가] 가 원장에 쓰던 모양 그대로의 **다 채운** 평가.
+FULL_ASSESSMENT = {
+    "risk_level": "medium",
+    "rationale": "고객 데이터를 읽지만 쓰지 않는다",
+    "impact_scope": "EMPLOYEES",
+    "item_scores": {
+        "categories": [
+            {"name": "합법성", "weight": "50",
+             "items": [{"id": "legal-1", "name": "법 위반", "score": 3, "risk_mitigation": 2},
+                       {"id": "legal-2", "name": "AI기본법", "score": 0, "risk_mitigation": 1}]},
+        ],
+        "risk_traits": ["PERSONAL_DATA"],
+    },
+}
+
+
+def _with(**changes):
+    import copy
+    data = copy.deepcopy(FULL_ASSESSMENT)
+    data.update(changes)
+    return data
+
+
+def test_a_risk_assessment_is_filled_only_to_the_governance_standard():
+    """평가는 거버넌스 [AI 위험도 평가] 가 저장 전에 막던 **같은 기준**으로 채운다.
+
+    예전에는 등급 하나만 있으면 채운 것이었다 — 결재로 옮겨 온 평가가 "등급만
+    고른 평가" 가 되고, 같은 원장에 서로 다른 무게의 평가가 섞였다.
+    """
+    assert blocks.is_filled(_block(1, blocks.RISK_ASSESSMENT, data=FULL_ASSESSMENT))
+    # 점수 0 은 **매긴 점수**다 — 빈 것과 다르다.
+    assert blocks.assessment_gaps(FULL_ASSESSMENT) == []
+
+    assert not blocks.is_filled(_block(1, blocks.RISK_ASSESSMENT, data='{"risk_level":"high"}'))
+    assert blocks.assessment_gaps({"risk_level": "high"}) == ["항목 점수", "영향 범위", "판단 근거"]
+
+
+def test_each_missing_part_is_named():
+    """무엇이 남았는지 **이름으로** 말해야 결재자가 채운다."""
+    unscored = _with()
+    unscored["item_scores"]["categories"][0]["items"][1]["score"] = None
+    assert blocks.assessment_gaps(unscored) == ["항목 점수 1개"]
+    assert blocks.assessment_gaps(_with(impact_scope="")) == ["영향 범위"]
+    assert blocks.assessment_gaps(_with(rationale="   ")) == ["판단 근거"]
+    assert blocks.assessment_gaps(_with(risk_level="")) == ["위험 등급"]
+
+
+def test_a_score_must_be_a_number_not_a_flag():
+    """``True`` 는 파이썬에서 1 이지만 점수가 아니다."""
+    flagged = _with()
+    flagged["item_scores"]["categories"][0]["items"][0]["score"] = True
+    assert blocks.assessment_gaps(flagged) == ["항목 점수 1개"]
 
 
 def test_an_unknown_type_never_blocks():
@@ -75,7 +122,7 @@ def test_approval_needs_my_required_blocks_filled():
 
 
 def test_approval_passes_once_they_are_filled():
-    filled = [_block(1, blocks.RISK_ASSESSMENT, data='{"risk_level":"medium"}')]
+    filled = [_block(1, blocks.RISK_ASSESSMENT, data=FULL_ASSESSMENT)]
     req, steps = decide(_req(), _steps(), actor_id=10, action="approved", blocks=filled)
     assert steps[0]["status"] == "approved"
 

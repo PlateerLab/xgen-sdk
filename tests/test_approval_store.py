@@ -213,6 +213,15 @@ class FakeDB:
         if s.startswith("SELECT id, name, notice, is_builtin FROM approval_forms"):
             return [{"id": f["id"], "name": f["name"], "notice": f.get("notice"),
                      "is_builtin": f.get("is_builtin")} for f in self.t["approval_forms"]]
+        if s.startswith("SELECT id, name, description, notice, is_builtin FROM approval_forms"):
+            return [{"id": f["id"], "name": f["name"], "description": f.get("description"),
+                     "notice": f.get("notice"), "is_builtin": f.get("is_builtin")}
+                    for f in self.t["approval_forms"]]
+        if s.startswith("UPDATE approval_form_steps SET guide = %s WHERE id = %s"):
+            for x in self.t["approval_form_steps"]:
+                if x["id"] == p[1]:
+                    x["guide"] = p[0]
+            return []
         if s.startswith("SELECT id, name, description, notice, is_builtin, owner_id, is_active"):
             return [dict(f) for f in self.t["approval_forms"] if f["id"] == p[0]]
         if s.startswith("SELECT id, step_index, block_type, label, config, required, sort_order"):

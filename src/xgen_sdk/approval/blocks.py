@@ -75,15 +75,54 @@ def _has_plan(data: Any) -> bool:
     return data.get("plan_id") is not None
 
 
-def _has_assessment(data: Any) -> bool:
-    """위험도 평가는 **등급이 정해져야** 채운 것이다.
+def _is_score(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
-    항목 점수만 있고 등급이 없으면 읽는 사람은 결론을 모른다 — 결재는 결론을
-    보고 결정하는 자리다.
+
+def assessment_gaps(data: Any) -> List[str]:
+    """위험도 평가에서 **아직 채우지 않은 것** — 비어 있으면 다 채운 평가다.
+
+    거버넌스의 [AI 위험도 평가] 가 저장 직전에 막던 것과 **같은 기준**이다:
+    평가 템플릿의 모든 항목에 사전 위험 점수, 영향 범위, 판단 근거. 여기에
+    점수로 정해진 등급이 더해진다. 평가가 결재로 옮겨 오면서 기준이 "등급만
+    고르면 된다" 로 느슨해지면, 같은 원장에 서로 다른 무게의 평가가 섞인다 —
+    대시보드는 둘을 구별하지 못한다.
+
+    값의 모양(``item_scores``)은 거버넌스가 원장에 쓰던 ``policy_data`` 그대로다::
+
+        {"categories": [{"name", "weight", "items": [{"id", "name", "score", "risk_mitigation"}]}],
+         "risk_traits": [...]}
     """
     if not isinstance(data, dict):
-        return False
-    return bool(str(data.get("risk_level") or "").strip())
+        return ["평가"]
+    gaps: List[str] = []
+    snapshot = data.get("item_scores")
+    categories = snapshot.get("categories") if isinstance(snapshot, dict) else None
+    items = [
+        it
+        for cat in (categories if isinstance(categories, list) else [])
+        if isinstance(cat, dict)
+        for it in (cat.get("items") if isinstance(cat.get("items"), list) else [])
+        if isinstance(it, dict)
+    ]
+    if not items:
+        gaps.append("항목 점수")
+    else:
+        empty = sum(1 for it in items if not _is_score(it.get("score")))
+        if empty:
+            gaps.append(f"항목 점수 {empty}개")
+    if not str(data.get("impact_scope") or "").strip():
+        gaps.append("영향 범위")
+    if not str(data.get("rationale") or "").strip():
+        gaps.append("판단 근거")
+    if not str(data.get("risk_level") or "").strip():
+        gaps.append("위험 등급")
+    return gaps
+
+
+def _has_assessment(data: Any) -> bool:
+    """위험도 평가는 **거버넌스 기준을 다 채워야** 채운 것이다 — :func:`assessment_gaps`."""
+    return isinstance(data, dict) and not assessment_gaps(data)
 
 
 REGISTRY: Dict[str, BlockSpec] = {
@@ -108,7 +147,10 @@ REGISTRY: Dict[str, BlockSpec] = {
     ),
     RISK_ASSESSMENT: BlockSpec(
         RISK_ASSESSMENT, "AI 위험도 평가",
-        description="평가 템플릿을 채우고 등급을 정한다.",
+        description=(
+            "거버넌스 [AI 위험도 평가] 와 같은 평가 — 항목별 사전 위험·위험 경감, "
+            "영향 범위, 위험 특성, 판단 근거. 등급은 점수로 정해진다."
+        ),
         is_filled=_has_assessment,
         default_config={"template_id": None},
         actor="approver",
