@@ -723,3 +723,67 @@ def test_the_form_survives_when_the_requester_edits_the_approvers(db):
     assert [b["block_type"] for b in out["blocks"]] == [
         blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.RISK_ASSESSMENT]
     assert [s["approver_id"] for s in out["steps"]] == [4, 3], "결재자는 고른 대로"
+
+
+# ── 문서에 실리는 안내 (notice) ──────────────────────────────────────
+
+
+def test_the_notice_is_for_the_document_not_the_admin_list(db):
+    """``description`` 과 ``notice`` 는 **듣는 사람이 다르다.**
+
+    description 은 양식을 고르는 관리자에게, notice 는 그 양식으로 결재를 올리고
+    받는 사람에게 하는 말이다. 사내 품의서 아래쪽의 "■ 주 단위 마감에 따라 …"
+    가 notice 자리다. 한 칸에 합치면 목록이 문단으로 뭉개지거나, 문서에 "이
+    양식은 3단계입니다" 같은 관리용 문장이 실린다.
+    """
+    fid = store.create_form(
+        db, name="안내가 붙은 양식", description="관리자 목록에서 보이는 한 줄",
+        notice="■ 첫째 줄\n■ 둘째 줄",
+        steps=[{"step_index": 0, "title": "1차 기안"}, {"step_index": 1, "title": "2차 결재"}],
+        blocks=[{"step_index": 0, "block_type": blocks.TEXT, "label": "내용",
+                 "required": True, "sort_order": 1}],
+    )
+    form = store.get_form(db, fid)
+    assert form["description"] == "관리자 목록에서 보이는 한 줄"
+    assert form["notice"] == "■ 첫째 줄\n■ 둘째 줄", "여러 줄이 그대로 남아야 한다"
+
+
+def test_the_notice_can_be_edited_and_cleared(db):
+    """빈 문자열은 **지우라는 뜻**이다 — 안내를 없애는 길이 있어야 한다."""
+    fid = store.create_form(
+        db, name="안내 고치기", notice="■ 처음 안내",
+        steps=[{"step_index": 0, "title": "1차 기안"}, {"step_index": 1, "title": "2차 결재"}],
+        blocks=[],
+    )
+    store.update_form(db, fid, notice="■ 바뀐 안내")
+    assert store.get_form(db, fid)["notice"] == "■ 바뀐 안내"
+
+    store.update_form(db, fid, notice="")
+    assert store.get_form(db, fid)["notice"] is None
+
+    # 주지 않으면 그대로 둔다 — 이름만 고치러 와서 안내가 날아가면 안 된다.
+    store.update_form(db, fid, notice="■ 다시 붙인 안내")
+    store.update_form(db, fid, name="이름만 바꿈")
+    assert store.get_form(db, fid)["notice"] == "■ 다시 붙인 안내"
+
+
+def test_a_copy_carries_the_notice(db):
+    """안내까지 따라와야 복사본이 **같은 양식**이다 — 이름만 같고 문서에 적힌
+    규칙이 빠진 복사본은 쓰는 사람을 속인다."""
+    src = store.create_form(
+        db, name="원본", description="설명", notice="■ 지켜야 할 것",
+        steps=[{"step_index": 0, "title": "1차 기안"}, {"step_index": 1, "title": "2차 결재"}],
+        blocks=[{"step_index": 0, "block_type": blocks.TEXT, "label": "내용",
+                 "required": True, "sort_order": 1}],
+        is_builtin=True,
+    )
+    copied = store.copy_form(db, src, name="사본", owner_id=7)
+    assert store.get_form(db, copied)["notice"] == "■ 지켜야 할 것"
+
+
+def test_the_builtin_templates_ship_with_a_document_notice(db):
+    """XGEN 이 주는 템플릿은 **문서에 실릴 안내까지** 들고 온다 — 빈 문서 틀만
+    주면 조직은 무엇을 적어야 하는지 모른 채 시작한다."""
+    store.seed_builtin_forms(db)
+    for f in store.list_forms(db):
+        assert store.get_form(db, f["id"])["notice"], f"{f['name']} 에 안내가 없다"

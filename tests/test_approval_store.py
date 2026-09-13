@@ -188,8 +188,8 @@ class FakeDB:
         if s.startswith("INSERT INTO approval_forms"):
             fid = self._next("approval_forms")
             self.t["approval_forms"].append({
-                "id": fid, "name": p[0], "description": p[1], "is_builtin": p[2],
-                "owner_id": p[3], "is_active": True,
+                "id": fid, "name": p[0], "description": p[1], "notice": p[2],
+                "is_builtin": p[3], "owner_id": p[4], "is_active": True,
                 "created_at": None, "updated_at": None})
             return [{"id": fid}]
         if s.startswith("SELECT f.id, f.name, f.description, f.is_builtin"):
@@ -210,7 +210,7 @@ class FakeDB:
             return out
         if s.startswith("SELECT name FROM approval_forms"):
             return [{"name": f["name"]} for f in self.t["approval_forms"]]
-        if s.startswith("SELECT id, name, description, is_builtin, owner_id, is_active"):
+        if s.startswith("SELECT id, name, description, notice, is_builtin, owner_id, is_active"):
             return [dict(f) for f in self.t["approval_forms"] if f["id"] == p[0]]
         if s.startswith("SELECT id, step_index, block_type, label, config, required, sort_order"):
             return sorted(

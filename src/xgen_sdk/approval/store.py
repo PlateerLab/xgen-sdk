@@ -907,7 +907,7 @@ def list_forms(app_db, *, include_inactive: bool = False) -> List[Dict[str, Any]
 
 def get_form(app_db, form_id: int) -> Optional[Dict[str, Any]]:
     rows = _q(app_db, """
-        SELECT id, name, description, is_builtin, owner_id, is_active
+        SELECT id, name, description, notice, is_builtin, owner_id, is_active
         FROM approval_forms WHERE id = %s
     """, (form_id,))
     if not rows:
@@ -985,16 +985,22 @@ def validate_form_shape(steps: Sequence[Dict[str, Any]],
 def create_form(app_db, *, name: str, description: str = "", owner_id: Optional[int] = None,
                 steps: Sequence[Dict[str, Any]] = (),
                 blocks: Sequence[Dict[str, Any]] = (),
+                notice: str = "",
                 is_builtin: bool = False) -> int:
-    """양식을 만든다. 템플릿에서 복사하든 처음부터 만들든 여기로 온다."""
+    """양식을 만든다. 템플릿에서 복사하든 처음부터 만들든 여기로 온다.
+
+    ``notice`` 는 **결재 문서에 그대로 실리는 안내**다 — 기안자와 결재자가 문서를
+    보면서 읽는다. 관리자끼리 보는 한 줄은 ``description`` 이다.
+    """
     name = str(name or "").strip()
     if not name:
         raise E.ApprovalError("양식 이름이 필요합니다")
     checked = validate_form_shape(steps, blocks)
     rows = _q(app_db, """
-        INSERT INTO approval_forms (name, description, is_builtin, owner_id, is_active)
-        VALUES (%s, %s, %s, %s, TRUE) RETURNING id
-    """, (name[:100], (description or "").strip()[:500] or None, bool(is_builtin), owner_id))
+        INSERT INTO approval_forms (name, description, notice, is_builtin, owner_id, is_active)
+        VALUES (%s, %s, %s, %s, %s, TRUE) RETURNING id
+    """, (name[:100], (description or "").strip()[:500] or None,
+          (notice or "").strip() or None, bool(is_builtin), owner_id))
     form_id = rows[0]["id"]
     _write_steps(app_db, form_id, steps)
     _write_blocks(app_db, form_id, checked)
@@ -1032,7 +1038,8 @@ def default_step_title(step_index: int) -> str:
 
 
 def update_form(app_db, form_id: int, *, name: Optional[str] = None,
-                description: Optional[str] = None, is_active: Optional[bool] = None,
+                description: Optional[str] = None, notice: Optional[str] = None,
+                is_active: Optional[bool] = None,
                 steps: Optional[Sequence[Dict[str, Any]]] = None,
                 blocks: Optional[Sequence[Dict[str, Any]]] = None) -> None:
     """양식을 고친다.
@@ -1077,6 +1084,9 @@ def update_form(app_db, form_id: int, *, name: Optional[str] = None,
         sets.append("name = %s"); args.append(str(name).strip()[:100])
     if description is not None:
         sets.append("description = %s"); args.append(str(description).strip()[:500] or None)
+    if notice is not None:
+        # 빈 문자열은 **지우라는 뜻**이다 — 안내를 없애는 길이 있어야 한다.
+        sets.append("notice = %s"); args.append(str(notice).strip() or None)
     if is_active is not None:
         sets.append("is_active = %s"); args.append(bool(is_active))
     if sets:
@@ -1110,6 +1120,9 @@ def copy_form(app_db, form_id: int, *, name: str, owner_id: Optional[int] = None
         raise E.ApprovalError("양식을 찾을 수 없습니다")
     return create_form(
         app_db, name=name, description=src.get("description") or "",
+        # 안내까지 따라와야 복사본이 **같은 양식**이다 — 이름만 같고 문서에
+        # 적힌 규칙이 빠진 복사본은 쓰는 사람을 속인다.
+        notice=src.get("notice") or "",
         owner_id=owner_id,
         steps=[{"step_index": st["step_index"], "title": st["title"], "guide": st.get("guide")}
                for st in src.get("steps") or []],
@@ -1151,6 +1164,7 @@ def seed_builtin_forms(app_db) -> List[str]:
         if t["name"] in have:
             continue
         create_form(app_db, name=t["name"], description=t.get("description") or "",
+                    notice=t.get("notice") or "",
                     owner_id=None, steps=t["steps"], blocks=t["blocks"], is_builtin=True)
         made.append(t["name"])
     if made:
