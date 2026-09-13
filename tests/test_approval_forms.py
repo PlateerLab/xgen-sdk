@@ -787,3 +787,42 @@ def test_the_builtin_templates_ship_with_a_document_notice(db):
     store.seed_builtin_forms(db)
     for f in store.list_forms(db):
         assert store.get_form(db, f["id"])["notice"], f"{f['name']} 에 안내가 없다"
+
+
+def test_seeding_fills_a_missing_notice_on_our_own_templates(db):
+    """안내는 템플릿보다 **늦게 생겼다** — 이미 돌아가는 곳도 받아야 한다.
+
+    이름이 같다는 이유로 건너뛰면, 우리가 함께 주기로 한 안내가 새로 설치한
+    곳에만 있게 된다. 그건 제품이 주는 것이 아니다.
+    """
+    store.seed_builtin_forms(db)
+    target = next(f for f in store.list_forms(db) if f["name"] == "AI Agent 배포 결재")
+    # 안내가 없던 시절에 심긴 것처럼 만든다.
+    db.execute_raw_query("UPDATE approval_forms SET notice = %s, updated_at = %s WHERE id = %s",
+                         (None, None, target["id"]))
+    assert store.get_form(db, target["id"])["notice"] is None
+
+    store.seed_builtin_forms(db)
+    assert store.get_form(db, target["id"])["notice"], "빈 안내가 채워져야 한다"
+
+
+def test_seeding_never_overwrites_a_notice_that_is_already_there(db):
+    """채워져 있으면 건드리지 않는다 — 덮어쓰면 배포가 조직의 문서를 바꾼다."""
+    store.seed_builtin_forms(db)
+    target = next(f for f in store.list_forms(db) if f["name"] == "기본 결재 (2단계)")
+    db.execute_raw_query("UPDATE approval_forms SET notice = %s, updated_at = %s WHERE id = %s",
+                         ("■ 우리 조직이 적은 안내", None, target["id"]))
+
+    store.seed_builtin_forms(db)
+    assert store.get_form(db, target["id"])["notice"] == "■ 우리 조직이 적은 안내"
+
+
+def test_seeding_does_not_touch_a_form_someone_else_made(db):
+    """이름이 같아도 **사용자가 만든 것**은 그의 것이다."""
+    mine = store.create_form(
+        db, name="AI Agent 배포 결재", description="이름만 같은 내 양식",
+        steps=[{"step_index": 0, "title": "1차 기안"}, {"step_index": 1, "title": "2차 결재"}],
+        blocks=[],
+    )
+    store.seed_builtin_forms(db)
+    assert store.get_form(db, mine)["notice"] is None

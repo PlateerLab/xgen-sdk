@@ -1158,10 +1158,13 @@ def seed_builtin_forms(app_db) -> List[str]:
 
     기동 때마다 부를 수 있게 멱등이다.
     """
-    have = {str(r["name"]) for r in _q(app_db, "SELECT name FROM approval_forms")}
+    have = {str(r["name"]): r for r in _q(
+        app_db, "SELECT id, name, notice, is_builtin FROM approval_forms")}
     made: List[str] = []
     for t in templates.BUILTIN_TEMPLATES:
-        if t["name"] in have:
+        row = have.get(t["name"])
+        if row is not None:
+            _backfill_builtin_notice(app_db, row, t)
             continue
         create_form(app_db, name=t["name"], description=t.get("description") or "",
                     notice=t.get("notice") or "",
@@ -1170,6 +1173,34 @@ def seed_builtin_forms(app_db) -> List[str]:
     if made:
         logger.info("내장 결재 양식 %d벌 심음: %s", len(made), ", ".join(made))
     return made
+
+
+def _backfill_builtin_notice(app_db, row: Dict[str, Any], template: Dict[str, Any]) -> None:
+    """우리가 심은 양식의 **비어 있는** 안내만 채운다.
+
+    안내(``notice``)는 템플릿보다 늦게 생겼다. 이미 돌아가는 조직의 내장 양식은
+    이름이 같다는 이유로 시딩에서 건너뛰어, 우리가 함께 주기로 한 안내를 영영
+    받지 못한다 — 새로 설치한 곳에만 있는 안내는 제품이 주는 것이 아니다.
+
+    그래서 여기서만 예외를 둔다. 다만 조건이 둘이다:
+
+      * **우리가 심은 양식**(``is_builtin``)만. 사용자가 만든 양식은 이름이
+        같아도 그의 것이다.
+      * **비어 있을 때만**. 채워져 있으면 건드리지 않는다 — 덮어쓰면 배포가
+        조직의 문서를 바꾸는 것이고, 그것이 시딩을 "없는 이름만" 으로 묶어 둔
+        이유다. 내장 양식은 사용자가 고칠 수 없으니 여기 값이 있다면 그것은
+        우리가 넣은 것이고, 우리 것끼리 조용히 덮어쓸 이유도 없다.
+    """
+    if not row.get("is_builtin"):
+        return
+    if str(row.get("notice") or "").strip():
+        return
+    notice = str(template.get("notice") or "").strip()
+    if not notice:
+        return
+    _q(app_db, "UPDATE approval_forms SET notice = %s, updated_at = %s WHERE id = %s",
+       (notice, _now(), row["id"]))
+    logger.info("내장 결재 양식 '%s' 의 빈 문서 안내를 채웠다", row.get("name"))
 
 
 def set_line_form(app_db, line_id: int, form_id: Optional[int]) -> None:
