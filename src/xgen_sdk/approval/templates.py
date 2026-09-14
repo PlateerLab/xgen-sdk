@@ -43,7 +43,7 @@ BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
              "guide": "배포할 Agent의 기획서를 첨부합니다. 참고 자료가 있으면 함께 올립니다."},
             {"step_index": 1, "title": "2차 AI 위험도 심사",
              "guide": (
-                 "기획서와 Agent 구성을 보고 거버넌스 [AI 위험도 평가]와 같은 기준으로 평가합니다. "
+                 "기획서와 Agent 구성을 보고 AI 위험도를 평가합니다. "
                  "항목 점수, 영향 범위, 판단 근거를 모두 채워야 다음으로 넘어갑니다."
              )},
             {"step_index": 2, "title": "3차 최종 결정",
@@ -171,7 +171,20 @@ _V1_62_0: Dict[str, Dict[str, Any]] = {
     },
 }
 
-for _name, _old in _V1_62_0.items():
+#: 2.1.0 까지의 2차 안내. 2.1.1 에서 없어진 거버넌스 [AI 위험도 평가] 화면 이름을 뺐다
+#: (위험도 평가는 결재 양식의 칸으로만 한다).
+_V2_1_0: Dict[str, Dict[str, Any]] = {
+    "AI Agent 배포 결재": {
+        "guides": {
+            1: [
+                "기획서와 Agent 구성을 보고 거버넌스 [AI 위험도 평가]와 같은 기준으로 평가합니다. "
+                "항목 점수, 영향 범위, 판단 근거를 모두 채워야 다음으로 넘어갑니다.",
+            ],
+        },
+    },
+}
+
+for _name, _old in (*_V1_62_0.items(), *_V2_1_0.items()):
     _entry = LEGACY_TEXTS.setdefault(_name, {})
     for _field in ("description", "notice"):
         _entry.setdefault(_field, []).extend(_old.get(_field) or [])

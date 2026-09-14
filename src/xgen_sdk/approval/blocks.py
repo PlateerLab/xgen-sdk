@@ -147,7 +147,7 @@ REGISTRY: Dict[str, BlockSpec] = {
     ),
     RISK_ASSESSMENT: BlockSpec(
         RISK_ASSESSMENT, "AI 위험도 평가",
-        description="거버넌스 [AI 위험도 평가]와 같은 기준으로 평가하는 칸. 등급은 점수로 정해집니다.",
+        description="AI 위험도 평가지로 항목마다 점수를 매기는 칸입니다. 등급은 점수로 정해집니다.",
         is_filled=_has_assessment,
         default_config={"template_id": None},
         actor="approver",
