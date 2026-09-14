@@ -831,6 +831,22 @@ def search(app_db, *, statuses: Optional[Sequence[str]] = None,
     기억하는 것은 보통 둘 중 하나다.
 
     반환: ``{"rows": [...], "total": N}`` — 화면이 쪽수를 매길 수 있게.
+
+    각 행에는 **지금 어디쯤인가** 도 함께 실린다(2.1.0). ``waiting_on`` 은
+    "누구" 만 말해서, 관리자는 그 사람이 결재 문서의 몇 차에 서 있는지 알 수
+    없었다.
+
+      · ``current_step_order`` — ``approval_requests`` 에 저장된 그대로.
+        끝난 결재(승인·반려·취소)도 저장된 값을 손대지 않고 준다.
+      · ``form_id`` / ``form_name`` — 상신 때 붙은 양식(없으면 ``None``).
+      · ``current_step_title`` — **진행 중(pending)일 때만** 채운다. 양식의
+        ``approval_form_steps`` 에서 ``step_index = current_step_order`` 인
+        단계 이름, 양식이 없거나 그 단계가 없으면 :func:`default_step_title`
+        (결재 문서와 같은 번호 — 차례 k 는 "(k+1)차"). 끝난 결재는 ``None``
+        — 더는 어느 단계에 "있지" 않다.
+
+    단계 이름은 행마다 따로 묻지 않고 ``LEFT JOIN`` 한 번으로 붙인다
+    (``UNIQUE(form_id, step_index)`` 라 행이 불어나지 않는다).
     """
     where: List[str] = []
     params: List[Any] = []
@@ -871,7 +887,9 @@ def search(app_db, *, statuses: Optional[Sequence[str]] = None,
         SELECT r.id, r.title, r.action_type, r.status, r.created_at, r.decided_at,
                r.applied_at, r.apply_error, r.target_ref, r.requester_id,
                r.canceled_by, r.cancel_note,
+               r.current_step_order, r.form_id, r.form_name,
                u.username AS requester_username, u.full_name AS requester_name,
+               fs.title AS form_step_title,
                (SELECT COALESCE(cu.full_name, cu.username)
                   FROM approval_request_steps c
                   LEFT JOIN users cu ON cu.id = c.approver_id
@@ -880,13 +898,32 @@ def search(app_db, *, statuses: Optional[Sequence[str]] = None,
                (SELECT COUNT(*) FROM approval_request_steps t WHERE t.request_id = r.id) AS step_count
           FROM approval_requests r
           LEFT JOIN users u ON u.id = r.requester_id
+          LEFT JOIN approval_form_steps fs
+                 ON fs.form_id = r.form_id AND fs.step_index = r.current_step_order
          {cond}
          ORDER BY r.id DESC
          LIMIT %s OFFSET %s
         """,
         [*params, max(1, min(int(limit), 500)), max(0, int(offset))],
     )
+    for row in rows:
+        row["current_step_title"] = _current_step_title(row)
     return {"rows": rows, "total": total}
+
+
+def _current_step_title(row: Dict[str, Any]) -> Optional[str]:
+    """[결재 로그] 한 행의 "지금 몇 차인가" — 진행 중일 때만 뜻이 있다.
+
+    ``form_step_title`` 은 조회용 중간값이라 행에서 **떼어 낸다** — 화면 계약은
+    ``current_step_title`` 하나다.
+    """
+    form_title = row.pop("form_step_title", None)
+    if row.get("status") != "pending":
+        return None
+    order = row.get("current_step_order")
+    if order is None:
+        return None
+    return str(form_title) if form_title else default_step_title(int(order))
 
 
 # ── 결재 양식 ─────────────────────────────────────────────────────────
