@@ -7,6 +7,7 @@
     registry.py  승인됐을 때 무엇을 할지. 훅은 행위를 가진 서비스가 꽂는다.
     directory.py 결재자를 찾는 길 — 부서(역할)는 필터일 뿐이다.
     notifier.py  기존 알림 체계(``user_notifications``)를 그대로 탄다.
+    evaluation.py 평가지 선택 항목의 정본. 켜진 항목은 서버가 양식 버전에서 정한다.
     models.py    표 정의(DDL). 표를 만드는 것은 core 한 곳이다.
     sql.py       DB 와 말하는 유일한 통로.
 
@@ -27,11 +28,16 @@
     승인 순간의 판정과 알림이 두 곳에 살면 어긋난다.
 """
 from xgen_sdk.approval import (  # noqa: F401
-    blocks, catalog, directory, engine, models, notifier, policy, registry, sql,
-    store, templates,
+    blocks, catalog, directory, engine, evaluation, models, notifier, policy, registry,
+    sql, store, templates,
 )
 from xgen_sdk.approval.catalog import ActionSpec, CATALOG  # noqa: F401
-from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired  # noqa: F401
+from xgen_sdk.approval.engine import (  # noqa: F401
+    ApprovalError,
+    ApprovalLineRequired,
+    EvaluationVersionMismatch,
+    EvaluationVersionNotFound,
+)
 from xgen_sdk.approval.models import (  # noqa: F401
     ApprovalActionPolicy,
     ApprovalForm,
@@ -57,10 +63,11 @@ from xgen_sdk.approval.registry import (  # noqa: F401
 )
 
 __all__ = [
-    "blocks", "catalog", "directory", "engine", "models", "notifier", "policy",
-    "registry", "templates",
+    "blocks", "catalog", "directory", "engine", "evaluation", "models", "notifier",
+    "policy", "registry", "templates",
     "sql", "store",
     "ActionSpec", "CATALOG", "ApprovalError", "ApprovalLineRequired",
+    "EvaluationVersionNotFound", "EvaluationVersionMismatch",
     "ApprovalActionPolicy", "ApprovalForm", "ApprovalFormBlock", "ApprovalFormStep",
     "ApprovalLine", "ApprovalLineStep",
     "ApprovalPolicyHistory", "ApprovalRequest", "ApprovalRequestBlock",

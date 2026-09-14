@@ -113,6 +113,10 @@ def _option_on(options: Any, key: str) -> bool:
     모든 항목이 켜진 한 벌뿐이었으므로 켜진 것으로 본다. 빠진 하위 키도 같은
     이유로 기본 한 벌(전부 켜짐)을 따른다. 하위 키는 ``true``/``false`` 이거나
     ``{"enabled": …}`` 모양이다.
+
+    :func:`xgen_sdk.approval.evaluation.normalize_options` 와 **같은 답**이어야 한다
+    (패리티 벡터 표로 시험한다). 그 모듈이 이 모듈을 읽으므로 여기서 부르지 않는다.
+    값의 ``options`` 는 상신 · 칸 채우기에서 서버가 정한 것으로 덮어쓴 뒤 저장된다.
     """
     if not isinstance(options, dict) or key not in options:
         return True
