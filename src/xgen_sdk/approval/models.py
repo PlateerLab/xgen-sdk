@@ -74,7 +74,11 @@ class ApprovalLine(BaseModel):
 
 
 class ApprovalLineStep(BaseModel):
-    """템플릿의 한 칸 — **한 차례에 한 사람**."""
+    """템플릿의 한 칸 — **한 차례에 한 사람**, 또는 **임의**(올리는 사람이 고르는 자리).
+
+    ``approver_id`` 가 비어 있으면 임의 차례다(1.62.0). 올라가는 결재에는 임의 차례가
+    없다 — 상신하는 순간 요청자가 사람을 세운다(:func:`engine.fill_open_slots`).
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -91,9 +95,12 @@ class ApprovalLineStep(BaseModel):
             'step_order': 'INTEGER NOT NULL DEFAULT 1',
             # 이쪽은 **설정**이라 CASCADE 가 맞다 — 퇴사한 사람은 앞으로 쓸
             # 결재선에서 빠져야 한다. 이미 올라간 결재는 스냅샷이라 영향 없다.
-            'approver_id': 'INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE',
+            # **비어 있으면 임의 차례**(1.62.0) — 올리는 사람이 그때 고른다. 제약 동기화가
+            # 기존 표의 NOT NULL 을 떨어뜨린다(pool_manager 의 DROP NOT NULL).
+            'approver_id': 'INTEGER REFERENCES users(id) ON DELETE CASCADE',
             # 같은 줄에 같은 사람을 두 번 세우지 않는다 — 두 번 승인하라는 뜻이
-            # 되는데, 그런 결재선은 실수이지 의도인 적이 없다.
+            # 되는데, 그런 결재선은 실수이지 의도인 적이 없다. 임의 차례(NULL)는
+            # 여럿이어도 걸리지 않는다(PostgreSQL 의 UNIQUE 는 NULL 끼리 다르다고 본다).
             'UNIQUE_line_approver': 'UNIQUE(line_id, approver_id)',
             # **한 차례에 한 사람.** 결재선은 한 줄이라, 같은 번호에 둘이 서면
             # 그건 줄이 아니라 갈래다.

@@ -77,7 +77,8 @@ def list_lines(app_db, user_id: int, include_private: bool = True) -> List[Dict[
 
 def create_line(app_db, *, name: str, description: str, owner_id: int,
                 is_shared: bool, steps: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    planned = E.plan_steps(steps)          # 규칙 검증은 engine 이 한다
+    """결재선을 만든다. ``approver_id`` 가 빈 차례는 **임의**(올리는 사람이 고른다)."""
+    planned = E.plan_line_slots(steps)     # 규칙 검증은 engine 이 한다
     rows = _q(
         app_db,
         """
@@ -131,8 +132,8 @@ def update_line(app_db, line_id: int, *, name: Optional[str] = None,
     바뀌면, 이미 누른 사람의 승인이 무슨 뜻인지 알 수 없게 된다.
 
     결재자를 주면 **통째로 갈아 끼운다**(부분 수정이 아니다). 순서는
-    :func:`engine.plan_steps` 가 검증한다 — 같은 사람이 두 번 서거나 빈 줄이면
-    거기서 걸린다.
+    :func:`engine.plan_line_slots` 가 검증한다 — 같은 사람이 두 번 서거나 빈 줄이면
+    거기서 걸린다. ``approver_id`` 가 빈 차례는 **임의**(올리는 사람이 고른다).
 
     양식이 붙어 있으면 **줄을 그 양식보다 짧게 만들 수 없다**
     (:func:`_guard_form_still_fits`).
@@ -158,7 +159,7 @@ def update_line(app_db, line_id: int, *, name: Optional[str] = None,
         _q(app_db, f"UPDATE approval_lines SET {', '.join(sets)} WHERE id = %s", tuple(params))
 
     if steps is not None:
-        planned = E.plan_steps(steps)   # 규칙 검증은 engine 이 한다
+        planned = E.plan_line_slots(steps)   # 규칙 검증은 engine 이 한다
         _guard_form_still_fits(app_db, line, len(planned))
         _q(app_db, "DELETE FROM approval_line_steps WHERE line_id = %s", (int(line_id),))
         for st in planned:
@@ -331,6 +332,11 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
                    (line_id,))
         if not specs:
             raise E.ApprovalError("결재선이 비어 있습니다")
+        if any(E.is_open_slot(s) for s in specs):
+            # 템플릿을 그대로 복사하면 빈 차례가 올라가 거기서 영영 멈춘다 — 알림이 갈
+            # 사람이 없다. 요청자가 사람을 세운 steps 로 다시 올려야 한다.
+            raise E.ApprovalError(
+                "이 결재선에는 올리는 사람이 고를 차례(임의)가 있습니다 — 결재자를 정해 주세요")
     else:
         raise E.ApprovalError("결재선을 지정하세요")
 
