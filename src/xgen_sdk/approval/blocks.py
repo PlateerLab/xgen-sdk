@@ -8,7 +8,15 @@
 
 그래서 종류는 코드로 더한다. 대신 종류마다 설정(``config``)을 열어 둬서,
 같은 종류를 다르게 쓰는 것은 관리자가 정한다 — 첨부는 확장자와 개수를,
-위험도 평가는 어느 평가 템플릿을 쓸지를.
+평가지는 어느 평가 양식을 쓸지를.
+
+예전 이름
+---------
+저장된 칸은 종류 이름을 문자열로 들고 있다. 이름을 바꾸면 이미 쌓인 양식과
+진행 중인 결재가 **모르는 종류**가 되어 채움 판정도 적용 훅도 건너뛴다.
+그래서 옛 이름은 :data:`LEGACY_BLOCK_TYPES` 로 새 이름에 잇고, 읽고 검사하고
+베끼는 모든 자리가 :func:`normalize_block_type` 을 거친다. 새로 쓰는 값은
+언제나 새 이름이다.
 
 채움 판정
 ---------
@@ -28,8 +36,21 @@ TEXT = "text"
 ATTACHMENTS = "attachments"
 #: Agent 기획서 — 고르거나 새로 쓴다.
 AGENT_DEV_PLAN = "agent_dev_plan"
-#: AI 위험도 평가 — 평가 템플릿 한 벌을 채운다.
-RISK_ASSESSMENT = "risk_assessment"
+#: 평가지 — 평가 양식 한 벌로 항목마다 점수를 매긴다. AI 위험도 평가지는
+#: 그 양식 가운데 기본으로 제공하는 하나다.
+EVALUATION = "evaluation"
+
+#: 예전 종류 이름 → 지금 이름. 저장된 행에 남은 옛 이름을 읽을 때만 쓴다.
+#: 목록(:func:`catalog`)에는 나오지 않는다 — 새로 고를 이름이 아니다.
+LEGACY_BLOCK_TYPES: Dict[str, str] = {
+    "risk_assessment": EVALUATION,
+}
+
+
+def normalize_block_type(block_type: Any) -> str:
+    """저장된 종류 이름을 **지금 이름**으로. 옛 이름이 아니면 그대로 돌려준다."""
+    name = str(block_type or "")
+    return LEGACY_BLOCK_TYPES.get(name, name)
 
 
 class BlockSpec:
@@ -79,19 +100,49 @@ def _is_score(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
 
-def assessment_gaps(data: Any) -> List[str]:
-    """위험도 평가에서 **아직 채우지 않은 것** — 비어 있으면 다 채운 평가다.
+def _has_text(value: Any) -> bool:
+    if isinstance(value, (list, tuple)):
+        return any(str(v or "").strip() for v in value)
+    return bool(str(value or "").strip())
 
-    거버넌스의 [AI 위험도 평가] 가 저장 직전에 막던 것과 **같은 기준**이다:
-    평가 템플릿의 모든 항목에 사전 위험 점수, 영향 범위, 판단 근거. 여기에
-    점수로 정해진 등급이 더해진다. 평가가 결재로 옮겨 오면서 기준이 "등급만
-    고르면 된다" 로 느슨해지면, 같은 원장에 서로 다른 무게의 평가가 섞인다 —
-    대시보드는 둘을 구별하지 못한다.
 
-    값의 모양(``item_scores``)은 거버넌스가 원장에 쓰던 ``policy_data`` 그대로다::
+def _option_on(options: Any, key: str) -> bool:
+    """평가 양식의 선택 항목이 켜져 있는가.
 
-        {"categories": [{"name", "weight", "items": [{"id", "name", "score", "risk_mitigation"}]}],
-         "risk_traits": [...]}
+    ``options`` 가 없는 값은 선택 항목이 생기기 전의 **AI 위험도 평가**다 — 그때는
+    모든 항목이 켜진 한 벌뿐이었으므로 켜진 것으로 본다. 빠진 하위 키도 같은
+    이유로 기본 한 벌(전부 켜짐)을 따른다. 하위 키는 ``true``/``false`` 이거나
+    ``{"enabled": …}`` 모양이다.
+    """
+    if not isinstance(options, dict) or key not in options:
+        return True
+    value = options.get(key)
+    if isinstance(value, dict):
+        return bool(value.get("enabled", True))
+    return bool(value)
+
+
+def evaluation_gaps(data: Any) -> List[str]:
+    """평가지에서 **아직 채우지 않은 것** — 비어 있으면 다 채운 평가다.
+
+    모든 평가 양식에 공통인 것은 셋이다: 평가 항목마다 점수, 판단 근거, 점수로
+    정해진 등급. 그 밖의 칸은 양식이 켠 선택 항목을 따른다. 영향 범위는 양식이
+    켰을 때만 요구하고, 특성 체크와 평가 첨부는 켜져 있어도 요구하지 않는다
+    (해당 없음이 정상인 칸이다).
+
+    기준이 "등급만 고르면 된다" 로 느슨해지면 같은 원장에 서로 다른 무게의
+    평가가 섞인다 — 대시보드는 둘을 구별하지 못한다.
+
+    값의 모양::
+
+        {"item_scores": {"categories": [{"name", "weight",
+                                         "items": [{"id", "name", "score", "risk_mitigation"}]}],
+                         "risk_traits": [...]},
+         "rationale": "...", "risk_level": "...", "impact_scope": "...",
+         "options": {...}, "template_id": "...", "policy_id": ...}
+
+    ``options`` 는 채점한 양식 버전의 선택 항목이다. 없으면 선택 항목이 생기기
+    전의 AI 위험도 평가 값이라 영향 범위까지 요구한다.
     """
     if not isinstance(data, dict):
         return ["평가"]
@@ -111,18 +162,18 @@ def assessment_gaps(data: Any) -> List[str]:
         empty = sum(1 for it in items if not _is_score(it.get("score")))
         if empty:
             gaps.append(f"항목 점수 {empty}개")
-    if not str(data.get("impact_scope") or "").strip():
-        gaps.append("영향 범위")
-    if not str(data.get("rationale") or "").strip():
+    if not _has_text(data.get("rationale")):
         gaps.append("판단 근거")
-    if not str(data.get("risk_level") or "").strip():
-        gaps.append("위험 등급")
+    if not _has_text(data.get("risk_level")):
+        gaps.append("등급")
+    if _option_on(data.get("options"), "impact_scope") and not _has_text(data.get("impact_scope")):
+        gaps.append("영향 범위")
     return gaps
 
 
-def _has_assessment(data: Any) -> bool:
-    """위험도 평가는 **거버넌스 기준을 다 채워야** 채운 것이다 — :func:`assessment_gaps`."""
-    return isinstance(data, dict) and not assessment_gaps(data)
+def _has_evaluation(data: Any) -> bool:
+    """평가지는 **양식이 요구하는 것을 다 채워야** 채운 것이다 — :func:`evaluation_gaps`."""
+    return isinstance(data, dict) and not evaluation_gaps(data)
 
 
 REGISTRY: Dict[str, BlockSpec] = {
@@ -145,10 +196,10 @@ REGISTRY: Dict[str, BlockSpec] = {
         default_config={"allow_create": True},
         actor="drafter",
     ),
-    RISK_ASSESSMENT: BlockSpec(
-        RISK_ASSESSMENT, "AI 위험도 평가",
-        description="AI 위험도 평가지로 항목마다 점수를 매기는 칸입니다. 등급은 점수로 정해집니다.",
-        is_filled=_has_assessment,
+    EVALUATION: BlockSpec(
+        EVALUATION, "평가지",
+        description="평가 양식으로 항목마다 점수를 매기는 칸입니다. 등급은 점수로 정해집니다.",
+        is_filled=_has_evaluation,
         default_config={"template_id": None},
         actor="approver",
     ),
@@ -160,20 +211,22 @@ def known_types() -> List[str]:
 
 
 def spec(block_type: str) -> Optional[BlockSpec]:
-    return REGISTRY.get(str(block_type or ""))
+    return REGISTRY.get(normalize_block_type(block_type))
 
 
 def is_known(block_type: str) -> bool:
-    return str(block_type or "") in REGISTRY
+    return normalize_block_type(block_type) in REGISTRY
 
 
 #: 칸 종류별 **적용 함수** — 최종 승인이 났을 때 그 칸의 값으로 무엇을 할 것인가.
 #:
-#: 왜 레지스트리인가: 값이 갈 곳을 아는 것은 그 표를 가진 서비스다. AI 위험도
-#: 평가는 ``governance_risk_assessments`` 로 가야 하는데 그 표는 core 의 것이고,
-#: SDK 는 그 표의 모양을 모른다. 그래서 SDK 는 **부를 자리**만 정해 두고, 무엇을
-#: 할지는 표를 가진 쪽이 기동할 때 꽂는다(``registry.register_action`` 과 같은
-#: 방식이다).
+#: 왜 레지스트리인가: 값이 갈 곳을 아는 것은 그 표를 가진 서비스다. 평가지 값이
+#: Agent 위험 등급으로 기록될 때 그 원장은 core 의 것이고, SDK 는 그 표의 모양을
+#: 모른다. 그래서 SDK 는 **부를 자리**만 정해 두고, 무엇을 할지는 표를 가진 쪽이
+#: 기동할 때 꽂는다(``registry.register_action`` 과 같은 방식이다).
+#:
+#: 키는 지금 이름이다. 옛 이름으로 꽂거나 찾아도 지금 이름으로 읽는다 — 옛 이름이
+#: 남은 행도 같은 훅을 탄다.
 _APPLIERS: Dict[str, Callable[..., None]] = {}
 
 
@@ -183,15 +236,15 @@ def register_applier(block_type: str, fn: Callable[..., None]) -> None:
     두 번 불릴 수 있다고 보고 **멱등하게** 써라. 뒤처리는 한 건에 한 번이
     원칙이지만, 워커 둘이 같은 찰나에 집으면 훅이 두 번 돌 수 있다.
     """
-    _APPLIERS[str(block_type)] = fn
+    _APPLIERS[normalize_block_type(block_type)] = fn
 
 
 def has_applier(block_type: str) -> bool:
-    return str(block_type or "") in _APPLIERS
+    return normalize_block_type(block_type) in _APPLIERS
 
 
 def applier(block_type: str) -> Optional[Callable[..., None]]:
-    return _APPLIERS.get(str(block_type or ""))
+    return _APPLIERS.get(normalize_block_type(block_type))
 
 
 def catalog() -> List[Dict[str, Any]]:
@@ -199,7 +252,8 @@ def catalog() -> List[Dict[str, Any]]:
 
     레지스트리를 그대로 내보내는 이유는 관리 화면이 **코드가 아는 것만**
     보여 주게 하기 위해서다. 화면에 따로 적어 두면 SDK 가 종류를 더할 때
-    화면이 모르고, 뺄 때는 그릴 수 없는 칸을 권한다.
+    화면이 모르고, 뺄 때는 그릴 수 없는 칸을 권한다. 옛 이름
+    (:data:`LEGACY_BLOCK_TYPES`)은 싣지 않는다.
     """
     return [{
         "block_type": s.block_type,
@@ -251,7 +305,7 @@ def validate_data(block: Dict[str, Any], data: Any) -> None:
     cfg = parse_data(block.get("config")) or {}
     if not isinstance(cfg, dict):
         return
-    if str(block.get("block_type") or "") != ATTACHMENTS:
+    if normalize_block_type(block.get("block_type")) != ATTACHMENTS:
         return
     if not isinstance(data, dict):
         return
