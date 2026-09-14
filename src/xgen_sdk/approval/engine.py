@@ -108,6 +108,96 @@ def plan_steps(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             for n, (_given, _idx, approver) in enumerate(ordered, start=1)]
 
 
+# ── 임의 차례 ─────────────────────────────────────────────────────────
+#
+# 결재선 **템플릿**의 차례는 두 가지다.
+#
+#   사람이 정해진 차례   관리자가 "이 자리는 김 팀장" 이라고 정해 둔 것
+#   **임의** 차례        "이 자리는 올리는 사람이 그때 고른다" — approver_id 가 비어 있다
+#
+# 그래서 "A → 임의", "임의 → B", "B → 임의" 같은 줄을 만들 수 있다(2026-09-14 사용자
+# 지시). 양식이 결재자 두 명을 요구해도, 두 번째 사람이 건마다 다른 조직이 있다 —
+# 그 자리를 특정인으로 박아 두면 결재선을 사람 수만큼 만들어야 한다.
+#
+# **올라가는 결재에는 임의 차례가 없다.** 상신하는 순간 모든 차례에 사람이 서야
+# 한다(:func:`plan_steps` 는 여전히 사람만 받는다). 빈 차례로 올라가면 그 차례에서
+# 결재가 영영 멈춘다 — 누구에게도 알림이 가지 않는다.
+
+
+def is_open_slot(spec: Dict[str, Any]) -> bool:
+    """이 차례가 **임의**(올리는 사람이 고르는 자리)인가."""
+    value = spec.get("approver_id")
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def plan_line_slots(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """결재선 **템플릿**의 차례들 — 사람이 정해진 차례와 임의 차례(``approver_id=None``).
+
+    :func:`plan_steps` 와 같은 규칙으로 줄을 세운다(1 부터 빈틈없이, 같은 사람 두 번 금지).
+    다른 점은 하나 — 사람이 비어 있는 차례를 **임의**로 받아들인다. 임의 차례는 여럿이어도
+    된다("임의 → 임의" 도 줄이다 — 양식의 절차만 정하고 사람은 매번 고르는 경우).
+    """
+    if not specs:
+        raise ApprovalError("결재선에 최소 한 차례가 필요합니다")
+
+    ordered: List[Tuple[int, int, Optional[int]]] = []
+    seen: set = set()
+    for idx, raw in enumerate(specs):
+        approver: Optional[int]
+        if is_open_slot(raw):
+            approver = None
+        else:
+            try:
+                approver = int(raw.get("approver_id"))
+            except (TypeError, ValueError):
+                raise ApprovalError("결재자가 올바르지 않습니다") from None
+            if approver in seen:
+                raise ApprovalError("같은 사람을 결재선에 두 번 넣을 수 없습니다")
+            seen.add(approver)
+        try:
+            given = int(raw.get("step_order", idx + 1))
+        except (TypeError, ValueError):
+            given = idx + 1
+        ordered.append((max(1, given), idx, approver))
+
+    ordered.sort(key=lambda x: (x[0], x[1]))
+    return [{"approver_id": approver, "step_order": n}
+            for n, (_given, _idx, approver) in enumerate(ordered, start=1)]
+
+
+def open_slot_orders(slots: Sequence[Dict[str, Any]]) -> List[int]:
+    """템플릿에서 **임의** 차례의 번호들(줄을 세운 뒤의 번호)."""
+    return [s["step_order"] for s in plan_line_slots(slots) if s["approver_id"] is None]
+
+
+def fill_open_slots(template: Sequence[Dict[str, Any]],
+                    steps: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """**고정된** 결재선의 임의 차례만 요청자가 고른 사람으로 채운다.
+
+    ``template`` 은 결재선의 차례들(임의 차례는 ``approver_id=None``), ``steps`` 는 요청이
+    들고 온 결재선이다. 요청자가 바꿀 수 있는 것은 **임의 차례의 사람뿐**이다:
+
+    * 차례 수가 같아야 한다 — 차례를 더하거나 빼면 관리자가 정한 절차가 아니다.
+    * 사람이 정해진 차례는 **그 사람**이어야 한다 — 바꿔치기하면 화면은 "관리자가 정한
+      사람에게 갔다" 고 믿는데 실제로는 다른 사람에게 가 있다.
+    * 임의 차례는 **모두 사람으로** 채워야 한다 — 빈 차례로 올라가면 거기서 영영 멈춘다.
+
+    반환은 :func:`plan_steps` 모양(사람만, 1 부터)이다.
+    """
+    slots = plan_line_slots(template)
+    if any(is_open_slot(s) for s in steps):
+        raise ApprovalError("임의 차례의 결재자를 모두 정해 주세요")
+    chosen = plan_steps(steps)
+    if len(chosen) != len(slots):
+        raise ApprovalError(
+            f"이 결재선은 {len(slots)}차례입니다 — 관리자가 정한 결재선이라 차례를 더하거나 뺄 수 없습니다")
+    for slot, pick in zip(slots, chosen):
+        if slot["approver_id"] is not None and int(slot["approver_id"]) != int(pick["approver_id"]):
+            raise ApprovalError(
+                f"{slot['step_order']}번째 차례는 관리자가 정한 결재자입니다 — 바꿀 수 없습니다")
+    return chosen
+
+
 def open_steps(steps: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """결재를 올리는 순간의 단계 상태 — **첫 사람만** ``pending``."""
     planned = list(steps)

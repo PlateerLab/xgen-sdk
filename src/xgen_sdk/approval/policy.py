@@ -230,6 +230,12 @@ def resolve_line(app_db, action_type: str, *,
     고정이면 고르는 자리 자체를 보여 주지 않으므로, 여기 걸리는 것은 낡은
     화면이거나 손으로 만든 요청이다 — 그건 소리를 내야 한다.
 
+    단, 고정된 줄에 **임의 차례**(사람이 비어 있는 차례, 1.62.0)가 있으면 요청자가 그
+    차례들의 사람을 골라 steps 로 들고 와야 한다. 사람이 정해진 차례는 바꿀 수 없고
+    차례 수도 그대로다(:func:`engine.fill_open_slots`). 안 들고 왔으면
+    :class:`ApprovalLineRequired` — 모달이 그 줄로 열려 임의 차례를 채우게 한다.
+    고정 안 한 줄도 줄만 들고 왔는데 임의 차례가 있으면 같은 이유로 되돌린다.
+
     **고정 안 함**(기본) — 요청자가 그 자리에서 고른 결재선이 이긴다. 관리자가
     정해 둔 기본 결재선은 모달을 **미리 채우는** 편의일 뿐이다. 둘 다 없으면
     :class:`ApprovalLineRequired` — 실패가 아니라 한 단계 덜 온 것이라, 화면은
@@ -253,6 +259,7 @@ def resolve_line(app_db, action_type: str, *,
     ``None`` 이고, 그때는 양식도 없다 — 그것이 맞다.
     """
     from xgen_sdk.approval import catalog
+    from xgen_sdk.approval import engine as E
     from xgen_sdk.approval.engine import ApprovalError, ApprovalLineRequired
 
     pol: Dict[str, Any] = {}
@@ -262,26 +269,48 @@ def resolve_line(app_db, action_type: str, *,
         logger.warning("결재 정책 조회 실패 (%s): %s", action_type, exc)
     default_line = pol.get("default_line_id")
 
+    sp = catalog.spec(action_type)
+    label = sp.label if sp else action_type
+
     if pol.get("line_locked") and default_line:
-        if steps or (line_id and int(line_id) != int(default_line)):
-            sp = catalog.spec(action_type)
-            raise ApprovalError(
-                f"{sp.label if sp else action_type} 은(는) 결재선이 고정된 행위입니다 — "
-                "결재선을 고를 수 없습니다")
-        return int(default_line), None
+        refused = ApprovalError(f"{label} 은(는) 결재선이 고정된 행위입니다 — 결재선을 고를 수 없습니다")
+        if line_id and int(line_id) != int(default_line):
+            raise refused
+        template = _line_slots(app_db, int(default_line))
+        if not any(E.is_open_slot(s) for s in template):
+            # 사람이 모두 정해진 고정 결재선 — 그 줄로만 간다.
+            if steps:
+                raise refused
+            return int(default_line), None
+        # **임의 차례가 있는 고정 결재선**(1.62.0) — 요청자는 임의 차례의 사람만 고른다.
+        # 아무것도 안 들고 왔으면 실패가 아니라 한 단계 덜 온 것이다: 화면은 모달을
+        # 띄워 그 차례들을 채우게 하고 같은 요청을 다시 보낸다.
+        if not steps:
+            raise ApprovalLineRequired(action_type, label, int(default_line))
+        return int(default_line), E.fill_open_slots(template, steps)
 
     if steps:
         # 요청이 어느 줄에서 왔는지 말해 주면 그것을, 아니면 이 행위의 기본
         # 결재선을 **양식의 출처**로 삼는다. 결재자는 어디까지나 steps 다.
         origin = line_id if line_id else default_line
         return (int(origin) if origin else None), list(steps)
-    if line_id:
-        return int(line_id), None
-    if default_line:
-        return int(default_line), None
+    for candidate in (line_id, default_line):
+        if not candidate:
+            continue
+        # 줄만 들고 왔는데 그 줄에 **임의 차례**가 있으면 그대로는 못 올린다 — 빈 차례로
+        # 올라가면 거기서 멈춘다. 모달을 그 줄로 미리 채워 사람을 고르게 한다.
+        if any(E.is_open_slot(s) for s in _line_slots(app_db, int(candidate))):
+            raise ApprovalLineRequired(action_type, label, int(candidate))
+        return int(candidate), None
 
-    sp = catalog.spec(action_type)
-    raise ApprovalLineRequired(action_type, sp.label if sp else action_type, None)
+    raise ApprovalLineRequired(action_type, label, None)
+
+
+def _line_slots(app_db, line_id: int) -> List[Dict[str, Any]]:
+    """결재선의 차례들 — 임의 차례는 ``approver_id`` 가 비어 있다."""
+    return _q(app_db,
+              "SELECT step_order, approver_id FROM approval_line_steps WHERE line_id = %s",
+              (int(line_id),))
 
 
 def locked_lines(app_db) -> Dict[str, int]:
