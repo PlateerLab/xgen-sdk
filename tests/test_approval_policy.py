@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from xgen_sdk.approval import catalog, policy
@@ -195,9 +197,16 @@ class LogDB(PolicyDB):
             rows = self._match(s, p[:-2])
             rows.sort(key=lambda r: r["id"], reverse=True)
             return [dict(r, requester_username=None, requester_name=None,
-                         waiting_on=None, step_count=1)
+                         waiting_on=None, step_count=1,
+                         form_step_title=self._form_step_title(r))
                     for r in rows[p[-1]:p[-1] + p[-2]]]
         return super()._run(s, p)
+
+    def _form_step_title(self, r):
+        """``LEFT JOIN approval_form_steps ON form_id AND step_index = current_step_order``."""
+        return next((x["title"] for x in self.t["approval_form_steps"]
+                     if x["form_id"] == r.get("form_id")
+                     and x["step_index"] == r.get("current_step_order")), None)
 
     def _match(self, sql, params):
         rows = list(self.t["approval_requests"])
@@ -272,6 +281,166 @@ def test_the_log_is_newest_first(logdb):
     from xgen_sdk.approval import store
     ids = [r["id"] for r in store.search(logdb)["rows"]]
     assert ids == sorted(ids, reverse=True)
+
+
+# ── [결재 로그] — 지금 몇 차인가 (2.1.0) ──────────────────────────────
+#
+# 관리자 화면은 "진행 중 (2차)" 를 결재 문서와 **같은 번호**로 적는다.
+# 차례 k = "(k+1)차", 양식 단계 step_index k ≡ 차례 k.
+
+
+def _log_row(db, request_id):
+    from xgen_sdk.approval import store
+    return next(r for r in store.search(db)["rows"] if r["id"] == request_id)
+
+
+def _formed_line(db):
+    """단계 이름을 가진 3단계 양식(칸 없음)과 그것을 쓰는 결재선."""
+    from xgen_sdk.approval import store
+    db.add_user(4, "임원", "임원")
+    form_id = store.create_form(
+        db, name="검토 양식", owner_id=1,
+        steps=[{"step_index": 0, "title": "기안"},
+               {"step_index": 1, "title": "팀장 검토"},
+               {"step_index": 2, "title": "임원 승인"}],
+        blocks=[])
+    line_id = store.create_line(
+        db, name="검토 결재선", description="", owner_id=1, is_shared=True,
+        steps=[{"approver_id": 3, "step_order": 1},
+               {"approver_id": 4, "step_order": 2}])["id"]
+    store.set_line_form(db, line_id, form_id)
+    return form_id, line_id
+
+
+def test_the_log_names_the_step_from_the_form(logdb):
+    """양식이 있으면 그 단계 이름 — 문서에 적힌 것과 같은 말."""
+    from xgen_sdk.approval import store
+    form_id, line_id = _formed_line(logdb)
+    rid = store.submit(logdb, requester_id=1, title="양식 결재", line_id=line_id)["id"]
+
+    row = _log_row(logdb, rid)
+    assert row["status"] == "pending"
+    assert row["current_step_order"] == 1
+    assert (row["form_id"], row["form_name"]) == (form_id, "검토 양식")
+    assert row["current_step_title"] == "팀장 검토"
+    assert "form_step_title" not in row, "조회용 중간값이 계약에 새면 안 된다"
+
+    store.decide(logdb, rid, actor_id=3, action="approved")
+    row = _log_row(logdb, rid)
+    assert (row["current_step_order"], row["current_step_title"]) == (2, "임원 승인")
+
+
+def test_a_request_without_a_form_uses_the_document_numbering(logdb):
+    """양식이 없으면 기본 이름 — 첫 결재자(차례 1)는 "2차 결재"."""
+    from xgen_sdk.approval import store
+    row = store.search(logdb, action_types=["collection.create"])["rows"][0]
+    assert row["current_step_order"] == 1
+    assert row["form_id"] is None and row["form_name"] is None
+    assert row["current_step_title"] == store.default_step_title(1) == "2차 결재"
+
+
+def test_a_form_without_that_step_falls_back_to_the_default_title(logdb):
+    from xgen_sdk.approval import store
+    _, line_id = _formed_line(logdb)
+    rid = store.submit(logdb, requester_id=1, title="양식 결재", line_id=line_id)["id"]
+    logdb.t["approval_form_steps"] = [
+        x for x in logdb.t["approval_form_steps"] if x["step_index"] != 1]
+    assert _log_row(logdb, rid)["current_step_title"] == "2차 결재"
+
+
+@pytest.mark.parametrize("action", ["approved", "rejected"])
+def test_a_finished_request_is_on_no_step(logdb, action):
+    """끝난 결재는 어느 단계에도 "있지" 않다. 저장된 차례 번호는 그대로 준다."""
+    from xgen_sdk.approval import store
+    form_id, line_id = _formed_line(logdb)
+    rid = store.submit(logdb, requester_id=1, title="양식 결재", line_id=line_id)["id"]
+    store.decide(logdb, rid, actor_id=3, action=action)
+    if action == "approved":
+        store.decide(logdb, rid, actor_id=4, action="approved")
+
+    row = _log_row(logdb, rid)
+    stored = next(r for r in logdb.t["approval_requests"] if r["id"] == rid)
+    assert row["status"] == action
+    assert row["current_step_title"] is None
+    assert row["current_step_order"] == stored["current_step_order"]
+    assert (row["form_id"], row["form_name"]) == (form_id, "검토 양식")
+
+
+class _SqliteAppDB:
+    """``execute_raw_query`` 를 **진짜 sqlite** 로 — 가짜 DB 는 컬럼 오타·JOIN 을 못 잡는다."""
+
+    def __init__(self):
+        self.con = sqlite3.connect(":memory:")
+        self.con.row_factory = sqlite3.Row
+        self.con.executescript("""
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, full_name TEXT);
+            CREATE TABLE approval_forms (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE approval_form_steps (
+                id INTEGER PRIMARY KEY, form_id INTEGER NOT NULL,
+                step_index INTEGER NOT NULL, title TEXT, guide TEXT,
+                UNIQUE(form_id, step_index));
+            CREATE TABLE approval_requests (
+                id INTEGER PRIMARY KEY, title TEXT, action_type TEXT, status TEXT,
+                created_at TEXT, decided_at TEXT, applied_at TEXT, apply_error TEXT,
+                target_ref TEXT, requester_id INTEGER, canceled_by INTEGER,
+                cancel_note TEXT, current_step_order INTEGER,
+                form_id INTEGER, form_name TEXT);
+            CREATE TABLE approval_request_steps (
+                id INTEGER PRIMARY KEY, request_id INTEGER, step_order INTEGER,
+                approver_id INTEGER, status TEXT);
+        """)
+
+    def execute_raw_query(self, sql, params=()):
+        try:
+            cur = self.con.execute(sql.replace("%s", "?").replace("ILIKE", "LIKE"),
+                                   tuple(params))
+            return {"success": True, "data": [dict(r) for r in cur.fetchall()], "error": None}
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "data": [], "error": str(exc)}
+
+
+def test_the_log_sql_runs_on_a_real_engine():
+    from xgen_sdk.approval import store
+    d = _SqliteAppDB()
+    d.con.executescript("""
+        INSERT INTO users VALUES (1, 'drafter', '기안자'), (3, 'lead', '팀장'), (4, 'exec', '임원');
+        INSERT INTO approval_forms VALUES (1, '검토 양식');
+        INSERT INTO approval_form_steps (form_id, step_index, title) VALUES
+            (1, 0, '기안'), (1, 1, '팀장 검토'), (1, 2, '임원 승인');
+        INSERT INTO approval_requests
+            (id, title, action_type, status, created_at, requester_id,
+             current_step_order, form_id, form_name) VALUES
+            (1, '양식 진행', 'agent.deploy', 'pending', 'T1', 1, 1, 1, '검토 양식'),
+            (2, '양식 없음', 'collection.create', 'pending', 'T2', 1, 1, NULL, NULL),
+            (3, '단계 없음', 'agent.deploy', 'pending', 'T3', 1, 3, 1, '검토 양식'),
+            (4, '끝난 결재', 'agent.deploy', 'approved', 'T4', 1, 2, 1, '검토 양식');
+        INSERT INTO approval_request_steps (request_id, step_order, approver_id, status) VALUES
+            (1, 1, 3, 'pending'), (1, 2, 4, 'waiting'),
+            (2, 1, 3, 'pending'), (3, 1, 3, 'pending'),
+            (4, 1, 3, 'approved'), (4, 2, 4, 'approved');
+    """)
+
+    out = store.search(d)
+    assert out["total"] == 4
+    assert [r["id"] for r in out["rows"]] == [4, 3, 2, 1], "JOIN 이 행을 불리면 안 된다"
+    by_id = {r["id"]: r for r in out["rows"]}
+
+    assert set(by_id[1]) == {
+        "id", "title", "action_type", "status", "created_at", "decided_at",
+        "applied_at", "apply_error", "target_ref", "requester_id",
+        "canceled_by", "cancel_note", "requester_username", "requester_name",
+        "waiting_on", "step_count",
+        "current_step_order", "form_id", "form_name", "current_step_title",
+    }
+    assert (by_id[1]["waiting_on"], by_id[1]["step_count"]) == ("팀장", 2)
+    assert (by_id[1]["current_step_order"], by_id[1]["current_step_title"]) == (1, "팀장 검토")
+    assert (by_id[1]["form_id"], by_id[1]["form_name"]) == (1, "검토 양식")
+    assert (by_id[2]["form_id"], by_id[2]["current_step_title"]) == (None, "2차 결재")
+    assert by_id[3]["current_step_title"] == "4차 결재"
+    assert (by_id[4]["current_step_order"], by_id[4]["current_step_title"]) == (2, None)
+
+    pending = store.search(d, statuses=["pending"], query="양식")
+    assert [r["id"] for r in pending["rows"]] == [2, 1] and pending["total"] == 2
 
 
 # ── 결재선은 요청하는 사람이 그 자리에서 고른다 ──────────────────────
