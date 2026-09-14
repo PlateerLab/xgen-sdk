@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from xgen_sdk.approval import blocks, engine as E, registry, store, templates
+from xgen_sdk.approval import blocks, engine as E, evaluation, registry, store, templates
 from tests.test_approval_store import FakeDB
 
 
@@ -457,7 +457,9 @@ def test_a_filled_block_is_applied_when_the_approval_lands(db):
         store.decide(db, rid, actor_id=3, action="approved")
         assert seen == [], "중간 승인에서는 아직 아니다 — 최종이 나야 적용한다"
         store.decide(db, rid, actor_id=4, action="approved")
-        assert seen == [(rid, _assessed("high"))]
+        # 선택 항목은 서버가 정해 덧붙인다(2.3.0). 이 FakeDB 에는 평가 양식 표가 없어
+        # 읽기 실패 → 가장 엄격한 한 벌이다.
+        assert seen == [(rid, {**_assessed("high"), "options": evaluation.FULL_OPTIONS})]
     finally:
         blocks._APPLIERS.pop(blocks.EVALUATION, None)
 
@@ -1022,6 +1024,6 @@ def test_an_applier_on_the_new_name_runs_for_a_legacy_row(db):
                          data=_assessed("high"))
         store.decide(db, rid, actor_id=3, action="approved")
         store.decide(db, rid, actor_id=4, action="approved")
-        assert seen == [(blocks.EVALUATION, _assessed("high"))]
+        assert seen == [(blocks.EVALUATION, {**_assessed("high"), "options": evaluation.FULL_OPTIONS})]
     finally:
         blocks._APPLIERS.pop(blocks.EVALUATION, None)

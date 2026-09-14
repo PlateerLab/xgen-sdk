@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from xgen_sdk.approval import blocks as blocks_mod
 from xgen_sdk.approval import engine as E
+from xgen_sdk.approval import evaluation
 from xgen_sdk.approval import notifier
 from xgen_sdk.approval import templates
 from xgen_sdk.approval.registry import (
@@ -1379,13 +1380,27 @@ def _apply_draft_values(app_db, *, request_id: int, requester_id: int,
         block = snapped.get(key)
         if block is None:
             raise E.ApprovalError("이 양식에 없는 칸입니다.")
-        data = v.get("data")
+        data = _with_server_options(app_db, block, v.get("data"))
         _check_block_value(block, data)
         _q(app_db, """
             UPDATE approval_request_blocks
                SET data = %s, filled_by = %s, filled_at = %s WHERE id = %s
         """, (json.dumps(data, ensure_ascii=False) if data is not None else None,
               requester_id, now, block["id"]))
+
+
+def _with_server_options(app_db, block: Dict[str, Any], data: Any) -> Any:
+    """평가지 값의 선택 항목(``options``)은 **서버가 정한 것으로** 덮어쓴다 (2.3.0).
+
+    보낸 쪽이 적은 ``options`` 를 믿으면 결재자가 API 로 필수 영향 범위를 끄거나
+    위험 등급 원장에서 빠질 수 있다. 채운 값이 있는 평가지 칸(옛 이름 포함)만
+    바꾸고, 빈 값은 그대로 둔다 — 비우는 것은 비우는 것이다.
+    """
+    if blocks_mod.normalize_block_type((block or {}).get("block_type")) != blocks_mod.EVALUATION:
+        return data
+    if not isinstance(data, dict) or not data:
+        return data
+    return {**data, "options": evaluation.resolve_options(app_db, block, data)}
 
 
 def _check_block_value(block: Dict[str, Any], data: Any) -> None:
@@ -1478,6 +1493,7 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
     full = next((b for b in list_request_blocks(app_db, request_id)
                  if int(b["id"]) == int(block_id)), None)
     if full is not None:
+        data = _with_server_options(app_db, full, data)
         _check_block_value(full, data)
     _q(app_db, """
         UPDATE approval_request_blocks

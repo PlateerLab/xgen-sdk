@@ -51,6 +51,37 @@ class ApprovalError(Exception):
     """규칙 위반. 메시지는 **사람이 읽고 다음에 무엇을 할지 아는** 문장이다."""
 
 
+#: 평가지 값의 ``policy_id`` 가 가리키는 양식 버전이 없다.
+EVALUATION_VERSION_NOT_FOUND_MESSAGE = "평가한 양식 버전을 찾을 수 없으니 평가지를 다시 열어 평가해 주세요."
+#: 평가지 값의 ``policy_id`` 가 칸에 지정된 양식의 버전이 아니다.
+EVALUATION_VERSION_MISMATCH_MESSAGE = "이 칸에 지정된 평가 양식이 아니니 평가지를 다시 열어 평가해 주세요."
+
+
+class EvaluationVersionNotFound(ApprovalError):
+    """평가지 값이 **없는 양식 버전**으로 채점됐다 (2.3.0).
+
+    선택 항목은 그 버전이 정한다(:func:`xgen_sdk.approval.evaluation.resolve_options`).
+    버전이 없으면 무엇을 요구할지 알 수 없으니, 보낸 값을 믿지 않고 다시 평가하게 한다.
+    """
+
+    code = "EVALUATION_VERSION_NOT_FOUND"
+
+    def __init__(self, message: str = EVALUATION_VERSION_NOT_FOUND_MESSAGE):
+        super().__init__(message)
+
+
+class EvaluationVersionMismatch(ApprovalError):
+    """평가지 값이 **칸에 지정된 양식이 아닌** 버전으로 채점됐다 (2.3.0).
+
+    다른 양식의 버전을 대면 그 양식의 느슨한 선택 항목으로 이 칸을 통과할 수 있다.
+    """
+
+    code = "EVALUATION_VERSION_MISMATCH"
+
+    def __init__(self, message: str = EVALUATION_VERSION_MISMATCH_MESSAGE):
+        super().__init__(message)
+
+
 class ApprovalLineRequired(ApprovalError):
     """**결재선을 아직 안 골랐다** — 사용자가 고르면 그대로 진행되는 상태.
 
