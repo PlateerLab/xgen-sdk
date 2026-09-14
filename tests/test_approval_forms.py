@@ -30,7 +30,7 @@ from tests.test_approval_store import FakeDB
 
 
 def _assessed(level):
-    """거버넌스 기준을 **다 채운** 위험도 평가 — 등급만 있는 값은 채운 것이 아니다(1.61.0)."""
+    """**다 채운** 평가지 — 등급만 있는 값은 채운 것이 아니다(1.61.0)."""
     return {
         "risk_level": level, "rationale": "근거", "impact_scope": "EMPLOYEES",
         "item_scores": {"categories": [{"name": "합법성", "weight": "100",
@@ -80,7 +80,7 @@ def test_the_ai_deploy_template_is_the_three_step_procedure(db):
     assert kinds == [
         (0, blocks.AGENT_DEV_PLAN, True),
         (0, blocks.ATTACHMENTS, False),
-        (1, blocks.RISK_ASSESSMENT, True),
+        (1, blocks.EVALUATION, True),
     ]
     assert form["steps"][2]["title"], "칸이 없는 3차도 이름을 갖는다 — 없으면 편집기에서 사라진다"
 
@@ -167,18 +167,18 @@ def test_copy_then_drop_the_agent_plan(db):
     ])
     kinds = [b["block_type"] for b in store.get_form(db, copy_id)["blocks"]]
     assert blocks.AGENT_DEV_PLAN not in kinds
-    assert blocks.RISK_ASSESSMENT in kinds
+    assert blocks.EVALUATION in kinds
 
 
-def test_copy_then_drop_the_risk_assessment(db):
+def test_copy_then_drop_the_evaluation(db):
     copy_id = store.copy_form(db, _from_template(db), name="평가 없는 배포", owner_id=1)
     src = store.get_form(db, copy_id)
     store.update_form(db, copy_id, blocks=[
         {"step_index": b["step_index"], "block_type": b["block_type"], "label": b["label"],
          "required": b["required"], "sort_order": b["sort_order"]}
-        for b in src["blocks"] if b["block_type"] != blocks.RISK_ASSESSMENT
+        for b in src["blocks"] if b["block_type"] != blocks.EVALUATION
     ])
-    assert all(b["block_type"] != blocks.RISK_ASSESSMENT
+    assert all(b["block_type"] != blocks.EVALUATION
                for b in store.get_form(db, copy_id)["blocks"])
 
 
@@ -283,7 +283,7 @@ def test_submitting_snapshots_the_form(db):
     store.set_line_form(db, line_id, form_id)
     req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
     assert [(b["step_order"], b["block_type"]) for b in req["blocks"]] == [
-        (0, blocks.AGENT_DEV_PLAN), (0, blocks.ATTACHMENTS), (1, blocks.RISK_ASSESSMENT)]
+        (0, blocks.AGENT_DEV_PLAN), (0, blocks.ATTACHMENTS), (1, blocks.EVALUATION)]
 
 
 def test_editing_the_form_later_does_not_touch_a_live_request(db):
@@ -359,7 +359,7 @@ def test_nobody_can_approve_while_the_draft_is_empty(db):
     rid = store.submit(db, requester_id=1, title="배포", line_id=line_id)["id"]
 
     risk = next(b for b in store.get(db, rid)["blocks"]
-                if b["block_type"] == blocks.RISK_ASSESSMENT)
+                if b["block_type"] == blocks.EVALUATION)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                      data=_assessed("medium"))
     with pytest.raises(E.ApprovalError) as e:
@@ -387,7 +387,7 @@ def test_the_second_approver_must_assess_before_approving(db):
     assert "AI 위험도 평가" in str(e.value)
 
     risk = next(b for b in store.get(db, rid)["blocks"]
-                if b["block_type"] == blocks.RISK_ASSESSMENT)
+                if b["block_type"] == blocks.EVALUATION)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                      data=_assessed("medium"))
     store.decide(db, rid, actor_id=3, action="approved")
@@ -442,7 +442,7 @@ def test_a_filled_block_is_applied_when_the_approval_lands(db):
     결재로 옮긴 의미가 없어진다. 어디로 가는지는 그 표를 가진 서비스가 꽂는다.
     """
     seen = []
-    blocks.register_applier(blocks.RISK_ASSESSMENT,
+    blocks.register_applier(blocks.EVALUATION,
                             lambda app_db, req, block, data: seen.append((req["id"], data)))
     try:
         registry.register_action("generic", lambda *a, **k: None)
@@ -451,7 +451,7 @@ def test_a_filled_block_is_applied_when_the_approval_lands(db):
         store.set_line_form(db, line_id, form_id)
         rid = _submit_with_plan(db, line_id)["id"]
         risk = next(b for b in store.get(db, rid)["blocks"]
-                    if b["block_type"] == blocks.RISK_ASSESSMENT)
+                    if b["block_type"] == blocks.EVALUATION)
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                          data=_assessed("high"))
         store.decide(db, rid, actor_id=3, action="approved")
@@ -459,7 +459,7 @@ def test_a_filled_block_is_applied_when_the_approval_lands(db):
         store.decide(db, rid, actor_id=4, action="approved")
         assert seen == [(rid, _assessed("high"))]
     finally:
-        blocks._APPLIERS.pop(blocks.RISK_ASSESSMENT, None)
+        blocks._APPLIERS.pop(blocks.EVALUATION, None)
 
 
 def test_a_failing_block_applier_does_not_undo_the_approval(db):
@@ -467,7 +467,7 @@ def test_a_failing_block_applier_does_not_undo_the_approval(db):
     def boom(app_db, req, block, data):
         raise RuntimeError("거버넌스 원장이 막혔다")
 
-    blocks.register_applier(blocks.RISK_ASSESSMENT, boom)
+    blocks.register_applier(blocks.EVALUATION, boom)
     try:
         registry.register_action("generic", lambda *a, **k: None)
         form_id = _from_template(db)
@@ -475,7 +475,7 @@ def test_a_failing_block_applier_does_not_undo_the_approval(db):
         store.set_line_form(db, line_id, form_id)
         rid = _submit_with_plan(db, line_id)["id"]
         risk = next(b for b in store.get(db, rid)["blocks"]
-                    if b["block_type"] == blocks.RISK_ASSESSMENT)
+                    if b["block_type"] == blocks.EVALUATION)
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                          data=_assessed("low"))
         store.decide(db, rid, actor_id=3, action="approved")
@@ -484,7 +484,7 @@ def test_a_failing_block_applier_does_not_undo_the_approval(db):
         assert out["status"] == "approved"
         assert "거버넌스 원장이 막혔다" in str(out["apply_error"])
     finally:
-        blocks._APPLIERS.pop(blocks.RISK_ASSESSMENT, None)
+        blocks._APPLIERS.pop(blocks.EVALUATION, None)
 
 
 def test_an_unfilled_optional_block_has_nothing_to_apply(db):
@@ -498,7 +498,7 @@ def test_an_unfilled_optional_block_has_nothing_to_apply(db):
         store.set_line_form(db, line_id, form_id)
         rid = _submit_with_plan(db, line_id)["id"]
         risk = next(b for b in store.get(db, rid)["blocks"]
-                    if b["block_type"] == blocks.RISK_ASSESSMENT)
+                    if b["block_type"] == blocks.EVALUATION)
         store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                          data=_assessed("low"))
         store.decide(db, rid, actor_id=3, action="approved")
@@ -676,7 +676,7 @@ def test_the_draft_is_locked_once_someone_has_approved(db):
                      data={"plan_id": 9, "title": "고친 기획서"})
 
     risk = next(b for b in store.get(db, rid)["blocks"]
-                if b["block_type"] == blocks.RISK_ASSESSMENT)
+                if b["block_type"] == blocks.EVALUATION)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                      data=_assessed("low"))
     store.decide(db, rid, actor_id=3, action="approved")
@@ -699,7 +699,7 @@ def test_an_approver_cannot_edit_after_acting(db):
     store.set_line_form(db, line_id, form_id)
     rid = _submit_with_plan(db, line_id)["id"]
     risk = next(b for b in store.get(db, rid)["blocks"]
-                if b["block_type"] == blocks.RISK_ASSESSMENT)
+                if b["block_type"] == blocks.EVALUATION)
     store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
                      data=_assessed("low"))
     store.decide(db, rid, actor_id=3, action="approved")
@@ -732,7 +732,7 @@ def test_the_form_survives_when_the_requester_edits_the_approvers(db):
                               {"approver_id": 3, "step_order": 2}])
     assert out["form_name"] == "AI Agent 배포 결재", "양식이 따라와야 한다"
     assert [b["block_type"] for b in out["blocks"]] == [
-        blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.RISK_ASSESSMENT]
+        blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.EVALUATION]
     assert [s["approver_id"] for s in out["steps"]] == [4, 3], "결재자는 고른 대로"
 
 
@@ -897,9 +897,131 @@ def test_old_wording_on_a_form_someone_else_made_is_theirs(db):
     assert {s["step_index"]: s["guide"] for s in form["steps"]}[1] == old["guides"][1][0]
 
 
-def test_the_shipped_deploy_template_passes_the_governance_standard_only_when_complete():
-    """우리가 주는 배포 템플릿의 평가 칸은 **거버넌스와 같은 기준**으로 채워져야 한다."""
+def test_the_shipped_deploy_template_is_filled_only_when_complete():
+    """우리가 주는 배포 템플릿의 평가지 칸은 **모든 항목을 채워야** 채운 것이다."""
     t = templates.by_name("AI Agent 배포 결재")
-    risk = next(b for b in t["blocks"] if b["block_type"] == blocks.RISK_ASSESSMENT)
+    risk = next(b for b in t["blocks"] if b["block_type"] == blocks.EVALUATION)
     assert risk["required"] is True and risk["step_index"] == 1
-    assert not blocks.is_filled({"block_type": blocks.RISK_ASSESSMENT, "data": {"risk_level": "low"}})
+    assert not blocks.is_filled({"block_type": blocks.EVALUATION, "data": {"risk_level": "low"}})
+
+
+def test_the_shipped_deploy_template_scores_with_the_builtin_ai_risk_form(db):
+    """배포 양식의 평가지 칸은 기본 제공 [AI 위험도 평가지](ai-risk)를 가리킨다.
+
+    칸 이름은 그대로 "AI 위험도 평가" 다 — 결재 문서에 실리는 말은 바뀌지 않는다.
+    """
+    t = templates.by_name("AI Agent 배포 결재")
+    risk = next(b for b in t["blocks"] if b["step_index"] == 1)
+    assert risk["block_type"] == blocks.EVALUATION == "evaluation"
+    assert risk["label"] == "AI 위험도 평가"
+    assert risk["config"] == {"template_id": "ai-risk"}
+
+    store.seed_builtin_forms(db)
+    form = next(f for f in store.list_forms(db) if f["name"] == "AI Agent 배포 결재")
+    stored = next(b for b in store.get_form(db, form["id"])["blocks"] if b["step_index"] == 1)
+    assert stored["block_type"] == blocks.EVALUATION
+    assert blocks.parse_data(stored["config"]) == {"template_id": "ai-risk"}
+
+
+# ── 옛 종류 이름(risk_assessment)이 남은 행 (2.2.0) ──────────────────
+
+
+LEGACY = "risk_assessment"
+
+
+def _make_legacy(rows):
+    """옮기기 전 DB 처럼 저장된 행의 종류 이름을 옛 이름으로 되돌린다."""
+    n = 0
+    for r in rows:
+        if r["block_type"] == blocks.EVALUATION:
+            r["block_type"] = LEGACY
+            n += 1
+    assert n, "되돌릴 평가지 칸이 있어야 검사가 뜻을 갖는다"
+
+
+def test_a_form_saved_with_the_old_name_is_stored_under_the_new_name(db):
+    """옛 이름으로 들어온 양식은 받되 **새 이름으로** 적는다 — 새 행에 옛 이름이 남지 않는다."""
+    steps = [{"step_index": 0}, {"step_index": 1}]
+    legacy_blocks = [{"step_index": 1, "block_type": LEGACY, "label": "평가"}]
+    checked = store.validate_form_shape(steps, legacy_blocks)
+    assert [b["block_type"] for b in checked] == [blocks.EVALUATION]
+
+    fid = store.create_form(db, name="옛 이름 양식", owner_id=1, steps=steps, blocks=legacy_blocks)
+    assert [b["block_type"] for b in db.t["approval_form_blocks"] if b["form_id"] == fid] == [
+        blocks.EVALUATION]
+
+
+def test_reading_a_legacy_form_row_gives_the_new_name(db):
+    form_id = _from_template(db)
+    _make_legacy(db.t["approval_form_blocks"])
+    kinds = [b["block_type"] for b in store.get_form(db, form_id)["blocks"]]
+    assert LEGACY not in kinds and blocks.EVALUATION in kinds
+    # 고칠 때도(읽고 다시 쓰는 길) 옛 이름으로 되돌아가지 않는다.
+    copy_id = store.copy_form(db, form_id, name="사본", owner_id=1)
+    assert all(b["block_type"] != LEGACY
+               for b in db.t["approval_form_blocks"] if b["form_id"] == copy_id)
+
+
+def test_submitting_on_a_legacy_form_snapshots_the_new_name(db):
+    """양식 행이 아직 옛 이름이어도 새로 올라가는 결재 칸은 새 이름이다."""
+    form_id = _from_template(db)
+    _make_legacy(db.t["approval_form_blocks"])
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
+    raw = [b["block_type"] for b in db.t["approval_request_blocks"] if b["request_id"] == req["id"]]
+    assert raw == [blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.EVALUATION]
+
+
+def test_a_live_request_with_the_old_name_can_still_be_filled_and_approved(db):
+    """옮기기 전에 올라간 결재가 새 코드에서 멈추면 아무도 끝낼 수 없다."""
+    registry.register_action("generic", lambda *a, **k: None)
+    form_id = _from_template(db)
+    line_id = _line(db)
+    store.set_line_form(db, line_id, form_id)
+    rid = _submit_with_plan(db, line_id)["id"]
+    _make_legacy(db.t["approval_request_blocks"])
+
+    risk = next(b for b in store.get(db, rid)["blocks"] if b["step_order"] == 1)
+    assert risk["block_type"] == blocks.EVALUATION, "읽는 길에서 새 이름으로 보여야 한다"
+
+    # 옛 이름 칸은 여전히 필수 평가지다 — 비어 있으면 승인이 막힌다.
+    with pytest.raises(E.ApprovalError):
+        store.decide(db, rid, actor_id=3, action="approved")
+
+    out = store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                           data=_assessed("medium"))
+    assert out["block_type"] == blocks.EVALUATION
+    store.decide(db, rid, actor_id=3, action="approved")
+    store.decide(db, rid, actor_id=4, action="approved")
+    assert store.get(db, rid)["status"] == "approved"
+
+
+def test_an_applier_on_the_new_name_runs_for_a_legacy_row(db):
+    """core 는 새 이름으로 훅을 꽂는다. 옛 이름이 남은 결재도 같은 훅을 타야
+    평가가 원장에서 빠지지 않는다."""
+    seen = []
+    blocks.register_applier(blocks.EVALUATION,
+                            lambda app_db, req, block, data: seen.append((block["block_type"], data)))
+    try:
+        # 읽는 길을 거치지 않은 행(원시 행)도 찾는다.
+        err = store._apply_blocks(db, {"id": 1, "blocks": [
+            {"block_type": LEGACY, "label": "평가", "data": {"risk_level": "low"}}]})
+        assert err == ""
+        assert seen == [(LEGACY, {"risk_level": "low"})]
+        seen.clear()
+
+        registry.register_action("generic", lambda *a, **k: None)
+        form_id = _from_template(db)
+        line_id = _line(db)
+        store.set_line_form(db, line_id, form_id)
+        rid = _submit_with_plan(db, line_id)["id"]
+        _make_legacy(db.t["approval_request_blocks"])
+        risk = next(b for b in store.get(db, rid)["blocks"] if b["step_order"] == 1)
+        store.fill_block(db, request_id=rid, block_id=risk["id"], actor_id=3,
+                         data=_assessed("high"))
+        store.decide(db, rid, actor_id=3, action="approved")
+        store.decide(db, rid, actor_id=4, action="approved")
+        assert seen == [(blocks.EVALUATION, _assessed("high"))]
+    finally:
+        blocks._APPLIERS.pop(blocks.EVALUATION, None)

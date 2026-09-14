@@ -54,7 +54,9 @@ BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
              "required": True, "sort_order": 1},
             {"step_index": 0, "block_type": B.ATTACHMENTS, "label": "참고 자료",
              "required": False, "sort_order": 2},
-            {"step_index": 1, "block_type": B.RISK_ASSESSMENT, "label": "AI 위험도 평가",
+            # 평가지 칸 하나. 이 양식은 기본 제공 [AI 위험도 평가지](ai-risk)로 채점한다.
+            {"step_index": 1, "block_type": B.EVALUATION, "label": "AI 위험도 평가",
+             "config": {"template_id": "ai-risk"},
              "required": True, "sort_order": 1},
         ],
     },
@@ -102,7 +104,7 @@ BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
 #: 남아 있으면 지금 글로 바꾼다(:func:`xgen_sdk.approval.store.seed_builtin_forms`).
 #:
 #: 왜 있나: 시딩은 "없는 이름만" 이라, 이미 돌아가는 조직은 우리가 고친 안내를
-#: 영영 받지 못한다 — 절차는 새 기준(거버넌스와 같은 위험도 평가)으로 도는데
+#: 영영 받지 못한다 — 절차는 새 기준(평가지의 모든 항목을 채우는 평가)으로 도는데
 #: 문서에는 "등급만 정하면 된다" 가 남는다. 내장 양식은 사용자가 고칠 수 없으므로
 #: 이 글이 그대로라면 우리가 넣은 것이고, **글자 하나라도 다르면 건드리지 않는다.**
 LEGACY_TEXTS: Dict[str, Dict[str, Any]] = {

@@ -553,7 +553,7 @@ def finish(app_db, request_id: int, action_type: str,
     """
     payload = loaded.get("payload") or {}
     if status == E.APPROVED:
-        # 칸의 값부터 제자리로 보낸다 — 2차가 적은 위험도 평가가 거버넌스
+        # 칸의 값부터 제자리로 보낸다 — 2차가 채운 평가지가 Agent 위험 등급
         # 원장에 남는 것이 그 예다. 행위 적용(배포 등)보다 먼저 하는 이유는,
         # 적용이 실패해 사람이 다시 시도할 때 **판단의 근거는 이미 남아 있어야**
         # 하기 때문이다.
@@ -960,7 +960,7 @@ def get_form(app_db, form_id: int) -> Optional[Dict[str, Any]]:
         SELECT id, step_index, title, guide FROM approval_form_steps
         WHERE form_id = %s ORDER BY step_index
     """, (form_id,))]
-    form["blocks"] = [dict(b) for b in _q(app_db, """
+    form["blocks"] = [_normalized(b) for b in _q(app_db, """
         SELECT id, step_index, block_type, label, config, required, sort_order
         FROM approval_form_blocks WHERE form_id = %s
         ORDER BY step_index, sort_order, id
@@ -969,6 +969,14 @@ def get_form(app_db, form_id: int) -> Optional[Dict[str, Any]]:
     #: 단계를 고칠 때마다 두 곳이 어긋날 수 있어 **파생**으로 둔다.
     form["approver_steps"] = max([int(st["step_index"]) for st in form["steps"]] or [0])
     return form
+
+
+def _normalized(row: Any) -> Dict[str, Any]:
+    """읽어 온 칸 행의 종류 이름을 지금 이름으로 — 옛 이름이 화면과 훅까지 새지 않게."""
+    out = dict(row)
+    if "block_type" in out:
+        out["block_type"] = blocks_mod.normalize_block_type(out["block_type"])
+    return out
 
 
 def validate_form_shape(steps: Sequence[Dict[str, Any]],
@@ -982,7 +990,8 @@ def validate_form_shape(steps: Sequence[Dict[str, Any]],
       · 결재자가 **한 명 이상**이어야 한다. 기안만 있는 결재는 결재가 아니다.
       · 칸은 **있는 단계에만** 놓인다. 3차를 2차로 줄이면서 3차의 칸을 그대로
         두면 그 칸은 영영 아무도 못 채운다 — 조용히 버리지 않고 막는다.
-      · 칸 종류는 레지스트리에 있어야 한다.
+      · 칸 종류는 레지스트리에 있어야 한다. 옛 이름은 지금 이름으로 바꿔 둔다
+        (:func:`blocks.normalize_block_type`) — 새로 쓰는 행에 옛 이름이 남지 않는다.
     """
     idx = sorted({int(st.get("step_index", 0) or 0) for st in steps or []})
     if not idx:
@@ -998,7 +1007,7 @@ def validate_form_shape(steps: Sequence[Dict[str, Any]],
 
     checked: List[Dict[str, Any]] = []
     for i, b in enumerate(blocks or []):
-        btype = str(b.get("block_type") or "")
+        btype = blocks_mod.normalize_block_type(b.get("block_type"))
         if not blocks_mod.is_known(btype):
             raise E.ApprovalError(f"알 수 없는 칸 종류입니다: {btype}")
         step = int(b.get("step_index") or 0)
@@ -1250,7 +1259,7 @@ def _backfill_builtin_notice(app_db, row: Dict[str, Any], template: Dict[str, An
 def _refresh_builtin_texts(app_db, row: Dict[str, Any], template: Dict[str, Any]) -> None:
     """우리가 심은 양식에 **예전 글이 글자 그대로** 남아 있으면 지금 글로 바꾼다.
 
-    절차가 바뀌었는데(위험도 평가를 거버넌스와 같은 기준으로) 이미 돌아가는
+    절차가 바뀌었는데(평가지의 모든 항목을 채워야 넘어가도록) 이미 돌아가는
     조직의 문서에는 "등급만 정하면 된다" 가 남으면, 문서가 사람에게 틀린 절차를
     가르친다. 바꾸는 것은 **글**(설명·안내·단계 안내문)뿐이다 — 단계·칸·필수 여부는
     결재선이 붙잡고 있는 절차라 건드리지 않는다.
@@ -1389,7 +1398,10 @@ def _check_block_value(block: Dict[str, Any], data: Any) -> None:
 
 def snapshot_form_blocks(app_db, *, request_id: int, line_id: Optional[int] = None,
                          form_id: Optional[int] = None) -> None:
-    """상신 시 양식을 복사해 넣는다. 양식이 없으면 아무것도 하지 않는다."""
+    """상신 시 양식을 복사해 넣는다. 양식이 없으면 아무것도 하지 않는다.
+
+    양식 행에 옛 종류 이름이 남아 있어도 결재 칸에는 지금 이름으로 쓴다.
+    """
     if not form_id:
         form = _line_form(app_db, line_id)
         form_id = (form or {}).get("id")
@@ -1403,12 +1415,12 @@ def snapshot_form_blocks(app_db, *, request_id: int, line_id: Optional[int] = No
             INSERT INTO approval_request_blocks
                 (request_id, step_order, block_type, label, config, required, sort_order)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (request_id, b["step_index"], b["block_type"], b["label"],
-              b["config"], b["required"], b["sort_order"]))
+        """, (request_id, b["step_index"], blocks_mod.normalize_block_type(b["block_type"]),
+              b["label"], b["config"], b["required"], b["sort_order"]))
 
 
 def list_request_blocks(app_db, request_id: int) -> List[Dict[str, Any]]:
-    return [dict(r) for r in _q(app_db, """
+    return [_normalized(r) for r in _q(app_db, """
         SELECT id, step_order, block_type, label, config, required, sort_order,
                data, filled_by, filled_at
         FROM approval_request_blocks WHERE request_id = %s
@@ -1472,4 +1484,5 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
         SET data = %s, filled_by = %s, filled_at = %s WHERE id = %s
     """, (json.dumps(data, ensure_ascii=False) if data is not None else None,
           actor_id, _now(), block_id))
-    return {"id": block_id, "step_order": step, "block_type": row["block_type"]}
+    return {"id": block_id, "step_order": step,
+            "block_type": blocks_mod.normalize_block_type(row["block_type"])}
