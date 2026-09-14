@@ -82,18 +82,18 @@ AGENT_DEPLOY = "agent.deploy"
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
-        GENERIC, "일반 결재", "결재 자체가 결론인 건 (적용 동작 없음)",
+        GENERIC, "일반 결재", "결재만 하고 끝나는 건",
         OWNER_CORE, DOMAIN_FREE, gated=False, user_submittable=True,
     ),
     ActionSpec(
-        TEST, "테스트 결재", "결재선이 도는지 확인하는 건 (아무것도 바꾸지 않는다)",
+        TEST, "테스트 결재", "결재선이 제대로 도는지 확인하는 건",
         OWNER_CORE, DOMAIN_FREE, gated=False, user_submittable=True,
     ),
 
     # ── 배포 ──
     ActionSpec(
         AGENT_DEPLOY, "에이전트 배포",
-        "에이전트를 외부(URL·임베드·API)로 여는 것",
+        "에이전트를 URL·임베드·API로 외부에 여는 것",
         OWNER_CORE, DOMAIN_DEPLOY,
     ),
 
@@ -122,7 +122,7 @@ CATALOG: Tuple[ActionSpec, ...] = (
     # ── 클라우드 ──
     ActionSpec(
         "cloud.storage_create", "클라우드 저장소 생성",
-        "내 클라우드에 새 저장소(루트 폴더)를 만드는 것",
+        "내 클라우드에 새 저장소를 만드는 것",
         OWNER_WORKFLOW, DOMAIN_CLOUD,
     ),
     ActionSpec(
@@ -142,12 +142,12 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ),
     ActionSpec(
         "cloud.device_link", "PC 연결",
-        "접속기를 깐 PC 를 계정에 연결하는 것 (그 PC 와 파일이 오간다)",
+        "접속기를 설치한 PC를 계정에 연결하는 것",
         OWNER_WORKFLOW, DOMAIN_CLOUD,
     ),
     ActionSpec(
         "cloud.agent_link", "에이전트 연결",
-        "에이전트가 내 클라우드 저장소를 쓰도록 잇는 것",
+        "에이전트가 내 클라우드 저장소를 쓰도록 연결하는 것",
         OWNER_WORKFLOW, DOMAIN_CLOUD,
     ),
 
@@ -166,8 +166,7 @@ CATALOG: Tuple[ActionSpec, ...] = (
     # ── 도구 ──
     ActionSpec(
         "tool.publish", "도구 스토어 게시",
-        "에이전트가 만든 도구를 전체 사용자에게 게시하는 것 "
-        "(임의 코드가 조직 전체의 샌드박스에서 돌 수 있는 길이다)",
+        "에이전트가 만든 도구를 전체 사용자에게 게시하는 것",
         OWNER_WORKFLOW, DOMAIN_TOOL,
     ),
 )

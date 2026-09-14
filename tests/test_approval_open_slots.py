@@ -80,7 +80,7 @@ class TestFillOpenSlots:
             E.fill_open_slots(_slots(1, OPEN), _slots(1))
 
     def test_every_open_slot_needs_a_person(self):
-        with pytest.raises(ApprovalError, match="모두 정해"):
+        with pytest.raises(ApprovalError, match="모두 지정"):
             E.fill_open_slots(_slots(1, OPEN), _slots(1, OPEN))
 
     def test_the_chosen_person_cannot_be_someone_already_on_the_line(self):
@@ -177,7 +177,7 @@ class TestResolveLine:
             == (lid, _slots(1, 5))
         with pytest.raises(ApprovalError, match="관리자가 정한 결재자"):
             policy.resolve_line(pdb, "collection.create", steps=_slots(5, 1))
-        with pytest.raises(ApprovalError, match="차례를 더하거나 뺄 수 없습니다"):
+        with pytest.raises(ApprovalError, match="차례를 추가하거나 뺄 수 없습니다"):
             policy.resolve_line(pdb, "collection.create", steps=_slots(1, 5, 2))
 
     def test_a_locked_line_of_people_still_refuses_steps(self, pdb):

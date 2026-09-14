@@ -141,7 +141,7 @@ def set_policy(app_db, action_type: str, *, actor_id: Optional[int],
         raise ValueError(f"알 수 없는 행위입니다: {action_type}")
     sp = catalog.spec(key)
     if not sp.gated:
-        raise ValueError(f"{sp.label} 은(는) 결재 목록으로 켜고 끄는 행위가 아닙니다")
+        raise ValueError(f"{sp.label}은(는) 결재 필수로 지정할 수 없는 행위입니다.")
 
     before = get(app_db, key)
     now = datetime.now(timezone.utc)
@@ -273,7 +273,7 @@ def resolve_line(app_db, action_type: str, *,
     label = sp.label if sp else action_type
 
     if pol.get("line_locked") and default_line:
-        refused = ApprovalError(f"{label} 은(는) 결재선이 고정된 행위입니다 — 결재선을 고를 수 없습니다")
+        refused = ApprovalError(f"{label}은(는) 결재선이 고정되어 있어 바꿀 수 없습니다.")
         if line_id and int(line_id) != int(default_line):
             raise refused
         template = _line_slots(app_db, int(default_line))

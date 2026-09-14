@@ -180,7 +180,7 @@ class TestDelete:
         db.policies.append({"action_type": "agent.deploy", "default_line_id": line["id"]})
         with pytest.raises(E.ApprovalError) as caught:
             store.delete_line(db, line["id"], actor_id=9, is_superuser=True)
-        assert "agent.deploy" in str(caught.value)
+        assert "에이전트 배포" in str(caught.value), "키가 아니라 화면 이름으로 말한다"
         assert store.get_line(db, line["id"])["is_active"] is True
 
     def test_force_clears_the_defaults_it_frees(self, db):

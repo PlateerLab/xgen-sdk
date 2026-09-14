@@ -98,7 +98,7 @@ def test_a_gated_action_cannot_be_raised_from_the_user_api(db):
     행위를 그 문으로 들일 수 있으면, 아무나 '배포' 결재에 남의 워크플로우 id 를
     적어 올리고 승인 한 번으로 그것을 외부에 열 수 있다.
     """
-    with pytest.raises(E.ApprovalError, match="직접 올릴 수 없습니다"):
+    with pytest.raises(E.ApprovalError, match="기능 화면에서만 올릴 수 있습니다"):
         _submit(db, action_type="agent.deploy", target_ref="workflow:abc",
                 via_user_api=True)
 

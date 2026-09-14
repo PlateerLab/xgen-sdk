@@ -134,23 +134,20 @@ REGISTRY: Dict[str, BlockSpec] = {
     ),
     ATTACHMENTS: BlockSpec(
         ATTACHMENTS, "파일 첨부",
-        description="파일을 붙인다.",
+        description="파일을 첨부하는 칸.",
         is_filled=_has_files,
         default_config={"extensions": [], "max_count": 10, "max_bytes": 52428800},
     ),
     AGENT_DEV_PLAN: BlockSpec(
         AGENT_DEV_PLAN, "Agent 기획서",
-        description="Agent 개발 기획서를 고르거나 새로 쓴다.",
+        description="Agent 개발 기획서를 고르거나 새로 작성하는 칸.",
         is_filled=_has_plan,
         default_config={"allow_create": True},
         actor="drafter",
     ),
     RISK_ASSESSMENT: BlockSpec(
         RISK_ASSESSMENT, "AI 위험도 평가",
-        description=(
-            "거버넌스 [AI 위험도 평가] 와 같은 평가 — 항목별 사전 위험·위험 경감, "
-            "영향 범위, 위험 특성, 판단 근거. 등급은 점수로 정해진다."
-        ),
+        description="거버넌스 [AI 위험도 평가]와 같은 기준으로 평가하는 칸. 등급은 점수로 정해집니다.",
         is_filled=_has_assessment,
         default_config={"template_id": None},
         actor="approver",
@@ -268,7 +265,7 @@ def validate_data(block: Dict[str, Any], data: Any) -> None:
         max_count = None
     if max_count is not None and max_count > 0 and len(ids) > max_count:
         raise ValueError(
-            f"{block.get('label') or '첨부'} 는 {max_count}개까지 붙일 수 있습니다 (지금 {len(ids)}개)")
+            f"{block.get('label') or '첨부'}은(는) {max_count}개까지 첨부할 수 있습니다.")
 
     exts = cfg.get("extensions")
     exts = [str(e).lower().lstrip(".") for e in exts] if isinstance(exts, list) else []
@@ -286,8 +283,8 @@ def validate_data(block: Dict[str, Any], data: Any) -> None:
             bad.append(name or "이름 없는 파일")
     if bad:
         raise ValueError(
-            f"{block.get('label') or '첨부'} 에 허용되지 않은 파일이 있습니다: "
-            f"{', '.join(bad[:3])} (허용: {', '.join(exts)})")
+            f"{block.get('label') or '첨부'}에는 {', '.join(exts)} 파일만 첨부할 수 있습니다: "
+            f"{', '.join(bad[:3])}")
 
 
 def unfilled_required(blocks: Any, step_order: int) -> List[Dict[str, Any]]:

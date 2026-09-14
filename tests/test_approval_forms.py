@@ -587,7 +587,7 @@ def test_the_attachment_limit_the_form_declares_is_enforced(db):
                          "attachment_ids": [1, 2, 3],
                          "files": [{"id": i, "original_name": f"{i}.pdf"} for i in (1, 2, 3)]}}])
 
-    with pytest.raises(E.ApprovalError, match="허용되지 않은 파일"):
+    with pytest.raises(E.ApprovalError, match="파일만 첨부할 수 있습니다"):
         store.submit(db, requester_id=1, title="확장자 다름", line_id=line_id,
                      block_values=[{"sort_order": 1, "data": {
                          "attachment_ids": [1],
@@ -685,7 +685,7 @@ def test_the_draft_is_locked_once_someone_has_approved(db):
         store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
                          data={"plan_id": 99, "title": "슬쩍 바꾼 기획서"})
     assert "이미 승인한 결재자" in str(e.value)
-    assert "다시 올려" in str(e.value), "무엇을 하면 되는지 말해야 한다"
+    assert "다시 올리" in str(e.value), "무엇을 하면 되는지 말해야 한다"
 
     after = next(b for b in store.get(db, rid)["blocks"] if b["id"] == plan["id"])
     assert blocks.parse_data(after["data"])["plan_id"] == 9, "값이 그대로여야 한다"
