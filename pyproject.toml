@@ -1,6 +1,6 @@
 [project]
 name = "xgen-sdk"
-version = "1.62.1"
+version = "2.0.0"
 description = "XGen Platform Shared SDK — unified DB, Config, Storage, Auth, Quota, Notification, and LLM Catalog for agent and RAG services"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -67,7 +67,6 @@ dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "fastapi>=0.100.0",
-    "mcp>=0.9",
 ]
 
 [project.urls]
@@ -76,17 +75,6 @@ Repository = "https://github.com/PlateerLab/xgen-sdk"
 "Source Code" = "https://github.com/PlateerLab/xgen-sdk"
 "Issue Tracker" = "https://github.com/PlateerLab/xgen-sdk/issues"
 Changelog = "https://github.com/PlateerLab/xgen-sdk/releases"
-
-# 하네스 빌트인 Guard 자동 발견. 그룹명 "xgen_harness.guards"는 외부 플러그인 계약이라
-# 유지하고, 타겟 경로만 vendored 위치(xgen_sdk.harness.*)로 이식.
-[project.entry-points."xgen_harness.guards"]
-token_budget      = "xgen_sdk.harness.stages.strategies.guard:TokenBudgetGuard"
-cost_budget       = "xgen_sdk.harness.stages.strategies.guard:CostBudgetGuard"
-iteration         = "xgen_sdk.harness.stages.strategies.guard:IterationGuard"
-content           = "xgen_sdk.harness.stages.strategies.guard:ContentGuard"
-tool_precondition = "xgen_sdk.harness.stages.strategies.guard_precondition:ToolPreconditionGuard"
-hitl              = "xgen_sdk.harness.stages.strategies.guard:HITLGuard"
-tool_diversity    = "xgen_sdk.harness.stages.strategies.guard:ToolDiversityGuard"
 
 [build-system]
 requires = ["setuptools>=69.0.0", "wheel"]
