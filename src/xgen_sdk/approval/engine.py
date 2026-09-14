@@ -68,7 +68,7 @@ class ApprovalLineRequired(ApprovalError):
         self.action_label = action_label or action_type
         #: 관리자가 [결재 목록 설정] 에 정해 둔 결재선 — 모달을 미리 채운다.
         self.default_line_id = default_line_id
-        super().__init__(f"{self.action_label} 은(는) 결재를 거쳐야 합니다 — 결재선을 지정해 주세요")
+        super().__init__(f"{self.action_label}은(는) 결재가 필요합니다. 결재선을 지정하세요.")
 
 
 # ── 결재선 만들기 ─────────────────────────────────────────────────────
@@ -186,15 +186,15 @@ def fill_open_slots(template: Sequence[Dict[str, Any]],
     """
     slots = plan_line_slots(template)
     if any(is_open_slot(s) for s in steps):
-        raise ApprovalError("임의 차례의 결재자를 모두 정해 주세요")
+        raise ApprovalError("임의 차례의 결재자를 모두 지정하세요.")
     chosen = plan_steps(steps)
     if len(chosen) != len(slots):
         raise ApprovalError(
-            f"이 결재선은 {len(slots)}차례입니다 — 관리자가 정한 결재선이라 차례를 더하거나 뺄 수 없습니다")
+            f"관리자가 정한 결재선이라 차례를 추가하거나 뺄 수 없습니다. ({len(slots)}차례)")
     for slot, pick in zip(slots, chosen):
         if slot["approver_id"] is not None and int(slot["approver_id"]) != int(pick["approver_id"]):
             raise ApprovalError(
-                f"{slot['step_order']}번째 차례는 관리자가 정한 결재자입니다 — 바꿀 수 없습니다")
+                f"{slot['step_order']}번째 차례는 관리자가 정한 결재자라 바꿀 수 없습니다.")
     return chosen
 
 
@@ -236,7 +236,7 @@ def decide(
     처리된 줄 알고 넘어가고, 결재함에는 그대로 남는다.
     """
     if action not in (APPROVED, REJECTED):
-        raise ApprovalError("승인 또는 거절만 할 수 있습니다")
+        raise ApprovalError("승인 또는 반려만 할 수 있습니다")
 
     status = str(request.get("status") or PENDING)
     if status in TERMINAL:
@@ -366,6 +366,6 @@ def cancel(
 def _terminal_reason(status: str) -> str:
     return {
         APPROVED: "이미 승인 완료된 결재입니다",
-        REJECTED: "이미 거절된 결재입니다",
+        REJECTED: "이미 반려된 결재입니다",
         CANCELED: "기안자가 회수한 결재입니다",
     }.get(status, "이미 종결된 결재입니다")

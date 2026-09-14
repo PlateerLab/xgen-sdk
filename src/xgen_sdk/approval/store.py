@@ -197,8 +197,7 @@ def _guard_form_still_fits(app_db, line: Dict[str, Any], approver_count: int) ->
         return
     name = rows[0].get("name") or f"#{form_id}"
     raise E.ApprovalError(
-        f"이 결재선에 붙은 양식 [{name}] 은 결재자 {need}명이 필요합니다 "
-        f"({approver_count}명으로 줄일 수 없습니다). 양식을 먼저 떼세요")
+        f"양식 [{name}]에 결재자 {need}명이 필요해 줄일 수 없습니다. 양식을 먼저 해제하세요.")
 
 
 def list_all_shared_lines(app_db) -> List[Dict[str, Any]]:
@@ -259,12 +258,15 @@ def delete_line(app_db, line_id: int, actor_id: int, is_superuser: bool,
     if not owner:
         raise E.ApprovalError("결재선을 찾을 수 없습니다")
     if not is_superuser and int(owner[0]["owner_id"] or 0) != int(actor_id):
-        raise E.ApprovalError("내가 만든 결재선만 지울 수 있습니다")
+        raise E.ApprovalError("내가 만든 결재선만 삭제할 수 있습니다.")
 
     used_by = default_policies_using_line(app_db, line_id)
     if used_by and not force:
+        from xgen_sdk.approval import catalog
+
+        labels = [(catalog.spec(a).label if catalog.spec(a) else a) for a in used_by]
         raise E.ApprovalError(
-            "이 결재선을 기본 결재선으로 쓰는 행위가 있습니다: " + ", ".join(used_by))
+            "이 결재선을 기본 결재선으로 쓰는 행위가 있습니다: " + ", ".join(labels))
     if used_by:
         _q(app_db,
            "UPDATE approval_action_policies SET default_line_id = NULL, line_locked = FALSE "
@@ -314,15 +316,14 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
     if not is_registered(action_type):
         raise E.ApprovalError(f"등록되지 않은 결재 종류입니다: {action_type}")
     if via_user_api and not is_user_submittable(action_type):
-        raise E.ApprovalError(
-            "이 종류는 직접 올릴 수 없습니다 — 해당 기능 화면에서 올라갑니다")
+        raise E.ApprovalError("이 종류는 해당 기능 화면에서만 올릴 수 있습니다.")
 
     ref = str(target_ref).strip()[:200] if target_ref else None
     if ref:
         dup = find_pending_for_target(app_db, action_type, ref)
         if dup:
             raise E.ApprovalError(
-                f"이미 진행 중인 결재가 있습니다 (#{dup['id']}) — 그 건이 끝난 뒤에 다시 올려 주세요")
+                f"이미 진행 중인 결재(#{dup['id']})가 있습니다.")
 
     if steps:
         specs = list(steps)
@@ -335,8 +336,7 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         if any(E.is_open_slot(s) for s in specs):
             # 템플릿을 그대로 복사하면 빈 차례가 올라가 거기서 영영 멈춘다 — 알림이 갈
             # 사람이 없다. 요청자가 사람을 세운 steps 로 다시 올려야 한다.
-            raise E.ApprovalError(
-                "이 결재선에는 올리는 사람이 고를 차례(임의)가 있습니다 — 결재자를 정해 주세요")
+            raise E.ApprovalError("임의 차례의 결재자를 지정하세요.")
     else:
         raise E.ApprovalError("결재선을 지정하세요")
 
@@ -949,25 +949,25 @@ def validate_form_shape(steps: Sequence[Dict[str, Any]],
     """
     idx = sorted({int(st.get("step_index", 0) or 0) for st in steps or []})
     if not idx:
-        raise E.ApprovalError("단계가 없습니다 — 기안(1차)과 결재자가 최소 한 명 필요합니다")
+        raise E.ApprovalError("기안 단계와 결재자 단계를 추가하세요.")
     if idx[0] != 0:
-        raise E.ApprovalError("1차(기안) 단계가 없습니다")
+        raise E.ApprovalError("1차 기안 단계가 없습니다.")
     if idx != list(range(len(idx))):
         missing = [i for i in range(idx[-1] + 1) if i not in idx]
         raise E.ApprovalError(
             "중간 단계가 비어 있습니다: " + ", ".join(f"{i + 1}차" for i in missing))
     if idx[-1] < 1:
-        raise E.ApprovalError("결재자가 없습니다 — 2차 이상을 한 단계 이상 두세요")
+        raise E.ApprovalError("결재자 단계를 하나 이상 추가하세요.")
 
     checked: List[Dict[str, Any]] = []
     for i, b in enumerate(blocks or []):
         btype = str(b.get("block_type") or "")
         if not blocks_mod.is_known(btype):
-            raise E.ApprovalError(f"모르는 칸 종류입니다: {btype}")
+            raise E.ApprovalError(f"알 수 없는 칸 종류입니다: {btype}")
         step = int(b.get("step_index") or 0)
         if step not in idx:
             raise E.ApprovalError(
-                f"{step + 1}차 단계가 없는데 그 단계에 칸이 있습니다: "
+                f"{step + 1}차 단계가 없어 칸을 둘 수 없습니다: "
                 f"{b.get('label') or btype}")
         checked.append({**b, "block_type": btype, "step_index": step,
                         "_given": (int(b.get("sort_order") or 0), i)})
@@ -1059,7 +1059,7 @@ def update_form(app_db, form_id: int, *, name: Optional[str] = None,
         raise E.ApprovalError("양식을 찾을 수 없습니다")
     if form.get("is_builtin"):
         # 기본 양식을 고치면 다음 사람은 무엇이 기본이었는지 알 수 없다.
-        raise E.ApprovalError("기본 양식은 고칠 수 없습니다 — 복사해서 쓰세요")
+        raise E.ApprovalError("기본 양식은 수정할 수 없습니다. 복사해서 사용하세요.")
 
     if is_active is False:
         # **내리는 것은 지우는 것과 같은 무게다.** 목록에서만 사라지고 결재선은
@@ -1069,7 +1069,7 @@ def update_form(app_db, form_id: int, *, name: Optional[str] = None,
         if used:
             names = ", ".join(str(r["name"]) for r in used[:5])
             raise E.ApprovalError(
-                f"이 양식을 쓰는 결재선이 있어 내릴 수 없습니다: {names} — 먼저 그 결재선에서 떼세요")
+                f"이 양식을 쓰는 결재선이 있어 내릴 수 없습니다: {names}")
 
     if steps is not None or blocks is not None:
         next_steps = steps if steps is not None else form["steps"]
@@ -1116,7 +1116,7 @@ def _guard_lines_still_fit(app_db, form_id: int, steps: Sequence[Dict[str, Any]]
     if short:
         names = ", ".join(f"{r['name']}({r['n']}명)" for r in short[:5])
         raise E.ApprovalError(
-            f"이 양식은 결재자 {need}명이 필요한데 더 짧은 결재선이 쓰고 있습니다: {names}")
+            f"결재자가 {need}명보다 적은 결재선이 이 양식을 쓰고 있습니다: {names}")
 
 
 def copy_form(app_db, form_id: int, *, name: str, owner_id: Optional[int] = None) -> int:
@@ -1146,7 +1146,7 @@ def delete_form(app_db, form_id: int) -> None:
     if form is None:
         return
     if form.get("is_builtin"):
-        raise E.ApprovalError("기본 양식은 지울 수 없습니다")
+        raise E.ApprovalError("기본 양식은 삭제할 수 없습니다.")
     used = _q(app_db, "SELECT name FROM approval_lines WHERE form_id = %s", (form_id,))
     if used:
         names = ", ".join(str(r["name"]) for r in used[:5])
@@ -1268,8 +1268,7 @@ def set_line_form(app_db, line_id: int, form_id: Optional[int]) -> None:
         have = int(rows[0]["n"]) if rows else 0
         need = int(form.get("approver_steps") or 0)
         if have < need:
-            raise E.ApprovalError(
-                f"이 양식은 결재자 {need}명이 필요합니다 (이 결재선은 {have}명)")
+            raise E.ApprovalError(f"이 양식에는 결재자 {need}명이 필요합니다.")
     _q(app_db, "UPDATE approval_lines SET form_id = %s, updated_at = %s WHERE id = %s",
        (form_id, _now(), line_id))
 
@@ -1308,8 +1307,7 @@ def _guard_steps_cover_form(app_db, form: Optional[Dict[str, Any]], approver_cou
     if approver_count >= need:
         return
     raise E.ApprovalError(
-        f"이 결재선의 양식 [{form.get('name') or form_id}] 은 결재자 {need}명이 필요합니다 "
-        f"(지금 {approver_count}명) — 그만큼 세우거나 다른 결재선으로 올려 주세요")
+        f"양식 [{form.get('name') or form_id}]에는 결재자 {need}명이 필요합니다.")
 
 
 def _apply_draft_values(app_db, *, request_id: int, requester_id: int,
@@ -1330,11 +1328,11 @@ def _apply_draft_values(app_db, *, request_id: int, requester_id: int,
     for v in values or []:
         step = int(v.get("step_index") or 0)
         if step != 0:
-            raise E.ApprovalError("상신할 때는 기안(1차) 칸만 채울 수 있습니다")
+            raise E.ApprovalError("상신할 때는 기안 칸만 채울 수 있습니다.")
         key = int(v.get("sort_order") or 0)
         block = snapped.get(key)
         if block is None:
-            raise E.ApprovalError(f"이 양식에 없는 칸입니다 (기안 {key}번)")
+            raise E.ApprovalError("이 양식에 없는 칸입니다.")
         data = v.get("data")
         _check_block_value(block, data)
         _q(app_db, """
@@ -1402,7 +1400,7 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
     step = int(row["step_order"] or 0)
     if step == 0:
         if int(row["requester_id"] or 0) != int(actor_id):
-            raise E.ApprovalError("기안 칸은 기안자만 작성합니다")
+            raise E.ApprovalError("기안 칸은 기안자만 작성할 수 있습니다.")
         # **누군가 승인한 뒤에는 기안 칸을 고칠 수 없다.**
         #
         # 2차가 기획서 A 를 보고 "저위험" 을 매겼는데 기안자가 B 로 바꿔치기하면,
@@ -1418,8 +1416,7 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
         """, (request_id, E.APPROVED))
         if acted:
             raise E.ApprovalError(
-                "이미 승인한 결재자가 있어 기안 칸을 고칠 수 없습니다 — "
-                "반려받은 뒤 다시 올려 주세요")
+                "이미 승인한 결재자가 있어 기안 칸을 수정할 수 없습니다. 반려받은 뒤 다시 올리세요.")
     else:
         mine = _q(app_db, """
             SELECT status FROM approval_request_steps
