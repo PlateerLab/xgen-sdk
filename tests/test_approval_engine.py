@@ -93,7 +93,7 @@ class TestWhoseTurn:
 
     def test_only_approve_or_reject(self):
         for bad in ("pending", "skipped", "", "APPROVE"):
-            with pytest.raises(E.ApprovalError, match="승인 또는 거절"):
+            with pytest.raises(E.ApprovalError, match="승인 또는 반려"):
                 E.decide(req(), line((3, 1)), 3, bad)
 
 
@@ -194,7 +194,7 @@ class TestTerminal:
 
     def test_the_message_says_how_it_ended(self):
         """'처리할 수 없습니다' 로 뭉뚱그리면 사람이 다음에 무엇을 할지 모른다."""
-        for final, word in ((E.APPROVED, "승인"), (E.REJECTED, "거절"), (E.CANCELED, "회수")):
+        for final, word in ((E.APPROVED, "승인"), (E.REJECTED, "반려"), (E.CANCELED, "회수")):
             with pytest.raises(E.ApprovalError, match=word):
                 E.decide(req(status=final), line((3, 1)), 3, E.APPROVED)
 

@@ -61,8 +61,8 @@ DEFAULTS: Dict[str, tuple] = {
         "'{{title}}' 결재가 최종 승인되었습니다.",
     ),
     TEMPLATE_REJECTED: (
-        "결재 거절: {{title}}",
-        "'{{title}}' 결재를 {{actor}} 님이 거절했습니다. 사유: {{note}}",
+        "결재 반려: {{title}}",
+        "'{{title}}' 결재를 {{actor}} 님이 반려했습니다. 사유: {{note}}",
     ),
     TEMPLATE_APPLY_FAIL: (
         "결재 적용 실패: {{title}}",

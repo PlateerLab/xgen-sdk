@@ -236,7 +236,7 @@ def decide(
     처리된 줄 알고 넘어가고, 결재함에는 그대로 남는다.
     """
     if action not in (APPROVED, REJECTED):
-        raise ApprovalError("승인 또는 거절만 할 수 있습니다")
+        raise ApprovalError("승인 또는 반려만 할 수 있습니다")
 
     status = str(request.get("status") or PENDING)
     if status in TERMINAL:
@@ -366,6 +366,6 @@ def cancel(
 def _terminal_reason(status: str) -> str:
     return {
         APPROVED: "이미 승인 완료된 결재입니다",
-        REJECTED: "이미 거절된 결재입니다",
+        REJECTED: "이미 반려된 결재입니다",
         CANCELED: "기안자가 회수한 결재입니다",
     }.get(status, "이미 종결된 결재입니다")
