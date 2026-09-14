@@ -163,13 +163,21 @@ def _parse_policy_data(raw: Any) -> Dict[str, Any]:
     return {}
 
 
-def _template_id_of_block(app_db, block: Dict[str, Any]) -> str:
-    """칸의 양식: 설정의 ``template_id`` 가 있는 양식이면 그것, 아니면 기본 양식, 없으면 기본 제공.
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _config_template_id(block: Dict[str, Any]) -> str:
+    """칸 설정이 **고정한** 양식. 비어 있으면 ``""`` — 양식 편집기의 "기본 양식 사용" 이다."""
+    config = blocks_mod.parse_data((block or {}).get("config"))
+    return _text(config.get("template_id") if isinstance(config, dict) else None)
+
+
+def _resolve_template_id(app_db, requested: str) -> str:
+    """요청한 양식이 있으면 그것, 아니면 기본 양식(is_default), 없으면 기본 제공.
 
     core ``resolve_template_id`` / ``default_template_id`` 와 같은 규칙이다.
     """
-    config = blocks_mod.parse_data((block or {}).get("config"))
-    requested = str((config.get("template_id") if isinstance(config, dict) else None) or "").strip()
     templates = _q(app_db, "SELECT template_id, is_default FROM risk_assessment_templates ORDER BY id")
     if requested and any(str(t.get("template_id") or "") == requested for t in templates):
         return requested
@@ -219,31 +227,48 @@ def _has_policy_id(policy_id: Any) -> bool:
 def resolve_options(app_db, block: Dict[str, Any], data: Any) -> Dict[str, Any]:
     """평가지 칸에 들어오는 값이 **따라야 할** 선택 항목 — 보낸 ``options`` 는 보지 않는다.
 
-    * 칸의 양식은 칸 설정의 ``template_id`` (있는 양식일 때), 아니면 기본 양식, 없으면
-      기본 제공 ``ai-risk``.
-    * 값에 ``policy_id`` 가 있으면 그 버전 행의 선택 항목이다. 그런 버전이 없으면
-      :class:`EvaluationVersionNotFound`, 칸의 양식이 아닌 버전이면
-      :class:`EvaluationVersionMismatch` (둘 다 :class:`ApprovalError` — core 가 400 으로 낸다).
-    * ``policy_id`` 가 없으면 칸 양식의 활성 버전(여럿이면 가장 큰 버전) 것, 활성 버전이
-      없으면 전부 켠 한 벌.
-    * **읽기 자체가 실패**하면(표 없음 · DB 오류) 전부 켠 한 벌을 돌려주고 경고만 남긴다.
-      가장 엄격한 한 벌이라 아무것도 건너뛸 수 없고, 읽기 오류로 결재를 막지도 않는다.
-      위의 두 오류는 읽기가 성공했을 때만 난다.
+    칸이 양식을 **고정했는가**(설정 ``template_id`` 가 비어 있지 않은가)에 따라 다르다.
+
+    고정한 칸
+      * 칸의 양식은 설정의 양식(있는 양식일 때), 아니면 기본 양식, 없으면 기본 제공 ``ai-risk``.
+      * 값에 ``policy_id`` 가 있으면 그 버전 행의 선택 항목이다. 그런 버전이 없으면
+        :class:`EvaluationVersionNotFound`, 칸의 양식이 아닌 버전이면
+        :class:`EvaluationVersionMismatch` (둘 다 :class:`ApprovalError` — core 가 400 으로 낸다).
+      * ``policy_id`` 가 없으면 칸 양식의 활성 버전(여럿이면 가장 큰 버전) 것, 활성 버전이
+        없으면 전부 켠 한 벌.
+
+    고정하지 않은 칸("기본 양식 사용") — 평가자가 평가지에서 다른 양식을 고를 수 있다 (2.3.1)
+      * 값에 ``policy_id`` 가 있으면 그 버전 행의 선택 항목이다. 그런 버전이 없으면
+        :class:`EvaluationVersionNotFound`. 어느 양식의 버전이든 받는다.
+      * ``policy_id`` 가 없으면 값의 ``template_id`` 양식(있는 양식일 때), 아니면 기본 양식,
+        없으면 ``ai-risk`` 의 활성 버전 것, 활성 버전이 없으면 전부 켠 한 벌.
+
+    어느 쪽이든 **읽기 자체가 실패**하면(표 없음 · DB 오류) 전부 켠 한 벌을 돌려주고 경고만
+    남긴다. 가장 엄격한 한 벌이라 아무것도 건너뛸 수 없고, 읽기 오류로 결재를 막지도 않는다.
+    위의 두 오류는 읽기가 성공했을 때만 난다.
 
     돌려주는 dict 는 새로 만든 것이라 부르는 쪽이 고쳐도 된다.
     """
-    policy_id = data.get("policy_id") if isinstance(data, dict) else None
+    value = data if isinstance(data, dict) else {}
+    policy_id = value.get("policy_id")
     wants_version = _has_policy_id(policy_id)
+    fixed = _config_template_id(block)
+    template_id = None
     try:
-        template_id = _template_id_of_block(app_db, block)
-        row = _policy_row(app_db, policy_id) if wants_version else _active_policy_row(app_db, template_id)
+        if wants_version:
+            row = _policy_row(app_db, policy_id)
+            if fixed and row is not None:
+                template_id = _resolve_template_id(app_db, fixed)
+        else:
+            template_id = _resolve_template_id(app_db, fixed or _text(value.get("template_id")))
+            row = _active_policy_row(app_db, template_id)
     except Exception as exc:  # noqa: BLE001 — 읽지 못하면 가장 엄격한 한 벌
         logger.warning("평가 양식을 읽지 못해 선택 항목을 전부 켠 한 벌로 본다: %s", exc)
         return copy.deepcopy(FULL_OPTIONS)
     if wants_version:
         if row is None:
             raise EvaluationVersionNotFound()
-        if (str(row.get("template_id") or "").strip() or LEGACY_TEMPLATE_ID) != template_id:
+        if template_id is not None and (_text(row.get("template_id")) or LEGACY_TEMPLATE_ID) != template_id:
             raise EvaluationVersionMismatch()
     if row is None:
         return copy.deepcopy(FULL_OPTIONS)

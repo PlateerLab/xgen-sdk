@@ -359,15 +359,111 @@ def test_unknown_template_in_config_uses_the_default_template(db):
         normalize_options({"options": LITE_OPTIONS})
     assert resolve_options(db, _block('{"template_id": "lite"}'), {"policy_id": db.lite_v1}) == \
         normalize_options({"options": LITE_OPTIONS})
+    # 고정한 칸이 없는 양식을 가리키면 기본 양식으로 풀리고, 다른 양식의 버전은 여전히 불일치다.
     with pytest.raises(E.EvaluationVersionMismatch):
-        resolve_options(db, _block(None), {"policy_id": db.full_v1})
+        resolve_options(db, _block({"template_id": "gone"}), {"policy_id": db.full_v1})
+    # 고정하지 않은 칸은 기본 양식이 아닌 버전도 받는다(2.3.1).
+    assert resolve_options(db, _block(None), {"policy_id": db.full_v1}) == FULL_OPTIONS
 
 
 def test_no_default_template_falls_back_to_the_builtin(db):
     db.templates[0]["is_default"] = False
-    assert resolve_options(db, _block({"template_id": ""}), {"policy_id": db.full_v1}) == FULL_OPTIONS
+    assert resolve_options(db, _block({"template_id": ""}), {"risk_level": "low"}) == FULL_OPTIONS
     with pytest.raises(E.EvaluationVersionMismatch):
-        resolve_options(db, _block({}), {"policy_id": db.lite_v1})
+        resolve_options(db, _block({"template_id": "gone"}), {"policy_id": db.lite_v1})
+    assert resolve_options(db, _block({"template_id": "gone"}), {"policy_id": db.full_v1}) == FULL_OPTIONS
+
+
+# ── 양식을 고정하지 않은 칸 — 평가자가 양식을 고른다 (2.3.1) ─────────
+
+UNFIXED_CONFIGS = [None, {}, {"template_id": None}, {"template_id": ""}, {"template_id": "  "},
+                   '{"template_id": null}']
+
+
+@pytest.mark.parametrize("config", UNFIXED_CONFIGS)
+def test_unfixed_block_accepts_a_picked_forms_version(db, config):
+    """기본 양식이 ai-risk 여도 평가자가 고른 lite 의 버전으로 채점한 값은 그 버전의 선택 항목이다."""
+    out = resolve_options(db, _block(config), {"policy_id": db.lite_v1, "template_id": "lite",
+                                               "options": FULL_OPTIONS})
+    assert out == normalize_options({"options": LITE_OPTIONS})
+    assert out["agent_risk_grade"] is False
+
+
+@pytest.mark.parametrize("config", UNFIXED_CONFIGS)
+def test_unfixed_block_without_policy_id_uses_the_values_form(db, config):
+    lite = normalize_options({"options": LITE_OPTIONS})
+    assert resolve_options(db, _block(config), {"template_id": "lite"}) == lite
+    assert resolve_options(db, _block(config), {"template_id": " lite "}) == lite
+    # 없는 양식이거나 적지 않았으면 기본 양식(ai-risk)의 활성 버전.
+    assert resolve_options(db, _block(config), {"template_id": "gone", "options": LITE_OPTIONS}) == FULL_OPTIONS
+    assert resolve_options(db, _block(config), {"options": LITE_OPTIONS}) == FULL_OPTIONS
+
+
+def test_unfixed_block_without_policy_id_and_no_default_uses_the_builtin(db):
+    db.templates[0]["is_default"] = False
+    db.policies[db.full_v1 - 1]["policy_data"] = json.dumps({"options": {"traits": False}})
+    out = resolve_options(db, _block(None), {"template_id": "gone"})
+    assert out["traits"]["enabled"] is False and out["agent_risk_grade"] is True
+
+
+def test_unfixed_block_whose_form_has_no_active_version_is_full(db):
+    for r in db.policies:
+        r["is_active"] = False
+    assert resolve_options(db, _block(None), {"template_id": "lite"}) == FULL_OPTIONS
+
+
+@pytest.mark.parametrize("policy_id", [999, "999", "abc", True])
+@pytest.mark.parametrize("config", UNFIXED_CONFIGS)
+def test_unfixed_block_with_a_missing_version_is_refused(db, config, policy_id):
+    with pytest.raises(E.EvaluationVersionNotFound):
+        resolve_options(db, _block(config), {"policy_id": policy_id, "template_id": "lite"})
+
+
+def test_fixed_block_still_refuses_another_forms_version_and_ignores_the_values_form(db):
+    with pytest.raises(E.EvaluationVersionMismatch):
+        resolve_options(db, _block({"template_id": "ai-risk"}),
+                        {"policy_id": db.lite_v1, "template_id": "lite"})
+    # 고정한 칸은 값이 적은 template_id 로 양식을 바꾸지 못한다.
+    assert resolve_options(db, _block({"template_id": "ai-risk"}),
+                           {"template_id": "lite", "options": LITE_OPTIONS}) == FULL_OPTIONS
+
+
+def test_unfixed_block_read_failure_is_full(db, caplog):
+    db.broken = True
+    with caplog.at_level(logging.WARNING, logger="approval-evaluation"):
+        assert resolve_options(db, _block(None), {"policy_id": db.lite_v1}) == FULL_OPTIONS
+        assert resolve_options(db, _block(None), {"template_id": "lite"}) == FULL_OPTIONS
+    assert len([r for r in caplog.records if "전부 켠 한 벌" in r.getMessage()]) == 2
+
+
+def test_fill_block_on_an_unfixed_block_takes_the_picked_form(db):
+    """store 를 지나는 길: 고정하지 않은 칸에 고른 양식으로 채운 평가가 거절되지 않는다."""
+    registry.register_action("generic", lambda *a, **k: None)
+    rid, block = _deploy_request(db)
+    _set_block_config(db, block["id"], {"template_id": None})
+    with pytest.raises(E.EvaluationVersionNotFound):
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+                         data=_assessed(policy_id=999, template_id="lite"))
+    assert _stored(db, block["id"]) is None
+
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+                     data=_assessed(impact_scope="", policy_id=db.lite_v1, template_id="lite",
+                                    options=FULL_OPTIONS))
+    stored = _stored(db, block["id"])
+    assert stored["options"] == normalize_options({"options": LITE_OPTIONS})
+    assert stored["options"]["agent_risk_grade"] is False
+    store.decide(db, rid, actor_id=3, action="approved")
+
+
+def test_submit_on_an_unfixed_draft_block_takes_the_saved_values_form(db):
+    """저장된 값의 template_id 가 기본 양식이 아니어도(policy_id 없음) 그 양식으로 판정한다."""
+    line_id = _draft_evaluation_line(db, {"template_id": None})
+    req = store.submit(db, requester_id=1, title="평가", line_id=line_id, block_values=[
+        {"sort_order": 1, "data": _assessed(impact_scope="", template_id="lite", options=FULL_OPTIONS)}])
+    block = next(b for b in req["blocks"] if b["block_type"] == blocks.EVALUATION)
+    stored = _stored(db, block["id"])
+    assert stored["options"] == normalize_options({"options": LITE_OPTIONS})
+    assert blocks.evaluation_gaps(stored) == []
 
 
 def test_the_highest_active_version_wins_and_no_active_version_is_full(db):
