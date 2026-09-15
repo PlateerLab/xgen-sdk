@@ -52,6 +52,7 @@ infrastructure code lives here.**
 | `xgen_sdk.quota` | Pure-Python quota policy specs and evaluation (no DB / HTTP coupling) |
 | `xgen_sdk.notification` | Generic per-user persistent in-app notifications with read tracking |
 | `xgen_sdk.llm_catalog` | Dynamic model list for OpenAI / Anthropic / Gemini with TTL cache and fallback |
+| `xgen_sdk.comfyui` | ComfyUI API-workflow rules (parameter mapping, validation, tool schema) and an async client |
 | `xgen_sdk.XgenApp` | One-call bootstrap that wires DB + Config + Storage together |
 
 More general-purpose utilities are added with every release — tracing,
@@ -260,6 +261,30 @@ models = get_models(provider="openai", capability="chat")
 # [{"id": "gpt-4o", "label": "GPT-4o", ...}, ...]
 
 invalidate("openai")   # Call after rotating the API key
+```
+
+### ComfyUI — `xgen_sdk.comfyui`
+
+One source of truth for turning a ComfyUI API-format workflow into an agent
+tool: which inputs are exposed as parameters, how they are validated, the
+tool's JSON Schema, and applying arguments. The async client (httpx,
+`trust_env=False`, no redirects) submits, polls history, downloads outputs,
+and on cancellation or timeout removes the job from the queue and interrupts it.
+
+```python
+from xgen_sdk.comfyui import (
+    parse_workflow, validate_entry, tool_input_schema, apply_arguments,
+    ComfyUIClient, run_workflow,
+)
+
+graph = parse_workflow(api_export_json)            # rejects UI-format JSON
+issues = validate_entry(graph, mapping, object_info)  # [] means valid
+schema = tool_input_schema(mapping)
+prompt = apply_arguments(graph, mapping, {"prompt": "a red fox"})
+
+async with ComfyUIClient("http://comfy:8188") as client:
+    result = await run_workflow(client, prompt, output_node_ids=mapping["outputs"], timeout_s=300)
+    # {"prompt_id": ..., "duration_ms": ..., "files": [{"node_id", "filename", "content_type", "data"}]}
 ```
 
 ---

@@ -1,0 +1,1 @@
+{"error": {"type": "missing_node_type", "message": "Node 'NoSuchNodeXYZ' not found. The custom node may not be installed.", "details": "Node ID '#1'", "extra_info": {"node_id": "1", "class_type": "NoSuchNodeXYZ", "node_title": "NoSuchNodeXYZ"}}, "node_errors": {}}
