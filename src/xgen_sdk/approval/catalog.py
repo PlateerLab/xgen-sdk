@@ -79,6 +79,15 @@ TEST = "test"
 #: 에이전트 배포. 지금까지 "관리자 승인 → 거버넌스 심사" 2단계였던 그 자리다.
 AGENT_DEPLOY = "agent.deploy"
 
+#: 에이전트 재배포 — **이미 배포된 것을 지금 정의로 갱신**하는 것.
+#:
+#: 배포와 나눈 이유: 두 행위는 위험이 다르다. 처음 배포는 "이것을 외부에 열어도 되는가",
+#: 재배포는 "이미 열려 있는 것을 바꿔도 되는가" 다. 조직에 따라 한쪽만 결재를 태우고 싶을
+#: 수 있어(처음만 깐깐하게, 갱신은 빠르게 — 또는 그 반대) 결재선도 따로 세운다.
+#:
+#: 승인될 때까지 **옛 정의가 계속 돈다.** 갱신 결재가 서비스를 내리면 아무도 누르지 않는다.
+AGENT_REDEPLOY = "agent.redeploy"
+
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
@@ -94,6 +103,11 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         AGENT_DEPLOY, "에이전트 배포",
         "에이전트를 URL·임베드·API로 외부에 여는 것",
+        OWNER_CORE, DOMAIN_DEPLOY,
+    ),
+    ActionSpec(
+        AGENT_REDEPLOY, "에이전트 재배포",
+        "이미 배포된 에이전트를 지금 정의로 갱신하는 것",
         OWNER_CORE, DOMAIN_DEPLOY,
     ),
 
