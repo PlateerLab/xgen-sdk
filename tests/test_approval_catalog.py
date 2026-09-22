@@ -46,11 +46,11 @@ def test_every_catalogued_action_is_registered():
 def test_the_gated_set_is_what_xgen_actually_gates_today():
     """지금 XGEN 이 실제로 승인을 받는 행위 전부 — 전수 조사(2026-09-11)의 결론.
 
-    배포 1 + RAG 통제 13. 여기서 무엇이 빠지면 그 행위는 결재로 옮겨지지 못한
-    채 옛 게이트에 남거나, 아무 통제 없이 열린다.
+    배포 2(처음·갱신) + RAG 통제 13. 여기서 무엇이 빠지면 그 행위는 결재로 옮겨지지
+    못한 채 옛 게이트에 남거나, 아무 통제 없이 열린다.
     """
     assert {s.action_type for s in catalog.gated_specs()} == {
-        "agent.deploy",
+        "agent.deploy", "agent.redeploy",
         "collection.create", "collection.upload", "collection.update",
         "filestore.embed",
         "cloud.storage_create", "cloud.upload", "cloud.update", "cloud.share",
@@ -113,3 +113,18 @@ def test_a_gated_action_no_longer_needs_a_pre_set_line():
     결재선을 고를 자리가 있다" 는 표시를 둘 이유가 없어졌다."""
     for sp in catalog.CATALOG:
         assert not hasattr(sp, "picks_line"), "옛 제약의 잔재가 남아 있다"
+
+
+def test_deploy_and_redeploy_are_separate_actions():
+    """처음 배포와 갱신은 위험이 다르다 — 조직이 한쪽만 결재로 태울 수 있어야 한다.
+
+    같은 행위로 묶으면 "처음만 깐깐하게, 갱신은 빠르게"(또는 그 반대)를 고를 자리가
+    없어지고, 결재선도 하나뿐이라 갱신을 다른 사람이 보게 할 수 없다.
+    """
+    first = catalog.spec(catalog.AGENT_DEPLOY)
+    again = catalog.spec(catalog.AGENT_REDEPLOY)
+    assert first is not None and again is not None
+    assert first.action_type != again.action_type
+    assert first.domain == again.domain == catalog.DOMAIN_DEPLOY
+    assert again.gated and not again.user_submittable
+    assert again.owner == catalog.OWNER_CORE
