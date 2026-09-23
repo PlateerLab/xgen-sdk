@@ -282,12 +282,17 @@ def test_category_reads_take_the_same_ladder():
 
 
 def test_an_admin_update_reaches_another_pod_immediately():
-    """전파 계약 — 관리자가 바꾸면 다른 파드가 **다음 조회에서** 새 값을 본다.
+    """전파 계약 — 관리자가 바꾸면 다른 파드가 새 값을 본다.
 
-    · 위성 파드(ConfigClient)는 캐시가 없다 → 즉시.
+    · 위성 파드(ConfigClient)는 값을 기억하되 version sentinel 을 **다시 읽는 간격**
+      (``VERSION_RECHECK_S``, 기본 1초) 안에 바뀐 것을 안다(2.7.0 값 캐시). 그 간격이
+      지난 다음 조회는 새 값이다.
     · 등록 파드(PersistentConfig)는 version sentinel 로 drift 를 보고 스스로 다시 읽는다.
     """
     shared_redis = _Redis()
+    # 운영처럼 version 키가 이미 있다 — 없으면 값 캐시는 아예 쓰이지 않아 이 계약을 못 본다.
+    shared_redis.data["config:_meta:version"] = "7"
+    shared_redis.incrs = 7
     db = _Db([_row("MODEL_DEFAULT", "llm.model_default", "gpt-4o")])
 
     def pod():
@@ -307,7 +312,8 @@ def test_an_admin_update_reaches_another_pod_immediately():
     admin.set_config("llm.model_default", "claude-sonnet-4-6",
                      env_name="MODEL_DEFAULT")
 
-    # 위성: 캐시가 없으니 곧바로 새 값
+    # 위성: version 을 다시 읽는 간격이 지나면 새 값(여기서는 그 시각을 당겨 흉내 낸다)
+    satellite._value_cache()["checked_at"] = 0.0
     assert satellite.get_config_value("MODEL_DEFAULT") == "claude-sonnet-4-6"
     # 등록 파드: version 이 올랐으니 다음 .value 접근에서 스스로 다시 읽는다
     from xgen_sdk.config.base_config import _invalidate_version_cache
