@@ -13,6 +13,7 @@ psycopg2와의 호환성:
 - 기존 DatabaseManager와 동일한 인터페이스 유지
 - 기존 코드 변경 없이 교체 가능
 """
+import asyncio
 import os
 import logging
 import sqlite3
@@ -100,6 +101,21 @@ def with_retry(max_retries: int = DEFAULT_MAX_RETRIES,
     return decorator
 
 
+def _on_event_loop_thread() -> bool:
+    """지금 이 스레드가 **서버의 이벤트 루프**를 돌리고 있는가.
+
+    uvicorn 은 메인 스레드에서 루프를 돌린다. 턴의 전용 루프(풀 스레드)나
+    ``sync_run_async`` 의 임시 루프는 메인 스레드가 아니다 — 그쪽은 기다려도 그 일만 늦는다.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 class DatabaseManagerPsycopg3:
     """
     psycopg3 기반 데이터베이스 연결 및 커넥션 풀 관리
@@ -126,6 +142,10 @@ class DatabaseManagerPsycopg3:
     DEFAULT_MAX_LIFETIME = float(os.getenv('DB_POOL_MAX_LIFETIME', '1800'))  # 30 minutes
     DEFAULT_RECONNECT_TIMEOUT = float(os.getenv('DB_POOL_RECONNECT_TIMEOUT', '300'))  # 5 minutes
     DEFAULT_TIMEOUT = float(os.getenv('DB_POOL_TIMEOUT', '30'))  # 30 seconds
+    #: 이벤트 루프 스레드 전용 예비 커넥션 수(0 이면 끈다) — :meth:`get_connection` 참고.
+    DEFAULT_LOOP_RESERVE = int(os.getenv('DB_POOL_LOOP_RESERVE', '2'))
+    #: 이벤트 루프 스레드가 커넥션을 기다리는 상한(초).
+    DEFAULT_LOOP_TIMEOUT = float(os.getenv('DB_POOL_LOOP_TIMEOUT', '5'))
 
     def __init__(
         self,
@@ -164,6 +184,10 @@ class DatabaseManagerPsycopg3:
         # Pool instance (for PostgreSQL)
         self._pool: Optional[ConnectionPool] = None
         self._pool_lock = threading.Lock()
+        #: 이벤트 루프 스레드 전용 예비 풀 — 작업 스레드가 공용 풀을 다 써도 루프는 기다리지 않는다.
+        self._loop_pool: Optional[ConnectionPool] = None
+        self.loop_reserve = max(0, int(self.DEFAULT_LOOP_RESERVE))
+        self.loop_timeout = float(self.DEFAULT_LOOP_TIMEOUT)
 
         # SQLite connection (for SQLite - 단일 커넥션)
         self._sqlite_connection = None
@@ -171,6 +195,7 @@ class DatabaseManagerPsycopg3:
 
         # Pool statistics
         self._stats = {
+            'loop_acquisitions': 0,
             'connections_created': 0,
             'connections_closed': 0,
             'connections_failed': 0,
@@ -360,6 +385,7 @@ class DatabaseManagerPsycopg3:
                         self._pool.close()
                     except Exception as e:
                         self.logger.warning(f"Error closing old pool: {e}")
+                self._close_loop_pool()
 
                 conninfo = self._build_conninfo()
 
@@ -386,11 +412,13 @@ class DatabaseManagerPsycopg3:
 
                 # 풀 준비 대기 (최소 커넥션 수만큼)
                 self._pool.wait(timeout=self.timeout)
+                self._open_loop_pool(conninfo)
 
                 self.logger.info(
                     f"PostgreSQL connection pool initialized: "
                     f"min_size={self.min_size}, max_size={self.max_size}, "
-                    f"max_idle={self.max_idle}s, max_lifetime={self.max_lifetime}s"
+                    f"max_idle={self.max_idle}s, max_lifetime={self.max_lifetime}s, "
+                    f"loop_reserve={self.loop_reserve if self._loop_pool else 0}"
                 )
                 return True
 
@@ -398,6 +426,59 @@ class DatabaseManagerPsycopg3:
             self.logger.error(f"Failed to create PostgreSQL connection pool: {e}")
             self._stats['connections_failed'] += 1
             return False
+
+    # ── 이벤트 루프 예비 풀 (2026-09-23 감사 F9) ──────────────────────
+    #
+    # 공용 풀(기본 10)을 실행 풀·기본 executor·하위 워크플로 풀·백그라운드 루프가 함께 쓴다.
+    # 느린 쿼리가 몰려 공용 풀이 차면, 이벤트 루프 위의 **동기** DB 호출이 커넥션을 최대 30초
+    # 기다린다 — 그동안 그 파드의 모든 요청과 헬스체크가 선다(두 번 겹치면 liveness 한도 60초).
+    #
+    # 루프 스레드에 작은 예비 풀을 따로 준다. 루프는 스레드 하나라 동기 호출이 동시에 쥐는
+    # 커넥션은 많아야 한두 개다 — 예비 2개면 작업 스레드가 공용 풀을 다 써도 루프는 기다리지
+    # 않는다. 예비마저 비면 짧게(``DB_POOL_LOOP_TIMEOUT``, 기본 5초)만 기다리고 실패한다 —
+    # 파드 전체가 서는 것보다 그 요청 하나가 실패하는 편이 낫다.
+
+    def _open_loop_pool(self, conninfo: str) -> None:
+        if self.loop_reserve <= 0:
+            return
+        try:
+            self._loop_pool = ConnectionPool(
+                conninfo=conninfo,
+                min_size=1,
+                max_size=self.loop_reserve,
+                max_idle=self.max_idle,
+                max_lifetime=self.max_lifetime,
+                timeout=self.loop_timeout,
+                reconnect_timeout=self.reconnect_timeout,
+                num_workers=1,
+                configure=self._configure_connection,
+                check=self._check_connection,
+                reset=self._reset_connection,
+                reconnect_failed=self._on_reconnect_failed,
+                kwargs={"row_factory": dict_row},
+                open=True,
+                name="plateerag-db-loop-pool",
+            )
+        except Exception as e:  # noqa: BLE001 — 예비가 없으면 공용 풀로 (예전 동작)
+            self.logger.warning(f"Event-loop reserve pool unavailable (shared pool only): {e}")
+            self._loop_pool = None
+
+    def _close_loop_pool(self) -> None:
+        pool, self._loop_pool = self._loop_pool, None
+        if pool is not None:
+            try:
+                pool.close()
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"Error closing event-loop reserve pool: {e}")
+
+    def _pick_pool(self, timeout: Optional[float]):
+        """(풀, 대기 상한) — 이벤트 루프 스레드면 예비 풀과 짧은 상한."""
+        effective = timeout or self.timeout
+        loop_pool = self._loop_pool
+        if loop_pool is not None and _on_event_loop_thread():
+            self._stats['loop_acquisitions'] += 1
+            return loop_pool, min(effective, self.loop_timeout)
+        return self._pool, effective
 
     def _connect_sqlite(self) -> bool:
         """SQLite 연결 (기존 방식 유지)"""
@@ -429,6 +510,8 @@ class DatabaseManagerPsycopg3:
                     if self._pool:
                         # drain()은 모든 기존 커넥션을 폐기하고 새 커넥션으로 교체
                         self._pool.drain()
+                        if self._loop_pool is not None:
+                            self._loop_pool.drain()
                         self.logger.info("PostgreSQL pool drained and refreshed")
                         return True
                     else:
@@ -474,8 +557,10 @@ class DatabaseManagerPsycopg3:
                         self._stats['health_checks_failed'] += 1
                         return False
 
-                # 풀에서 커넥션 획득하여 테스트
-                with self._pool.connection(timeout=5.0) as conn:
+                # 풀에서 커넥션 획득하여 테스트 (루프 위에서 부르면 예비 풀 — 헬스체크가
+                # 작업 스레드 몫을 기다리며 루프를 세우지 않게)
+                pool, wait_s = self._pick_pool(5.0)
+                with pool.connection(timeout=wait_s) as conn:
                     with conn.cursor() as cur:
                         cur.execute("SELECT 1")
                         result = cur.fetchone()
@@ -595,6 +680,7 @@ class DatabaseManagerPsycopg3:
                             self.logger.warning(f"Error closing old pool during recovery: {e}")
                         finally:
                             self._pool = None
+                    self._close_loop_pool()
 
                 # 새 풀 생성
                 success = self._connect_postgresql_pool()
@@ -641,17 +727,19 @@ class DatabaseManagerPsycopg3:
                 else:
                     raise RuntimeError("Connection pool not initialized")
 
-            effective_timeout = timeout or self.timeout
+            # 이벤트 루프 스레드는 예비 풀에서 짧게만 기다린다(위 "이벤트 루프 예비 풀").
+            pool, effective_timeout = self._pick_pool(timeout)
 
             try:
-                with self._pool.connection(timeout=effective_timeout) as conn:
+                with pool.connection(timeout=effective_timeout) as conn:
                     yield conn
             except (OperationalError, InterfaceError) as e:
                 # 연결 오류 발생 시 복구 시도 후 재시도
                 if auto_recover:
                     self.logger.warning(f"Connection error, attempting recovery: {e}")
                     if self._try_recover_connection():
-                        with self._pool.connection(timeout=effective_timeout) as conn:
+                        pool, effective_timeout = self._pick_pool(timeout)
+                        with pool.connection(timeout=effective_timeout) as conn:
                             yield conn
                     else:
                         raise
@@ -681,6 +769,7 @@ class DatabaseManagerPsycopg3:
                         self.logger.warning(f"Error closing pool: {e}")
                     finally:
                         self._pool = None
+                self._close_loop_pool()
 
         elif self.db_type == "sqlite":
             with self._sqlite_lock:
@@ -716,6 +805,15 @@ class DatabaseManagerPsycopg3:
                     'connections_errors': pool_stats.get('connections_errors', 0),
                     'connections_lost': pool_stats.get('connections_lost', 0),
                 })
+                loop_pool = self._loop_pool
+                if loop_pool is not None:
+                    loop_stats = loop_pool.get_stats()
+                    stats.update({
+                        'loop_pool_max_size': self.loop_reserve,
+                        'loop_pool_size': loop_stats.get('pool_size', 0),
+                        'loop_pool_available': loop_stats.get('pool_available', 0),
+                        'loop_requests_waiting': loop_stats.get('requests_waiting', 0),
+                    })
             except Exception as e:
                 self.logger.warning(f"Failed to get pool stats: {e}")
 
