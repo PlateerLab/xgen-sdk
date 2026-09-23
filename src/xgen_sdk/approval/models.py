@@ -160,6 +160,9 @@ class ApprovalRequest(BaseModel):
         #: — 승인을 되돌리는 것보다 "승인됐으나 적용 실패" 를 보이는 편이 맞다.
         self.applied_at = kwargs.get('applied_at')
         self.apply_error = kwargs.get('apply_error')
+        #: 뒤처리를 **맡은** 시각 — 여러 파드의 워커가 같은 건을 동시에 적용하지 않게
+        #: 먼저 선점한다(:func:`store.finish`). 맡은 워커가 죽으면 수명이 지나 다른 워커가 잇는다.
+        self.apply_claimed_at = kwargs.get('apply_claimed_at')
 
     def get_table_name(self) -> str:
         return "approval_requests"
@@ -187,6 +190,7 @@ class ApprovalRequest(BaseModel):
             'cancel_note': 'VARCHAR(500)',
             'applied_at': 'TIMESTAMP',
             'apply_error': 'VARCHAR(1000)',
+            'apply_claimed_at': 'TIMESTAMP',
         }
 
     def get_indexes(self) -> List[tuple]:
