@@ -138,6 +138,16 @@ class FakeDB:
                 if r["id"] == p[2]:
                     r.update(status=p[0], decided_at=p[1])
             return []
+        if s.startswith("UPDATE approval_requests SET apply_claimed_at"):
+            # 뒤처리 선점 — 끝나지 않았고, 아무도 안 맡았거나 맡은 것이 낡았을 때만.
+            hit = []
+            for r in self.t["approval_requests"]:
+                claimed = r.get("apply_claimed_at")
+                if (r["id"] == p[1] and r.get("applied_at") is None
+                        and (claimed is None or claimed < p[2])):
+                    r["apply_claimed_at"] = p[0]
+                    hit.append({"id": r["id"]})
+            return hit
         if s.startswith("UPDATE approval_requests SET applied_at"):
             for r in self.t["approval_requests"]:
                 if r["id"] == p[2] and r.get("applied_at") is None:

@@ -4,10 +4,12 @@ Redis Config Manager
 PostgreSQL 대신 Redis를 사용한 설정 관리 시스템
 psycopg3 ConnectionPool 기반 DB 연동 지원
 """
+import copy
 import os
 import redis
 import json
 import logging
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,6 +19,19 @@ logger = logging.getLogger(__name__)
 #: 너무 작으면 왕복 수가 늘어난다. 수백 개 규모의 config 에서는 한두 번의
 #: 왕복으로 끝나는 크기.
 _MGET_CHUNK = 256
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+#: 값 캐시의 나이 상한(초). 0 이면 캐시를 쓰지 않는다 — :meth:`RedisConfigManager.probe_value`.
+VALUE_CACHE_MAX_AGE_S = _env_float("XGEN_CONFIG_VALUE_CACHE_S", 30.0)
+#: version sentinel 을 다시 읽는 간격(초) — 다른 파드의 쓰기가 이만큼 안에 보인다.
+VERSION_RECHECK_S = _env_float("XGEN_CONFIG_VERSION_RECHECK_S", 1.0)
 
 
 def _is_db_available(db_manager) -> bool:
@@ -134,6 +149,9 @@ class RedisConfigManager:
         self._name_index_tail_cache: Optional[Dict[str, Any]] = None
         self._name_index_version: int = -1
 
+        # 값 캐시 — :meth:`probe_value` 참고.
+        self._vc = self._new_value_cache()
+
         # DB Manager (선택적)
         self.db_manager = db_manager
 
@@ -244,10 +262,14 @@ class RedisConfigManager:
             return 0
         try:
             raw = self.redis_client.get(self.version_key)
-            return int(raw) if raw is not None else 0
+            version = int(raw) if raw is not None else 0
         except Exception as e:
             logger.debug(f"get_config_version failed: {e}")
             return 0
+        # 누가 읽든 새 version 을 보면 값 캐시가 먼저 안다 — 그 호출자가 곧바로 값을 다시
+        # 읽을 때 옛 값을 받지 않게(core 의 PersistentConfig 가 그렇게 움직인다).
+        self._note_version(int(raw) if raw is not None else None)
+        return version
 
     # ──────────────────────────────────────────────────────────────────
     # probe_* — "못 읽었다" 를 숨기지 않는 조회 (1.39.0)
@@ -329,6 +351,8 @@ class RedisConfigManager:
         seen = getattr(self, "_db_miss_at", None)
         if seen:
             seen.clear()
+        # "없다" 로 기억한 값도 같은 이유로 버린다.
+        self.forget_cached_values()
 
     def _probe_db_row(self, env_name: str, config_path: Optional[str] = None) -> Tuple[str, Any]:
         """DB **한 곳만** 본다 — (상태, 행). 사다리의 2단.
@@ -389,6 +413,80 @@ class RedisConfigManager:
     # 이제 모든 읽기는 이 함수 하나를 지난다. Redis 가 정본 캐시이고, 없거나 못 읽으면
     # DB 가 받아 준다. DB 에서 찾으면 Redis 로 되살려 다음 읽기부터 다시 뜨겁다.
     # ──────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
+    # 값 캐시 — 조회마다 Redis 에 가지 않는다 (2.7.0, 2026-09-23 감사 F8)
+    #
+    # 위성 파드(workflow·documents)의 설정 조회는 **매번** Redis GET 이었다. 동기 호출이고
+    # 이벤트 루프 위에서도 불린다 — 평소엔 1ms 미만이지만 Redis 가 느려지면 조회 하나가
+    # 소켓 타임아웃(5초, 재시도 포함 최대 10초)만큼 루프를 세우고, 요청 하나가 설정을 여러
+    # 번 읽으므로 그 정지가 곱해진다.
+    #
+    # 이제 값을 이름별로 기억하고, **글로벌 version sentinel 이 그대로인 동안만** 믿는다.
+    # 모든 쓰기(set_config·delete_config)가 version 을 INCR 하므로 다른 파드의 쓰기는
+    # version 을 다시 읽는 간격(:data:`VERSION_RECHECK_S`, 기본 1초) 안에 보인다. version 은
+    # 한 스레드만 읽고 나머지는 그동안 마지막으로 본 값을 쓴다 — Redis 가 느려도 줄을 서지
+    # 않는다. version 을 못 읽는 동안(Redis 장애)은 나이 상한(:data:`VALUE_CACHE_MAX_AGE_S`)
+    # 까지만 캐시를 믿고, 그 뒤엔 예전 사다리(Redis → DB)로 간다. "못 읽었다(error)" 는
+    # 캐시하지 않는다.
+    # ──────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _new_value_cache() -> Dict[str, Any]:
+        return {"lock": threading.Lock(), "values": {}, "version": None,
+                "checked_at": 0.0, "refreshing": False, "epoch": 0}
+
+    def _value_cache(self) -> Dict[str, Any]:
+        vc = getattr(self, "_vc", None)
+        if vc is None:          # __init__ 을 거치지 않고 만든 인스턴스(테스트 등)
+            vc = self._vc = self._new_value_cache()
+        return vc
+
+    def _note_version(self, version: Optional[int]) -> None:
+        """방금 읽은 version 을 기록한다. 바뀌었으면 기억한 값을 모두 버린다.
+
+        ``None`` 은 **version 키가 없다**는 뜻이다 — Redis 가 비워졌거나(재시작·flush) 아직
+        아무도 쓰지 않았다. 그 상태의 0 은 "그대로" 가 아니라 "모른다" 이므로 기억을 버리고
+        캐시를 쓰지 않는다(누군가 다시 쓰면 키가 생기고 그때부터 믿는다).
+        """
+        vc = self._value_cache()
+        with vc["lock"]:
+            if version is None or version != vc["version"]:
+                vc["values"].clear()
+            vc["version"] = version
+            vc["checked_at"] = time.monotonic()
+
+    def _known_version(self) -> Optional[int]:
+        """캐시를 믿을 기준 version. 한 번도 못 읽었으면 None(캐시를 쓰지 않는다)."""
+        vc = self._value_cache()
+        now = time.monotonic()
+        with vc["lock"]:
+            epoch = int(getattr(self, "recovery_epoch", 0) or 0)
+            if epoch != vc["epoch"]:
+                # Redis 가 끊겼다 돌아왔다 — 그동안 DB 에만 쓰인 값이 있을 수 있다.
+                vc["values"].clear()
+                vc["epoch"] = epoch
+                vc["checked_at"] = 0.0
+            if vc["refreshing"] or now - vc["checked_at"] < VERSION_RECHECK_S:
+                return vc["version"]
+            vc["refreshing"] = True
+        try:
+            self.probe_config_version()   # 성공하면 _note_version 이 기록한다
+        except Exception:  # noqa: BLE001 — 기준을 못 읽으면 마지막 것으로
+            pass
+        finally:
+            with vc["lock"]:
+                vc["refreshing"] = False
+                # 실패해도 간격만큼은 다시 묻지 않는다 — 죽은 Redis 를 조회마다 두드리지 않게.
+                vc["checked_at"] = max(vc["checked_at"], now)
+        return vc["version"]
+
+    def forget_cached_values(self) -> None:
+        """기억한 값을 모두 버리고 다음 조회에서 version 을 다시 읽게 한다."""
+        vc = self._value_cache()
+        with vc["lock"]:
+            vc["values"].clear()
+            vc["checked_at"] = 0.0
+
     def probe_value(self, env_name: str, config_path: Optional[str] = None) -> Tuple[str, Any, str]:
         """(상태, 값, 출처). 출처는 ``"redis"`` | ``"db"`` | ``""``.
 
@@ -396,7 +494,40 @@ class RedisConfigManager:
             ok      — 어느 한 곳에서 읽었다
             missing — 두 곳 다 정상인데 그런 설정이 없다
             error   — 읽지 못했다 (연결 실패·예외). **"설정 안 함" 과 절대 같지 않다.**
+
+        같은 version 동안은 기억한 결과를 돌려준다(위 "값 캐시"). 기억은 **읽기 전에 본
+        version** 으로 적는다 — 읽는 사이에 쓰기가 끼면 다음 조회가 그것을 버린다.
         """
+        if VALUE_CACHE_MAX_AGE_S <= 0:
+            return self._probe_value_uncached(env_name, config_path)
+        key = (env_name, config_path or "")
+        version = self._known_version()
+        vc = self._value_cache()
+        if version is not None:
+            with vc["lock"]:
+                hit = vc["values"].get(key)
+                if hit is not None:
+                    result, tagged, at = hit
+                    if tagged == version and time.monotonic() - at < VALUE_CACHE_MAX_AGE_S:
+                        status, value, source = result
+                        # 목록·사전 값은 호출자가 고쳐도 기억이 오염되지 않게 사본으로.
+                        return (status, copy.deepcopy(value)
+                                if isinstance(value, (dict, list)) else value, source)
+                    vc["values"].pop(key, None)
+        result = self._probe_value_uncached(env_name, config_path)
+        if version is not None and result[0] != self.PROBE_ERROR:
+            status, value, source = result
+            stored = copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+            with vc["lock"]:
+                if vc["version"] == version:
+                    if len(vc["values"]) > 2048:     # 무한 성장 방지
+                        vc["values"].clear()
+                    vc["values"][key] = ((status, stored, source), version, time.monotonic())
+        return result
+
+    def _probe_value_uncached(self, env_name: str,
+                              config_path: Optional[str] = None) -> Tuple[str, Any, str]:
+        """Redis → DB 사다리를 그대로 탄다(값 캐시 없이)."""
         redis_status, value = self._probe_redis_value(env_name)
         if redis_status == self.PROBE_OK:
             return (self.PROBE_OK, value, "redis")
@@ -445,9 +576,11 @@ class RedisConfigManager:
             logger.debug(f"probe_config_version 실패: {e}")
             return (self.PROBE_ERROR, 0)
         try:
-            return (self.PROBE_OK, int(raw) if raw is not None else 0)
+            version = int(raw) if raw is not None else 0
         except (TypeError, ValueError):
             return (self.PROBE_ERROR, 0)
+        self._note_version(version if raw is not None else None)
+        return (self.PROBE_OK, version)
 
     def bump_meta_version(self) -> int:
         """글로벌 version sentinel 을 명시적으로 INCR.
@@ -620,6 +753,9 @@ class RedisConfigManager:
             db_ok = False
             # 방금 쓴 이름은 "없다" 기억에서 뺀다.
             self._remember_db_miss(final_env_name, False)
+            # 이 파드가 쓴 값은 이 파드에서 곧바로 보여야 한다 — version 이 INCR 됐든(Redis)
+            # 아니든(Redis 장애로 DB 에만) 기억을 버린다.
+            self.forget_cached_values()
 
             # DB에도 저장 (DB가 있는 경우)
             if self.db_manager:
@@ -779,6 +915,7 @@ class RedisConfigManager:
                     self._last_write_version = int(new_version)
             except Exception as version_err:
                 logger.warning(f"Failed to bump config version sentinel on delete: {version_err}")
+            self.forget_cached_values()
 
             logger.debug(f"Config 삭제 완료: {env_name}")
             return True

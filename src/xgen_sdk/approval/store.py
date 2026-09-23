@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import os
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from xgen_sdk.approval import blocks as blocks_mod
@@ -544,14 +546,56 @@ def _settle_hooks(app_db, request_id: int, loaded: Dict[str, Any]) -> None:
     finish(app_db, request_id, action_type, loaded, status)
 
 
+#: 뒤처리 선점의 수명(초). 맡은 워커가 죽으면 이만큼 뒤에 다른 워커가 다시 시도한다.
+APPLY_LEASE_S = float(os.getenv("XGEN_APPROVAL_APPLY_LEASE_S", "600") or 600)
+_claim_unavailable_warned_at = 0.0
+
+
+def _claim_apply(app_db, request_id: int) -> Optional[bool]:
+    """이 건의 뒤처리를 **내가** 맡는다.
+
+    True  — 맡았다(내가 훅을 돌린다)
+    False — 다른 워커가 맡고 있거나 이미 끝났다(나는 아무것도 하지 않는다)
+    None  — 선점을 기록할 수 없다(컬럼이 아직 없는 DB 등) — 예전처럼 진행한다
+
+    조건부 쓰기 하나라 두 파드가 동시에 불러도 하나만 이긴다. 맡은 쪽이 훅 도중 죽으면
+    ``applied_at`` 이 비어 있고 선점은 :data:`APPLY_LEASE_S` 뒤 낡은 것이 되어 다른 워커가
+    잇는다 — "승인됐는데 아무 일도 안 일어난" 채로 남지 않는다.
+    """
+    global _claim_unavailable_warned_at
+    now = _now()
+    try:
+        return bool(_q(
+            app_db,
+            """UPDATE approval_requests SET apply_claimed_at = %s
+                WHERE id = %s AND applied_at IS NULL
+                  AND (apply_claimed_at IS NULL OR apply_claimed_at < %s)
+            RETURNING id""",
+            (now, request_id, now - timedelta(seconds=APPLY_LEASE_S)),
+        ))
+    except Exception as exc:  # noqa: BLE001 — 선점을 못 써도 적용은 예전처럼 한다
+        mono = time.monotonic()
+        if mono - _claim_unavailable_warned_at > 600:
+            _claim_unavailable_warned_at = mono
+            logger.warning("결재 뒤처리 선점을 기록하지 못해 선점 없이 진행한다(스키마 갱신 전?): %s", exc)
+        return None
+
+
 def finish(app_db, request_id: int, action_type: str,
            loaded: Dict[str, Any], status: str) -> str:
     """훅을 돌리고 ``applied_at`` 을 찍는다. 사유 문자열을 돌려준다(빈 문자열 = 성공).
 
     core 가 직접 부르기도 하고(자기 소유 행위), 위성 서비스의 워커가 부르기도
-    한다. 어느 쪽이든 **한 건에 한 번**이다 — ``applied_at IS NULL`` 조건부
-    쓰기가 그것을 지킨다.
+    한다. 어느 쪽이든 **한 건에 한 번**이다: 훅을 돌리기 **전에** 선점하고
+    (:func:`_claim_apply`), 끝나면 ``applied_at IS NULL`` 조건부로 찍는다.
+
+    예전에는 훅을 먼저 돌리고 찍기만 조건부였다. 그래서 파드 둘의 워커가 같은 건을
+    동시에 집으면 **둘 다 훅을 돌렸다**(찍기는 하나만 이겨도 적용은 두 번) — 2026-09-23
+    감사 F15. 레지스트리가 멱등을 요구하긴 하지만, 그것에 기대지 않는다.
     """
+    if _claim_apply(app_db, request_id) is False:
+        logger.info("결재 #%s 뒤처리는 다른 워커가 맡았다 — 건너뛴다", request_id)
+        return ""
     payload = loaded.get("payload") or {}
     if status == E.APPROVED:
         # 칸의 값부터 제자리로 보낸다 — 2차가 채운 평가지가 Agent 위험 등급
