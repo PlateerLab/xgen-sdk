@@ -1,4 +1,4 @@
-"""Contracts for the canonical account Agent Session focus API.
+"""Contracts for canonical account focus and Agent Session event replay.
 
 These models describe verified API responses. They do not authenticate a caller
 or replace the Gateway's Platform Session and DPoP checks.
@@ -16,10 +16,28 @@ from .focus import (
     SwitchFocus,
     apply_event_page,
 )
+from .events import (
+    AgentSessionEvent,
+    AgentSessionEventFrame,
+    AgentSessionEventPage,
+    AgentSessionReplayCursor,
+    AgentSessionReplayGap,
+    AgentSessionSnapshot,
+    AgentSessionTurnSummary,
+    SessionCursorConflictResponse,
+    apply_session_event_page,
+)
 
 __all__ = [
     "AccountEventPage",
     "AccountFocusEvent",
+    "AgentSessionEvent",
+    "AgentSessionEventFrame",
+    "AgentSessionEventPage",
+    "AgentSessionReplayCursor",
+    "AgentSessionReplayGap",
+    "AgentSessionSnapshot",
+    "AgentSessionTurnSummary",
     "AgentSessionCreated",
     "CreateAgentSession",
     "CursorConflictResponse",
@@ -27,5 +45,7 @@ __all__ = [
     "FocusReplayGap",
     "FocusState",
     "SwitchFocus",
+    "SessionCursorConflictResponse",
     "apply_event_page",
+    "apply_session_event_page",
 ]
