@@ -114,6 +114,12 @@ def owner_of(action_type: str) -> str:
     return sp.owner if sp else "core"
 
 
+def _retired(action_type: str) -> bool:
+    from xgen_sdk.approval import catalog
+
+    return str(action_type or "") in catalog.RETIRED
+
+
 def run_apply(action_type: str, payload: Dict[str, Any], request: Dict[str, Any]) -> str:
     """적용. 실패하면 **사유 문자열**을 돌려준다(예외를 던지지 않는다).
 
@@ -123,6 +129,8 @@ def run_apply(action_type: str, payload: Dict[str, Any], request: Dict[str, Any]
     entry = _ACTIONS.get(str(action_type or ""))
     if entry is None:
         # 등록이 사라진 종류(기능이 제거됐다). 승인은 그대로 두고 사실만 남긴다.
+        if _retired(action_type):
+            return f"더 이상 쓰지 않는 결재 종류라 적용할 곳이 없습니다: {action_type}"
         return f"등록되지 않은 결재 종류입니다: {action_type}"
     fn = entry.get("apply")
     if fn is None:
@@ -139,6 +147,10 @@ def run_reject(action_type: str, payload: Dict[str, Any], request: Dict[str, Any
     """거절·회수 뒤 치우기. :func:`run_apply` 와 같은 계약 — 사유를 돌려준다."""
     entry = _ACTIONS.get(str(action_type or ""))
     if entry is None:
+        if _retired(action_type):
+            # 거둔 종류의 회수(store.retire_actions) — 치울 것이 없다. 오류로 남기면 회수된
+            # 결재마다 "등록되지 않은 종류" 가 apply_error 로 찍힌다.
+            return ""
         return f"등록되지 않은 결재 종류입니다: {action_type}"
     fn = entry.get("reject")
     if fn is None:

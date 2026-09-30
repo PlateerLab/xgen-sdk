@@ -528,7 +528,7 @@ def _settle_hooks(app_db, request_id: int, loaded: Dict[str, Any]) -> None:
     여기서 바로 할지, 남겨 둘지를 가른다
     ------------------------------------
     결정은 core 한 곳에서 나지만 **행위는 남의 파드에 있다**. 지식 컬렉션을
-    실제로 여는 코드는 xgen-documents 에, 클라우드·도구는 xgen-workflow 에
+    실제로 여는 코드는 xgen-documents 에, DB·도구는 xgen-workflow 에
     있다. core 가 그 함수를 부를 수는 없으므로, 소유가 다른 건은 훅을 돌리지
     않고 ``applied_at`` 을 비워 둔다 — 소유 서비스의 워커가 그것을 표식 삼아
     가져간다(:func:`claim_settlements`).
@@ -698,6 +698,44 @@ def _close_as_canceled(app_db, request_id: int, now, *, by: str, note: str) -> D
     out = get(app_db, request_id)
     _settle_hooks(app_db, request_id, out)     # 올려 둔 것이 있으면 치운다
     return get(app_db, request_id)
+
+
+#: 거둔 행위의 진행 중 결재를 회수할 때 남기는 사유 — 결재자가 알림으로 받는다.
+RETIRED_NOTE = "이 결재 종류는 더 이상 쓰지 않아 시스템이 회수했습니다."
+
+
+def retire_actions(app_db, note: str = RETIRED_NOTE) -> Dict[str, int]:
+    """거둔 행위(:data:`catalog.RETIRED`)의 뒷정리 — core 가 기동할 때 부른다(멱등).
+
+    카탈로그에서 뺀 행위는 등록되지 않으므로 새로 올라가지 않는다. 그런데 이미 **진행 중**
+    이던 결재는 결재자가 승인해도 적용할 곳이 없어 영영 끝나지 않는다 — 그래서 사유와 함께
+    시스템 회수한다(승인했던 결재자에게도 알린다). [결재 목록 설정] 의 정책 행도 치운다 —
+    남겨 두면 "결재 필수" 목록에 아무도 모르는 종류가 섞인다.
+
+    반환: ``{"canceled": N, "policies": M}``.
+    """
+    from xgen_sdk.approval import catalog
+
+    kinds = list(catalog.RETIRED)
+    if not kinds:
+        return {"canceled": 0, "policies": 0}
+    marks = ", ".join(["%s"] * len(kinds))
+    rows = _q(app_db,
+              f"SELECT id FROM approval_requests WHERE status = %s AND action_type IN ({marks})",
+              (E.PENDING, *kinds)) or []
+    canceled = 0
+    for row in rows:
+        try:
+            system_cancel(app_db, int(row["id"]), note)
+            canceled += 1
+        except Exception as exc:  # noqa: BLE001 — 한 건이 나머지를 막지 않는다
+            logger.warning("거둔 행위 결재 #%s 회수 실패: %s", row.get("id"), exc)
+    dropped = _q(app_db,
+                 f"DELETE FROM approval_action_policies WHERE action_type IN ({marks}) RETURNING action_type",
+                 tuple(kinds)) or []
+    if canceled or dropped:
+        logger.info("거둔 결재 행위 정리: 회수 %s건, 정책 %s개", canceled, len(dropped))
+    return {"canceled": canceled, "policies": len(dropped)}
 
 
 def find_pending_for_target(app_db, action_type: str, target_ref: str) -> Optional[Dict[str, Any]]:
