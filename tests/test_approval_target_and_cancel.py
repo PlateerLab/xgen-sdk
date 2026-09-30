@@ -56,9 +56,9 @@ def test_a_different_target_is_fine(db):
 
 
 def test_the_same_target_under_a_different_action_is_fine(db):
-    """같은 워크플로우라도 '배포' 와 '공유' 는 다른 결정이다."""
+    """같은 워크플로우라도 '배포' 와 '재배포' 는 다른 결정이다."""
     _submit(db, action_type="agent.deploy", target_ref="workflow:abc")
-    _submit(db, action_type="cloud.share", target_ref="workflow:abc")
+    _submit(db, action_type="agent.redeploy", target_ref="workflow:abc")
 
 
 def test_once_the_first_one_is_settled_a_new_one_can_go_up(db):
@@ -297,3 +297,36 @@ def test_the_worker_tells_the_requester_when_applying_fails(db):
     assert "컬렉션 서비스 없음" in (out["apply_error"] or "")
     fail = [n for n in db.notifications if n["template_id"] == notifier.TEMPLATE_APPLY_FAIL]
     assert len(fail) == 1 and fail[0]["user_id"] == 1
+
+
+def test_retired_kinds_cannot_be_raised(db):
+    """카탈로그에서 거둔 종류(파일 클라우드)는 새로 올라가지 않는다."""
+    with pytest.raises(E.ApprovalError, match="등록되지 않은"):
+        _submit(db, action_type="cloud.upload", target_ref="user:1:a.txt")
+
+
+def test_retiring_cancels_what_was_pending_and_drops_the_policies(monkeypatch):
+    """진행 중이던 거둔 종류의 결재는 적용할 곳이 없어 영영 끝나지 않는다 — 회수한다."""
+    calls = []
+
+    def fake_q(app_db, sql, params=()):
+        calls.append((" ".join(sql.split()), params))
+        if sql.lstrip().startswith("SELECT id FROM approval_requests"):
+            return [{"id": 11}, {"id": 12}]
+        if sql.lstrip().startswith("DELETE FROM approval_action_policies"):
+            return [{"action_type": "cloud.upload"}]
+        return []
+
+    canceled = []
+    monkeypatch.setattr(store, "_q", fake_q)
+    monkeypatch.setattr(store, "system_cancel", lambda app_db, rid, note: canceled.append((rid, note)))
+
+    out = store.retire_actions(object())
+
+    assert out == {"canceled": 2, "policies": 1}
+    assert [rid for rid, _ in canceled] == [11, 12]
+    assert all(note == store.RETIRED_NOTE for _, note in canceled)
+    select_sql, select_params = calls[0]
+    assert "status = %s" in select_sql and select_params[0] == E.PENDING
+    assert set(select_params[1:]) == set(catalog.RETIRED)
+    assert calls[1][0].startswith("DELETE FROM approval_action_policies")
