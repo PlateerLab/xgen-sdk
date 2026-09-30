@@ -330,3 +330,14 @@ def test_retiring_cancels_what_was_pending_and_drops_the_policies(monkeypatch):
     assert "status = %s" in select_sql and select_params[0] == E.PENDING
     assert set(select_params[1:]) == set(catalog.RETIRED)
     assert calls[1][0].startswith("DELETE FROM approval_action_policies")
+
+
+def test_a_retired_kind_settles_its_cancel_without_an_error():
+    """회수된 거둔 종류는 치울 것이 없다 — 회수마다 '등록되지 않은 종류' 가 apply_error 로
+    찍히면 결재 로그가 가짜 실패로 덮인다. 승인만 된 채 남은 건은 사실을 적는다."""
+    from xgen_sdk.approval import registry
+
+    for kind in catalog.RETIRED:
+        assert registry.run_reject(kind, {}, {}) == ""
+        assert "더 이상 쓰지 않는" in registry.run_apply(kind, {}, {})
+    assert "등록되지 않은" in registry.run_reject("nope.unknown", {}, {})
