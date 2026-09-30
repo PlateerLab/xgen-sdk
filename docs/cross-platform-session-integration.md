@@ -13,4 +13,6 @@ Workflow의 계정 포커스 계약이 확정되어 `xgen_sdk.agent_session`에 
 
 Workflow의 Agent Session 이벤트 계약도 `AgentSessionSnapshot`, `AgentSessionEventPage`, `AgentSessionEventFrame`, `SessionCursorConflictResponse`로 제공한다. `apply_session_event_page`는 HTTP `after_sequence` 또는 WebSocket `after_seq`로 요청한 순번부터 연속성을 검사하고, 겹쳐 온 페이지를 중복 적용하지 않으며, 마지막으로 검증한 이벤트의 순번과 ID를 보존한다. `SESSION_CURSOR_AHEAD`/`SESSION_CURSOR_GAP` 또는 SDK의 `AgentSessionReplayGap`에서는 이어받기를 중단하고 snapshot과 로컬 투영을 재조정해야 한다. SDK는 이 모델만 제공하며 네트워크 인증이나 자동 재시도를 수행하지 않는다.
 
+Workflow의 `GET /api/agentflow/agent-sessions/{id}/messages`에 맞춰 `AgentSessionMessagePage`, `AgentSessionMessageCursor`, `AgentSessionMessageConflictResponse`와 `apply_message_page`를 제공한다. 이 API는 저널에 연결된 완료 턴만 돌려주므로 메시지 sequence는 이벤트 사이에서 건너뛸 수 있고, `has_more=false`여도 `next_cursor`가 `snapshot_sequence`보다 작을 수 있다. SDK는 해당 세션의 마지막 턴 ID로 겹친 페이지를 확인하고 중복을 제외한다. cursor·턴 anchor·응답 구조가 어긋나면 `AgentSessionMessageGap`으로 중단한다. 입력·출력 텍스트가 없을 수 있으며 `content_complete`와 `source`가 그 상태와 일치해야 한다. 이 페이지를 전체 대화 snapshot으로 취급하거나 Agent Session 이벤트 cursor를 전진시키지 않는다. 인증·소유권 검사와 409 `SESSION_MESSAGE_LINK_INVALID` 처리 책임은 Gateway·Workflow 및 호출자에게 있다.
+
 나머지 항목은 서버 계약이 확정된 뒤 하위 브랜치와 별도 PR로 구현한다.
