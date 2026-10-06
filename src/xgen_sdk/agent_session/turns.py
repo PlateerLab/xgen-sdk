@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .attachments import AgentAttachmentReference, parse_attachment_references
+from .attachments import AGENT_ATTACHMENT_MAX_COUNT, AgentAttachmentReference, parse_attachment_references
 
 
 _ERROR_MESSAGE = "Invalid canonical Agent Session turn submission"
@@ -35,7 +35,7 @@ class SubmitAgentSessionTurn(BaseModel):
     expected_state_version: int = Field(ge=1, strict=True)
     idempotency_key: str = Field(min_length=1, max_length=128)
     origin_id: str | None = Field(default=None, min_length=1, max_length=128)
-    attachments: tuple[AgentAttachmentReference, ...] = ()
+    attachments: tuple[AgentAttachmentReference, ...] = Field(default=(), max_length=AGENT_ATTACHMENT_MAX_COUNT)
 
     @field_validator("attachments", mode="before")
     @classmethod

@@ -105,6 +105,12 @@ def test_turn_accepts_fastapi_list_and_empty_or_omitted_attachments() -> None:
     assert empty.attachments == omitted.attachments == ()
 
 
+def test_wire_schema_advertises_the_attachment_count_limit() -> None:
+    schema = SubmitAgentSessionTurn.model_json_schema()
+    assert schema['properties']['attachments']['type'] == 'array'
+    assert schema['properties']['attachments']['maxItems'] == 10
+
+
 @pytest.mark.parametrize(
     "changes",
     [
