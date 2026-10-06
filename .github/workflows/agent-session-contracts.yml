@@ -1,0 +1,42 @@
+name: Agent Session contracts
+
+on:
+  pull_request:
+    paths:
+      - 'src/xgen_sdk/agent_session/**'
+      - 'tests/test_agent_session_*.py'
+      - 'tests/fixtures/agent-session-*.json'
+      - '.github/workflows/agent-session-contracts.yml'
+      - 'pyproject.toml'
+  push:
+    branches:
+      - 'feat/cross-platform-*'
+    paths:
+      - 'src/xgen_sdk/agent_session/**'
+      - 'tests/test_agent_session_*.py'
+      - 'tests/fixtures/agent-session-*.json'
+      - '.github/workflows/agent-session-contracts.yml'
+      - 'pyproject.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Contracts (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install contract test dependencies
+        run: python -m pip install 'pydantic>=2,<3' pytest
+      - name: Verify isolated unreleased source contracts
+        env:
+          PYTHONPATH: src
+        # Approval registry fixtures are unrelated to these pure wire models.
+        run: python -m pytest --noconftest -q tests/test_agent_session_*.py

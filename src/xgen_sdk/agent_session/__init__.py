@@ -35,10 +35,29 @@ from .messages import (
     AgentSessionMessagePage,
     apply_message_page,
 )
+from .attachments import (
+    AGENT_ATTACHMENT_MAX_BYTES,
+    AGENT_ATTACHMENT_MAX_COUNT,
+    AGENT_ATTACHMENT_MAX_TOTAL_BYTES,
+    AgentAttachmentReceipt,
+    AgentAttachmentReference,
+    AgentAttachmentScope,
+    AgentAttachmentValidationError,
+    parse_attachment_receipt,
+    parse_attachment_scope,
+    prepare_attachment_references,
+)
 
 __all__ = [
+    "AGENT_ATTACHMENT_MAX_BYTES",
+    "AGENT_ATTACHMENT_MAX_COUNT",
+    "AGENT_ATTACHMENT_MAX_TOTAL_BYTES",
     "AccountEventPage",
     "AccountFocusEvent",
+    "AgentAttachmentReceipt",
+    "AgentAttachmentReference",
+    "AgentAttachmentScope",
+    "AgentAttachmentValidationError",
     "AgentSessionEvent",
     "AgentSessionEventFrame",
     "AgentSessionEventPage",
@@ -62,4 +81,7 @@ __all__ = [
     "apply_event_page",
     "apply_message_page",
     "apply_session_event_page",
+    "parse_attachment_receipt",
+    "parse_attachment_scope",
+    "prepare_attachment_references",
 ]
