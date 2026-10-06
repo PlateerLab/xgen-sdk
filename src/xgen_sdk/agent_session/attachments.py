@@ -318,7 +318,10 @@ def parse_attachment_scope(value: Any) -> AgentAttachmentScope:
     try:
         return _validate_scope(value)
     except Exception:
-        raise _invalid() from None
+        pass
+    # Raise after leaving the handler so the public exception does not retain
+    # a Pydantic ValidationError (including its raw .errors() input) as context.
+    raise _invalid() from None
 
 
 def parse_attachment_receipt(
@@ -332,7 +335,8 @@ def parse_attachment_receipt(
             raise ValueError("attachment receipt scope mismatch")
         return receipt
     except Exception:
-        raise _invalid() from None
+        pass
+    raise _invalid() from None
 
 
 def prepare_attachment_references(
@@ -367,7 +371,8 @@ def prepare_attachment_references(
             )
         return tuple(references)
     except Exception:
-        raise _invalid() from None
+        pass
+    raise _invalid() from None
 
 
 __all__ = [

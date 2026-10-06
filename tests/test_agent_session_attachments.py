@@ -315,6 +315,7 @@ def test_public_errors_are_generic_and_do_not_expose_raw_content(operation) -> N
     assert str(caught.value) == ERROR
     assert "private" not in repr(caught.value)
     assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert caught.value.__suppress_context__ is True
 
 
