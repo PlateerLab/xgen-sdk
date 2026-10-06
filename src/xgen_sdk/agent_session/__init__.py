@@ -44,8 +44,14 @@ from .attachments import (
     AgentAttachmentScope,
     AgentAttachmentValidationError,
     parse_attachment_receipt,
+    parse_attachment_references,
     parse_attachment_scope,
     prepare_attachment_references,
+)
+from .turns import (
+    AgentSessionTurnValidationError,
+    SubmitAgentSessionTurn,
+    parse_turn_submission,
 )
 
 __all__ = [
@@ -70,6 +76,7 @@ __all__ = [
     "AgentSessionReplayGap",
     "AgentSessionSnapshot",
     "AgentSessionTurnSummary",
+    "AgentSessionTurnValidationError",
     "AgentSessionCreated",
     "CreateAgentSession",
     "CursorConflictResponse",
@@ -77,11 +84,14 @@ __all__ = [
     "FocusReplayGap",
     "FocusState",
     "SwitchFocus",
+    "SubmitAgentSessionTurn",
     "SessionCursorConflictResponse",
     "apply_event_page",
     "apply_message_page",
     "apply_session_event_page",
     "parse_attachment_receipt",
+    "parse_attachment_references",
     "parse_attachment_scope",
+    "parse_turn_submission",
     "prepare_attachment_references",
 ]
