@@ -305,6 +305,12 @@ def _validate_receipt(value: Any) -> AgentAttachmentReceipt:
     )
 
 
+def _validate_reference(value: Any) -> AgentAttachmentReference:
+    return AgentAttachmentReference.model_validate(
+        _model_input(value, AgentAttachmentReference), strict=True
+    )
+
+
 def _same_scope(receipt: AgentAttachmentReceipt, scope: AgentAttachmentScope) -> bool:
     return all(getattr(receipt, field) == getattr(scope, field) for field in _SCOPE_FIELDS)
 
@@ -375,6 +381,27 @@ def prepare_attachment_references(
     raise _invalid() from None
 
 
+def parse_attachment_references(
+    value: Any,
+) -> tuple[AgentAttachmentReference, ...]:
+    """Validate and copy an ordered immutable turn attachment reference list."""
+    try:
+        if type(value) not in (list, tuple) or len(value) > AGENT_ATTACHMENT_MAX_COUNT:
+            raise ValueError("attachment reference count is invalid")
+        seen: set[str] = set()
+        references: list[AgentAttachmentReference] = []
+        for candidate in value:
+            reference = _validate_reference(candidate)
+            if reference.attachment_id in seen:
+                raise ValueError("attachment reference IDs must be unique")
+            seen.add(reference.attachment_id)
+            references.append(reference)
+        return tuple(references)
+    except Exception:
+        pass
+    raise _invalid() from None
+
+
 __all__ = [
     "AGENT_ATTACHMENT_MAX_BYTES",
     "AGENT_ATTACHMENT_MAX_COUNT",
@@ -384,6 +411,7 @@ __all__ = [
     "AgentAttachmentScope",
     "AgentAttachmentValidationError",
     "parse_attachment_receipt",
+    "parse_attachment_references",
     "parse_attachment_scope",
     "prepare_attachment_references",
 ]
