@@ -196,3 +196,105 @@ def test_one_log_row_per_policy_type_with_capped_samples():
                            "samples": [{"original": "바보", "masked": "**"}], "enforced": True}]
     capped = json.loads(cp.build_detections([{"samples": [{"original": "a" * 300, "masked": ""}]}]))
     assert len(capped[0]["samples"][0]["original"]) == cp.SAMPLE_TEXT_CAP + 1
+
+
+# ── 검토에서 재현된 것들 (2026-10-13) ───────────────────────────────
+
+LOOKBEHIND = {"id": 20, "policy_name": "비밀번호", "regex_pattern": r"(?<=password: )\S+", "masking": True,
+              "masking_pattern": "[숨김]", "is_active": True}
+
+
+def test_lookaround_patterns_are_masked_in_office_and_spans():
+    rules = _rules(LOOKBEHIND)
+    assert cp.apply_rules("password: hunter2", rules).text == "password: [숨김]"
+    raw = _docx([["password: hun", "ter2"]])
+    result = cp.strip_bytes(raw, "a.docx", rules)
+    xml = zipfile.ZipFile(io.BytesIO(result.content)).read("word/document.xml").decode()
+    assert result.changed and "hunter2" not in xml.replace("<w:t>", "").replace("</w:t>", "") and "hun" not in xml
+
+
+def test_spreadsheet_cells_are_not_joined():
+    sheet = ('<worksheet><sheetData><row><c t="inlineStr"><is><t>kim@x.com</t></is></c>'
+             '<c t="inlineStr"><is><t>010-1234-5678</t></is></c></row></sheetData></worksheet>')
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("xl/worksheets/sheet1.xml", sheet)
+    for rules in (_rules(EMAIL, PHONE), _rules(PHONE, EMAIL)):
+        xml = zipfile.ZipFile(io.BytesIO(cp.strip_bytes(out.getvalue(), "a.xlsx", rules).content)).read(
+            "xl/worksheets/sheet1.xml").decode()
+        assert "<t>kim@[숨김]</t>" in xml and "<t>***-****-5678</t>" in xml, xml
+
+
+def test_office_entities_survive_and_untouched_nodes_stay_byte_identical():
+    raw = _docx([["say &quot;hi&quot; &#8220;q&#8221; ", "010-1234-5678"], ["keep &amp;quot;"]])
+    xml = zipfile.ZipFile(io.BytesIO(cp.strip_bytes(raw, "a.docx", _rules(PHONE)).content)).read(
+        "word/document.xml").decode()
+    assert "<w:t>say &quot;hi&quot; &#8220;q&#8221; </w:t>" in xml, "걸리지 않은 노드는 원문 그대로"
+    assert "<w:t>keep &amp;quot;</w:t>" in xml and "&amp;amp;" not in xml
+
+
+def test_html_keeps_markup_charset_and_comments():
+    page = '<html><head><meta charset="euc-kr"></head><body><br><!-- 담당 010-1234-5678 -->&nbsp;010-1234-5678</body></html>'
+    raw = page.encode("euc-kr")
+    out = cp.strip_bytes(raw, "a.html", _rules(PHONE)).content.decode("euc-kr")
+    assert out == page.replace("010-1234-5678", "***-****-5678"), "태그 · charset · <br> · &nbsp; 그대로, 주석은 주석으로"
+
+
+def test_text_round_trips_unknown_bytes_and_korean_cp949():
+    weird = b"\x00\x01\xff\xfe 010-1234-5678 \x80\x81"
+    assert cp.strip_bytes(weird, "a.log", _rules(PHONE)).content == b"\x00\x01\xff\xfe ***-****-5678 \x80\x81"
+    korean = "메모: 010-1234-5678".encode("cp949")
+    masked = cp.strip_bytes(korean, "a.txt", _rules(dict(PHONE, masking_mode="full", masking_pattern="[전화]")))
+    assert masked.content.decode("cp949") == "메모: [전화]", "짧은 cp949 글을 라틴 문자로 읽어 깨뜨리지 않는다"
+
+
+def test_names_without_extension_are_not_formats():
+    assert cp.masker_for("m") is None and cp.masker_for("pdf") is None
+    assert cp.masker_for("report.PDF").name == "pdf" and cp.masker_for_extension("docx").name == "ooxml"
+    assert cp.strip_bytes(b"\x89 010-1234-5678", "m", _rules(PHONE)).status == cp.STATUS_UNMASKABLE
+
+
+def test_office_zip_bomb_is_refused(monkeypatch):
+    from xgen_sdk.control_policy import files
+
+    monkeypatch.setattr(files, "MASKING_MAX_XML_BYTES", 1000)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml", "<w:p><w:t>" + "a" * 5000 + "</w:t></w:p>")
+    result = cp.strip_bytes(out.getvalue(), "a.docx", _rules(PHONE))
+    assert result.status == cp.STATUS_UNMASKABLE and "상한" in result.reason
+
+
+def test_pdf_output_is_deterministic_and_thread_safe():
+    pdf = pytest.importorskip("xgen_pdf")
+    import threading
+
+    doc = pdf.open()
+    for i in range(3):
+        doc.new_page().insert_text((72, 72), f"call 010-1234-{5000 + i} now")
+    raw = doc.tobytes()
+    doc.close()
+    first = cp.strip_bytes(raw, "a.pdf", _rules(PHONE))
+    assert first.changed and cp.strip_bytes(raw, "a.pdf", _rules(PHONE)).sha256 == first.sha256, "같은 입력은 같은 바이트"
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(cp.strip_bytes(raw, "a.pdf", _rules(PHONE)).sha256))
+               for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results == [first.sha256] * 6
+
+
+def test_broken_backreference_fails_closed():
+    rules = _rules(dict(PHONE, masking_mode="full", masking_pattern=r"\1"))
+    assert cp.apply_rules("010-1234-5678", rules).text == "****"
+    assert cp.apply_rules("010-1234-5678", rules, mask=False).detections[0]["samples"][0]["masked"] == "****"
+
+
+def test_bad_size_env_does_not_break_import():
+    import subprocess
+    import sys
+
+    code = "import xgen_sdk.control_policy as c; print(c.MASKING_MAX_BYTES)"
+    env = {**__import__("os").environ, "DOCUMENT_SOURCE_MASKING_MAX_BYTES": "32MB"}
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert out.returncode == 0 and out.stdout.strip() == str(32 * 1024 * 1024)

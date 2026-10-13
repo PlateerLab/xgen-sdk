@@ -15,6 +15,8 @@ logger = logging.getLogger("xgen-sdk.control-policy")
 
 #: 정책 × 에이전트 예외 표: ``is_applied=False`` 인 줄이 "이 에이전트에는 이 정책을 쓰지 않는다".
 EXCEPTIONS_TABLE = "agent_applied_policies"
+#: 한 번에 읽는 줄 수. 앱 DB 조회의 기본 상한(500)에 걸려 오래된 정책이 말없이 빠지지 않게 넉넉히.
+_ROW_LIMIT = 100_000
 
 
 def excepted_policy_ids(db: Any, workflow_id: Optional[str], policy_type: str) -> set:
@@ -23,7 +25,7 @@ def excepted_policy_ids(db: Any, workflow_id: Optional[str], policy_type: str) -
         return set()
     try:
         rows = db.find_records_by_condition(
-            EXCEPTIONS_TABLE, {"workflow_id": workflow_id, "policy_type": policy_type},
+            EXCEPTIONS_TABLE, {"workflow_id": workflow_id, "policy_type": policy_type}, limit=_ROW_LIMIT,
         ) or []
     except Exception:  # noqa: BLE001
         logger.debug("정책 예외 조회 실패 (%s, %s)", workflow_id, policy_type, exc_info=True)
@@ -37,7 +39,7 @@ def load_rules(db: Any, kind: PolicyKind, *, workflow_id: Optional[str] = None,
     if db is None:
         return []
     try:
-        rows = db.find_records_by_condition(kind.table, {"is_active": True}) or []
+        rows = db.find_records_by_condition(kind.table, {"is_active": True}, limit=_ROW_LIMIT) or []
     except Exception:  # noqa: BLE001
         logger.warning("통제 정책 조회 실패: %s", kind.table, exc_info=True)
         return []

@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import logging
 import re
 from dataclasses import dataclass, field
@@ -83,14 +84,31 @@ class MaskingRule:
         return partial_mask(matched, self.mask_char, self.keep_prefix, self.keep_suffix, self.preserve_format)
 
     def mask_match(self, matched: str) -> str:
-        """매치 원문 하나 → 치환 결과(샘플 · 조각 텍스트 되쓰기용)."""
+        """매치 원문 하나 → 치환 결과(감사 샘플용). 앞뒤를 보는 정규식은 :meth:`replacement` 를 쓴다."""
         if self.masking_mode == MASK_MODE_PARTIAL:
             return self._partial(matched)
-        return self.pattern.sub(self.mask, matched)
+        try:
+            return self.pattern.sub(self.mask, matched)
+        except (re.error, IndexError):
+            return DEFAULT_MASK
+
+    def replacement(self, match: "re.Match[str]") -> str:
+        """글 안에서 찾은 매치 → 그 자리의 치환 결과.
+
+        매치 원문만 따로 떼어 다시 돌리면 앞뒤를 보는 정규식(``(?<=비밀번호: )\\S+`` · 앵커)이 맞지 않아 원문이
+        그대로 나온다. 그래서 찾은 문맥의 매치 객체로 템플릿을 펼친다. 템플릿이 깨졌으면(없는 그룹 \\1)
+        ``****`` 로 가린다(fail-closed).
+        """
+        if self.masking_mode == MASK_MODE_PARTIAL:
+            return self._partial(match.group(0))
+        try:
+            return match.expand(self.mask)
+        except (re.error, IndexError):
+            return DEFAULT_MASK
 
     def substitute(self, text: str) -> str:
         """글 전체에 이 규칙을 적용."""
-        return self.pattern.sub(self.repl, text)
+        return self.pattern.sub(self.replacement, text)
 
 
 def compile_rules(rows: Optional[Iterable[Dict[str, Any]]], policy_type: str, *,
@@ -176,7 +194,7 @@ def apply_rules(text: str, rules: Sequence[MaskingRule], *, mask: bool = True) -
             if original in seen:
                 continue
             seen.add(original)
-            samples.append({"original": original, "masked": rule.mask_match(original)})
+            samples.append({"original": original, "masked": rule.replacement(hit)})
             if len(samples) >= SAMPLE_LIMIT:
                 break
         result.detections.append({
@@ -201,20 +219,22 @@ def apply_rules(text: str, rules: Sequence[MaskingRule], *, mask: bool = True) -
 def find_masked_spans(text: str, rules: Sequence[MaskingRule]) -> List[Tuple[int, int, str]]:
     """가릴 구간 ``(시작, 끝, 치환문)``: 조각난 글(OOXML run)을 되돌려 쓸 때 쓴다.
 
-    겹치는 매치는 앞 규칙이 이긴다(:func:`apply_rules` 의 차례를 재현).
+    겹치는 매치는 앞 규칙이 이긴다(:func:`apply_rules` 의 차례를 재현). 구간이 많아도 느려지지 않게
+    정렬된 구간에서 이분 탐색으로 겹침을 본다.
     """
-    spans: List[Tuple[int, int, str]] = []
     if not text or not rules:
-        return spans
-    claimed: List[Tuple[int, int]] = []
+        return []
+    starts: List[int] = []
+    spans: List[Tuple[int, int, str]] = []
     for rule in rules:
         for match in rule.pattern.finditer(text):
             start, end = match.span()
             if start == end:
                 continue
-            if any(start < c_end and c_start < end for c_start, c_end in claimed):
+            # 서로 겹치지 않는 정렬 구간이라, 끝이 end 보다 앞에서 시작하는 마지막 구간만 보면 된다.
+            idx = bisect.bisect_left(starts, end)
+            if idx > 0 and spans[idx - 1][1] > start:
                 continue
-            claimed.append((start, end))
-            spans.append((start, end, rule.mask_match(match.group(0))))
-    spans.sort(key=lambda s: s[0])
+            starts.insert(idx, start)
+            spans.insert(idx, (start, end, rule.replacement(match)))
     return spans

@@ -31,6 +31,7 @@ from .events import (
 from .files import (
     FORMAT_MASKERS,
     MASKING_MAX_BYTES,
+    MASKING_MAX_XML_BYTES,
     STATUS_CLEAN,
     STATUS_MASKED,
     STATUS_OFF,
@@ -44,6 +45,7 @@ from .files import (
     mask_html_document,
     mask_text,
     masker_for,
+    masker_for_extension,
     strip_bytes,
     strip_file,
 )
@@ -91,9 +93,9 @@ __all__ = [
     # loader
     "EXCEPTIONS_TABLE", "excepted_policy_ids", "load_rules", "load_scope_rules",
     # files
-    "MASKING_MAX_BYTES", "MaskingUnsupportedError", "FormatMasker", "FORMAT_MASKERS", "FileMasking",
+    "MASKING_MAX_BYTES", "MASKING_MAX_XML_BYTES", "MaskingUnsupportedError", "FormatMasker", "FORMAT_MASKERS", "FileMasking",
     "STATUS_OFF", "STATUS_CLEAN", "STATUS_MASKED", "STATUS_UNMASKABLE",
-    "extension_of", "masker_for", "mask_text", "mask_html_document", "mask_bytes", "detection_text",
+    "extension_of", "masker_for", "masker_for_extension", "mask_text", "mask_html_document", "mask_bytes", "detection_text",
     "strip_bytes", "strip_file",
     # events
     "SOURCE_WORKFLOW_AGENT", "SOURCE_WORKFLOW_EXECUTION_META", "SOURCE_WORKFLOW_GUARDER", "SOURCE_WORKFLOW_RAG",
