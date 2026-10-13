@@ -53,6 +53,7 @@ infrastructure code lives here.**
 | `xgen_sdk.notification` | Generic per-user persistent in-app notifications with read tracking |
 | `xgen_sdk.llm_catalog` | Dynamic model list for OpenAI / Anthropic / Gemini with TTL cache and fallback |
 | `xgen_sdk.comfyui` | ComfyUI API-workflow rules (parameter mapping, validation, tool schema) and an async client |
+| `xgen_sdk.control_policy` | PII and forbidden-word policies: scope switches, masking rules, file byte masking, policy event log |
 | `xgen_sdk.XgenApp` | One-call bootstrap that wires DB + Config + Storage together |
 
 More general-purpose utilities are added with every release — tracing,
@@ -286,6 +287,30 @@ async with ComfyUIClient("http://comfy:8188") as client:
     result = await run_workflow(client, prompt, output_node_ids=mapping["outputs"], timeout_s=300)
     # {"prompt_id": ..., "duration_ms": ..., "files": [{"node_id", "filename", "content_type", "data"}]}
 ```
+
+### Control policy: `xgen_sdk.control_policy`
+
+One definition of the admin PII and forbidden-word policies for every service.
+Each policy kind (PII, forbidden words) has a detection switch and four scope
+switches: block chat input, mask what goes to the model, strip chat uploads,
+strip file storage uploads. A scope is active only when both switches are on.
+
+```python
+from xgen_sdk import control_policy as cp
+
+rules = cp.load_scope_rules(app_db, cp.SCOPE_CHAT_UPLOAD, workflow_id=wf_id)  # per-agent exceptions removed
+found = cp.apply_rules(text, rules, mask=False)                               # detect only
+masked = cp.apply_rules(text, rules).text                                     # full or partial masks
+result = cp.strip_file(tmp_path, "report.docx", rules)                        # txt, html, docx/xlsx/pptx, pdf
+if result.changed:
+    size, sha256 = result.size, result.sha256
+cp.log_result(app_db, result.found, source=cp.SOURCE_CHAT_UPLOAD, workflow_id=wf_id)
+```
+
+PDF needs `xgen-pdf` and HTML needs `beautifulsoup4` at runtime. They are
+imported lazily, so services that never mask files do not need them.
+`XGEN_FILE_MASKING_MAX_BYTES` (default 32 MiB) caps the file size that is read
+into memory; larger files are left as they are (`unmaskable`).
 
 ---
 
