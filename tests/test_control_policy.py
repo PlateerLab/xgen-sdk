@@ -603,3 +603,14 @@ def test_office_document_properties_are_masked():
     result = cp.strip_bytes(out.getvalue(), "a.docx", rules)
     core = zipfile.ZipFile(io.BytesIO(result.content)).read("docProps/core.xml").decode()
     assert result.hits == 1 and "<dc:creator>[이름]</dc:creator>" in core and "<dc:title>보고서</dc:title>" in core
+
+
+def test_hwp_short_paragraph_headers_from_older_versions():
+    text = "전화 010-1234-5678".encode("utf-16-le") + PARA_END
+    chars = len(text) // 2
+    body = (_record(66, 0, struct.pack("<IIHBBHH", chars, 0, 0, 0, 0, 1, 0))  # 5.0.0.x: 16 바이트 머리
+            + _record(67, 1, text) + _record(68, 1, struct.pack("<II", 0, 0)))
+    result = cp.strip_bytes(_hwp_doc(body), "old.hwp", _rules(PHONE))
+    _, records = _section_records(result.content)
+    assert result.changed and len(records[0].payload) == 16
+    assert struct.unpack_from("<I", records[0].payload, 0)[0] == len(records[1].payload) // 2

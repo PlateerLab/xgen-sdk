@@ -230,7 +230,7 @@ def _mask_paragraph(records: List[_Record], at: int, rules: Sequence[MaskingRule
             children[records[j].tag] = j
         j += 1
     text_at = children.get(_PARA_TEXT)
-    if text_at is None or len(header.payload) < 18:
+    if text_at is None or len(header.payload) < 4:
         return 0
     units = _units(records[text_at].payload)
     text, owner = _paragraph_text(units)
@@ -255,11 +255,13 @@ def _mask_paragraph(records: List[_Record], at: int, rules: Sequence[MaskingRule
                 shapes.append((moved, shape))
         records[shape_at].payload = b"".join(struct.pack("<II", p, s) for p, s in shapes)
         records[shape_at].raw = None
-        struct.pack_into("<H", head, 12, len(shapes))
+        if len(head) >= 14:  # 문단 머리는 판마다 길이가 다르다(16 · 22 · 24 바이트)
+            struct.pack_into("<H", head, 12, len(shapes))
     line_at = children.get(_PARA_LINE_SEG)
     if line_at is not None:
         records[line_at].dropped = True
-    struct.pack_into("<H", head, 16, 0)  # 줄 배치는 한컴이 다시 계산한다
+    if len(head) >= 18:
+        struct.pack_into("<H", head, 16, 0)  # 줄 배치는 한컴이 다시 계산한다
     range_at = children.get(_PARA_RANGE_TAG)
     if range_at is not None:
         old = records[range_at].payload
