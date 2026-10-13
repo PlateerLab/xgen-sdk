@@ -493,7 +493,7 @@ def test_hwp_body_preview_summary_and_history_are_masked():
                            "masking_pattern": "[이름]"})
     result = cp.strip_bytes(raw, "보고서.hwp", rules)
     assert result.changed and result.hits == 2, "본문 1 + 작성자 1(미리보기는 본문을 옮긴 글이라 세지 않는다)"
-    assert cp.detection_text(result.content, "a.hwp") == "전화 ***-****-5678 끝\n다른 문단"
+    assert cp.detection_text(result.content, "a.hwp") == "전화 ***-****-5678 끝\n다른 문단\n[이름]", "요약 정보 글도"
     root, records = _section_records(result.content)
     assert root.find("PrvText").data.decode("utf-16-le") == "전화 ***-****-5678 끝"
     assert root.find("PrvImage").data.startswith(b"\x89PNG"), "첫 쪽 그림은 빈 그림으로"
@@ -570,7 +570,7 @@ def test_hwpx_paragraphs_tables_and_layout_cache():
         assert "홍길동" not in z.read("Contents/content.hpf").decode()
         assert z.read("Preview/PrvText.txt").decode() == "전화 ***-****-5678"
         assert z.read("Preview/PrvImage.png") != b"\x89PNG old"
-    assert cp.detection_text(result.content, "a.hwpx") == "전화 ***-****-5678 & 끝\n표 뒤 글\n<이름>"
+    assert cp.detection_text(result.content, "a.hwpx") == "전화 ***-****-5678 & 끝\n표 뒤 글\n<이름>\n<이름>", "작성자도"
     as_hwp = cp.strip_bytes(raw, "zip으로_저장된.hwp", rules)
     assert as_hwp.changed and as_hwp.content == result.content, "확장자가 hwp 여도 zip 이면 HWPX 로"
 
@@ -614,3 +614,100 @@ def test_hwp_short_paragraph_headers_from_older_versions():
     _, records = _section_records(result.content)
     assert result.changed and len(records[0].payload) == 16
     assert struct.unpack_from("<I", records[0].payload, 0)[0] == len(records[1].payload) // 2
+
+
+def _hlk(command: str) -> bytes:
+    body = command.encode("utf-16-le")
+    return (b"klh%" + struct.pack("<IB", 0, 0) + struct.pack("<H", len(body) // 2) + body + struct.pack("<I", 7))
+
+
+def test_hwp_text_outside_paragraphs_is_masked_and_positions_stay_ordered():
+    # 하이퍼링크 명령(mailto) · 개체 설명(그림 원래 파일 이름) · 위치가 섞인 문단
+    text = "hong".encode("utf-16-le") + FIELD_START + "@example.com".encode("utf-16-le") + FIELD_END + PARA_END
+    para = _paragraph(text, [(0, 0), (4, 1), (13, 2)])
+    gso = (b" osg" + b"\0" * 40 + struct.pack("<H", 9) + "kim@x.com".encode("utf-16-le") + b"\0" * 4)
+    body = para + _record(71, 1, _hlk("mailto\\:hong@example.com;1;0;0;")) + _record(71, 1, gso)
+    rules = _rules({"id": 9, "policy_name": "메일", "regex_pattern": r"\w+@[\w.]+", "masking": True,
+                    "masking_pattern": "[EMAIL]"})
+    result = cp.strip_bytes(_hwp_doc(body), "a.hwp", rules)
+    _, records = _section_records(result.content)
+    assert result.hits == 3 and "@" not in cp.detection_text(result.content, "a.hwp")
+    shapes = [p for p, _ in struct.iter_unpack("<II", records[2].payload)]
+    assert shapes == sorted(shapes) and shapes[0] == 0, "글자 모양 위치가 뒤집히지 않는다"
+    start, end, _ = struct.unpack("<III", records[3].payload)
+    assert start <= end == len(records[1].payload) // 2
+    assert records[4].payload[11:-4].decode("utf-16-le") == "mailto\\:[EMAIL];1;0;0;", "링크 주소도"
+    assert records[4].payload.endswith(struct.pack("<I", 7)) and "[EMAIL]" in records[5].payload.decode("utf-16-le", "ignore")
+
+
+def test_hwp_bombs_history_and_cut_previews():
+    from xgen_sdk.control_policy import files
+
+    clean = _paragraph("안녕하세요".encode("utf-16-le") + PARA_END, [(0, 0)])
+    only_history = cp.strip_bytes(_hwp_doc(clean, history=True), "a.hwp", _rules(PHONE))
+    assert only_history.changed and _cfb.read(only_history.content).find("DocHistory") is None, \
+        "본문이 깨끗해도 이력에 걸린 것이 있으면 이력을 지운다"
+    phone = _paragraph("전화 010-1234-5678".encode("utf-16-le") + PARA_END, [(0, 0)])
+    cut = cp.strip_bytes(_hwp_doc(phone, prv="전화 010-1234-56"), "a.hwp", _rules(PHONE))
+    assert _cfb.read(cut.content).find("PrvText").data.decode("utf-16-le") == "전화 ***-****-56", \
+        "매치 한가운데서 잘린 미리보기도 고친 본문으로 다시 만든다"
+    bomb = _hwp_doc(_paragraph(("a" * 200000).encode("utf-16-le") + PARA_END, [(0, 0)]))
+    original = files.MASKING_MAX_UNZIPPED_BYTES
+    files.MASKING_MAX_UNZIPPED_BYTES = 100000
+    try:
+        refused = cp.strip_bytes(bomb, "a.hwp", _rules(PHONE))
+    finally:
+        files.MASKING_MAX_UNZIPPED_BYTES = original
+    assert refused.status == cp.STATUS_UNMASKABLE and "상한" in refused.reason
+
+
+def test_hwp_unreadable_summary_with_a_hit_is_dropped():
+    raw = _hwp_doc(_paragraph("본문".encode("utf-16-le") + PARA_END, [(0, 0)]))
+    root = _cfb.read(raw)
+    root.find("\x05HwpSummaryInformation").data = b"\0\0" + "작성자 010-1234-5678".encode("utf-16-le")
+    result = cp.strip_bytes(_cfb.write(root), "a.hwp", _rules(PHONE))
+    assert result.changed and _cfb.read(result.content).find("\x05HwpSummaryInformation") is None
+
+
+def test_hwpx_strings_cdata_and_duplicate_entries():
+    section = ('<hp:p><hp:run><hp:ctrl><hp:fieldBegin type="HYPERLINK"><hp:parameters>'
+               '<hp:stringParam name="Command">mailto\\:kim@x.com;1;0;0;</hp:stringParam></hp:parameters>'
+               '</hp:fieldBegin></hp:ctrl><hp:t a="1>2"><![CDATA[메일 kim@x.com]]></hp:t></hp:run></hp:p>'
+               '<hp:pic><hp:shapeComment>사진 kim@x.com.png</hp:shapeComment></hp:pic>')
+    rules = _rules({"id": 9, "policy_name": "메일", "regex_pattern": r"\w+@[\w]+\.com", "masking": True,
+                    "masking_pattern": "[EMAIL]"})
+    result = cp.strip_bytes(_hwpx(section), "a.hwpx", rules)
+    xml = zipfile.ZipFile(io.BytesIO(result.content)).read("Contents/section0.xml").decode()
+    assert result.hits == 3 and "kim@" not in xml
+    assert "<![CDATA[메일 [EMAIL]]]>" in xml and "mailto\\:[EMAIL];1;0;0;" in xml
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("Contents/section0.xml", "<hp:p><hp:run><hp:t>kim@x.com</hp:t></hp:run></hp:p>")
+        with pytest.warns(UserWarning):
+            z.writestr("Contents/section0.xml", "<hp:p/>")
+    assert cp.strip_bytes(out.getvalue(), "a.hwpx", rules).status == cp.STATUS_UNMASKABLE, "이름이 겹친 항목"
+
+
+def test_office_typed_properties_are_left_alone_and_thumbnails_blanked():
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("word/document.xml", "<w:document><w:p><w:r><w:t>2024-01-02</w:t></w:r></w:p></w:document>")
+        z.writestr("docProps/core.xml", '<cp:coreProperties xmlns:dcterms="t"><dcterms:created>2024-01-02T03:04:05Z'
+                                        "</dcterms:created><cp:revision>12345678</cp:revision></cp:coreProperties>")
+        z.writestr("docProps/thumbnail.jpeg", b"\xff\xd8 first page")
+    rules = _rules({"id": 3, "policy_name": "날짜", "regex_pattern": r"\d{4}-\d{2}-\d{2}|\d{8}", "masking": True,
+                    "masking_pattern": "[생일]"})
+    result = cp.strip_bytes(out.getvalue(), "a.docx", rules)
+    z = zipfile.ZipFile(io.BytesIO(result.content))
+    assert result.hits == 1 and "2024-01-02T03:04:05Z" in z.read("docProps/core.xml").decode()
+    assert "12345678" in z.read("docProps/core.xml").decode() and z.read("docProps/thumbnail.jpeg").startswith(b"\x89PNG")
+
+
+def test_html_script_and_style_contents_are_masked_without_breaking_them():
+    page = '<p>x</p><script type="a>b">var p = "010-1234-5678";</script><style>/* 010-1234-5678 */</style>'
+    rules = _rules(dict(PHONE, masking_mode="full", masking_pattern="</script>"))
+    out = cp.strip_bytes(page.encode(), "a.html", rules).content.decode()
+    assert out == ('<p>x</p><script type="a>b">var p = "<\\/script>";</script><style>/* <\\/script> */</style>'), out
+    titled = '<p title="a>b 010-1234-5678">본문 010-1234-5678</p>'
+    assert cp.strip_bytes(titled.encode(), "a.html", _rules(PHONE)).content.decode() == \
+        '<p title="a>b 010-1234-5678">본문 ***-****-5678</p>', "속성 값 안의 > 는 태그 끝이 아니다(속성은 그대로)"
