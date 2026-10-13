@@ -636,7 +636,8 @@ def test_hwp_text_outside_paragraphs_is_masked_and_positions_stay_ordered():
     assert shapes == sorted(shapes) and shapes[0] == 0, "글자 모양 위치가 뒤집히지 않는다"
     start, end, _ = struct.unpack("<III", records[3].payload)
     assert start <= end == len(records[1].payload) // 2
-    assert records[4].payload[11:-4].decode("utf-16-le") == "mailto\\:[EMAIL];1;0;0;", "링크 주소도"
+    assert records[4].payload[11:-4].decode("utf-16-le") == "mailto\\:[EMAIL]*********;1;0;0;", \
+        "링크 주소도(필드 명령은 같은 길이로: 누름틀처럼 값마다 길이를 적어 두는 명령이 어긋나지 않게)"
     assert records[4].payload.endswith(struct.pack("<I", 7)) and "[EMAIL]" in records[5].payload.decode("utf-16-le", "ignore")
 
 
@@ -679,7 +680,7 @@ def test_hwpx_strings_cdata_and_duplicate_entries():
     result = cp.strip_bytes(_hwpx(section), "a.hwpx", rules)
     xml = zipfile.ZipFile(io.BytesIO(result.content)).read("Contents/section0.xml").decode()
     assert result.hits == 3 and "kim@" not in xml
-    assert "<![CDATA[메일 [EMAIL]]]>" in xml and "mailto\\:[EMAIL];1;0;0;" in xml
+    assert "<![CDATA[메일 [EMAIL]]]>" in xml and "mailto\\:[EMAIL]**;1;0;0;" in xml, "필드 매개변수는 같은 길이로"
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
         z.writestr("Contents/section0.xml", "<hp:p><hp:run><hp:t>kim@x.com</hp:t></hp:run></hp:p>")
@@ -695,12 +696,20 @@ def test_office_typed_properties_are_left_alone_and_thumbnails_blanked():
         z.writestr("docProps/core.xml", '<cp:coreProperties xmlns:dcterms="t"><dcterms:created>2024-01-02T03:04:05Z'
                                         "</dcterms:created><cp:revision>12345678</cp:revision></cp:coreProperties>")
         z.writestr("docProps/thumbnail.jpeg", b"\xff\xd8 first page")
+        z.writestr("_rels/.rels", '<Relationships><Relationship Id="rId1" Type="t/thumbnail" '
+                                  'Target="docProps/thumbnail.jpeg"/><Relationship Id="rId2" Type="d" '
+                                  'Target="word/document.xml"/></Relationships>')
+        z.writestr("[Content_Types].xml", '<Types><Default Extension="jpeg" ContentType="image/jpeg"/>'
+                                          '<Override PartName="/docProps/thumbnail.jpeg" ContentType="image/jpeg"/></Types>')
     rules = _rules({"id": 3, "policy_name": "날짜", "regex_pattern": r"\d{4}-\d{2}-\d{2}|\d{8}", "masking": True,
                     "masking_pattern": "[생일]"})
     result = cp.strip_bytes(out.getvalue(), "a.docx", rules)
     z = zipfile.ZipFile(io.BytesIO(result.content))
     assert result.hits == 1 and "2024-01-02T03:04:05Z" in z.read("docProps/core.xml").decode()
-    assert "12345678" in z.read("docProps/core.xml").decode() and z.read("docProps/thumbnail.jpeg").startswith(b"\x89PNG")
+    assert "12345678" in z.read("docProps/core.xml").decode()
+    assert "docProps/thumbnail.jpeg" not in z.namelist(), "첫 쪽을 그린 썸네일은 관계와 함께 뺀다"
+    assert "thumbnail" not in z.read("_rels/.rels").decode() and "word/document.xml" in z.read("_rels/.rels").decode()
+    assert "thumbnail" not in z.read("[Content_Types].xml").decode()
 
 
 def test_html_script_and_style_contents_are_masked_without_breaking_them():
@@ -711,3 +720,52 @@ def test_html_script_and_style_contents_are_masked_without_breaking_them():
     titled = '<p title="a>b 010-1234-5678">본문 010-1234-5678</p>'
     assert cp.strip_bytes(titled.encode(), "a.html", _rules(PHONE)).content.decode() == \
         '<p title="a>b 010-1234-5678">본문 ***-****-5678</p>', "속성 값 안의 > 는 태그 끝이 아니다(속성은 그대로)"
+
+
+# ── 3차 검토 (한글 · HTML) ───────────────────────────────────────────
+
+
+def test_html_apostrophes_in_text_do_not_hide_it():
+    rules = _rules(PHONE)
+    for page in ("<p data-x=it's>a</p><p>전화 010-1234-5678</p><p>that's</p>",
+                 "if a<b then it's x> 010-1234-5678 and that's"):
+        out = cp.strip_bytes(page.encode(), "a.html", rules)
+        assert out.changed and "010-1234" not in out.content.decode(), page
+
+
+def test_hwp_clickhere_commands_keep_their_length_and_bad_streams_are_refused():
+    command = "Clickhere:set:22:Direction:wstring:22:담당자 kim@x.com 에게 문의 Help:wstring:0: "
+    body = _paragraph("본문".encode("utf-16-le") + PARA_END, [(0, 0)]) + _record(71, 1, _hlk(command))
+    rules = _rules({"id": 9, "policy_name": "메일", "regex_pattern": r"\w+@[\w.]+\w", "masking": True,
+                    "masking_pattern": "[EMAIL]"})
+    _, records = _section_records(cp.strip_bytes(_hwp_doc(body), "a.hwp", rules).content)
+    assert records[5].tag == 71 and records[5].payload[11:-4].decode("utf-16-le") == command.replace("kim@x.com", "[EMAIL]**")
+    raw = _hwp_doc(body)
+    root = _cfb.read(raw)
+    section = root.find("BodyText/Section0")
+    section.data = section.data[:-4]  # 잘린 압축
+    assert cp.strip_bytes(_cfb.write(root), "a.hwp", rules).status == cp.STATUS_UNMASKABLE
+
+
+def test_hwp_unreadable_history_is_dropped_and_previews_are_rechecked():
+    clean = _paragraph("안녕하세요".encode("utf-16-le") + PARA_END, [(0, 0)])
+    root = _cfb.read(_hwp_doc(clean, history=True))
+    root.find("DocHistory/VersionLog0").data = b"\x00not deflate at all"
+    result = cp.strip_bytes(_cfb.write(root), "a.hwp", _rules(PHONE))
+    assert result.changed and _cfb.read(result.content).find("DocHistory") is None, "볼 수 없는 이력은 지운다"
+    name = {"id": 4, "policy_name": "이름", "regex_pattern": r"이름:\s*\S+", "masking": True, "masking_pattern": "[이름]"}
+    body = _paragraph("이름: 홍길동".encode("utf-16-le") + PARA_END, [(0, 0)]) \
+        + _paragraph("전화 010-1234-5678".encode("utf-16-le") + PARA_END, [(0, 0)])
+    out = cp.strip_bytes(_hwp_doc(body, prv="이름:\r\n홍길동 전화 010-1234-5678"), "a.hwp", _rules(PHONE, name))
+    preview = _cfb.read(out.content).find("PrvText").data.decode("utf-16-le")
+    assert "홍길동" not in preview and "010-1234" not in preview
+
+
+def test_hwpx_cdata_in_string_leaves_and_metadata():
+    section = '<hp:p><hp:run><hp:t>본문</hp:t></hp:run></hp:p><hp:pic><hp:shapeComment><![CDATA[kim@x.com]]></hp:shapeComment></hp:pic>'
+    raw = _hwpx(section, creator="<![CDATA[lee@y.com]]>")
+    rules = _rules({"id": 9, "policy_name": "메일", "regex_pattern": r"\w+@\w+\.com", "masking": True,
+                    "masking_pattern": "[EMAIL]"})
+    result = cp.strip_bytes(raw, "a.hwpx", rules)
+    z = zipfile.ZipFile(io.BytesIO(result.content))
+    assert result.hits == 2 and "@" not in z.read("Contents/section0.xml").decode() + z.read("Contents/content.hpf").decode()

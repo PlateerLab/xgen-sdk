@@ -304,22 +304,41 @@ def _string_slot(record: "_Record") -> Optional[int]:
     return None
 
 
+def _mask_same_length(text: str, rules: Sequence[MaskingRule]) -> Tuple[str, int]:
+    """걸린 구간마다 마스크를 원문과 같은 길이로 맞춰 넣는다(늘면 자르고 줄면 * 로 채운다).
+
+    누름틀 명령처럼 값마다 길이를 적어 두는 글(``Clickhere:set:N:Direction:wstring:22:…``)은 길이가 바뀌면 뒤가
+    어긋난다. 구간 밖 글자(줄바꿈 포함)는 그대로다.
+    """
+    spans = find_masked_spans(text, rules)
+    if not spans:
+        return text, 0
+    out: List[str] = []
+    last = 0
+    for start, end, mask in spans:
+        size = end - start
+        fitted = _safe_mask(mask)[:size]
+        out.append(text[last:start])
+        out.append(fitted + "*" * (size - len(fitted)))
+        last = end
+    out.append(text[last:])
+    return "".join(out), len(spans)
+
+
 def _mask_string_slot(record: "_Record", rules: Sequence[MaskingRule]) -> int:
     offset = _string_slot(record)
     found = _wstr_at(record.payload, offset) if offset is not None else None
     if not found or not found[1]:
         return 0
     count, text = found
-    result = apply_rules(text, rules)
-    if result.text == text:
+    masked, hits = _mask_same_length(text, rules)
+    if not hits:
         return 0
-    body = _safe_mask(result.text).encode("utf-16-le", errors="surrogatepass")
-    if len(body) // 2 > 0xFFFF:
-        raise _unsupported("개체 글이 너무 김")
+    body = masked.encode("utf-16-le", errors="surrogatepass")
     record.payload = (record.payload[:offset] + struct.pack("<H", len(body) // 2) + body
                       + record.payload[offset + 2 + count * 2:])
     record.raw = None
-    return result.total_detected
+    return hits
 
 
 def _mask_section(data: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
@@ -526,6 +545,8 @@ def _inflate(data: bytes, budget: List[int]) -> bytes:
         raise _unsupported("압축을 풀지 못함") from exc
     if len(out) > budget[0] or inflater.unconsumed_tail:
         raise _unsupported("압축을 푼 크기가 상한 초과")
+    if not inflater.eof:
+        raise _unsupported("압축이 잘림")
     budget[0] -= len(out)
     return out
 
@@ -539,15 +560,17 @@ def _compress(data: bytes) -> bytes:
     return packer.compress(data) + packer.flush()
 
 
-def _history_hits(history: _cfb.Entry, rules: Sequence[MaskingRule], budget: List[int]) -> int:
-    """문서 이력(예전 판들)에 걸린 것이 있는가. 구조를 읽지 않고 스트림마다 풀어(되면) 글로 보이는 것을 찾는다."""
+def _history_hits(history: _cfb.Entry, rules: Sequence[MaskingRule], compressed: bool, budget: List[int]) -> int:
+    """문서 이력(예전 판들)에 걸린 것이 있는가. 구조를 읽지 않고 스트림마다 (압축 문서면 풀어) 글로 보이는 것을
+    찾는다. 풀지 못하는 스트림이 있으면 볼 수 없으니 걸린 것으로 친다(이력을 지운다)."""
     found = 0
     for _path, entry in history.streams():
         data = entry.data
-        try:
-            data = _inflate(entry.data, budget)
-        except Exception:  # noqa: BLE001, 압축이 아니면 그대로 본다(상한 초과도 그대로 보고 지운다)
-            pass
+        if compressed:
+            try:
+                data = _inflate(entry.data, budget)
+            except Exception:  # noqa: BLE001, 못 풀면(상한 · 깨짐) 안을 볼 수 없다
+                return max(found, 1)
         found += _loose_hits(data, rules)
     return found
 
@@ -562,20 +585,25 @@ def mask_hwp(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
     budget = _budget()
     hits = 0
     body_lines: List[str] = []
+    body_changed = False
     for entry in sections:
-        masked, count = _mask_section(_section_data(entry, compressed, budget), rules)
+        original = _section_data(entry, compressed, budget)
+        masked, count = _mask_section(original, rules)
         if count:
             entry.data = _compress(masked) if compressed else masked
             hits += count
         body_lines.append(_body_text(masked))
+        body_changed = body_changed or (count > 0 and body_lines[-1] != _body_text(original))
     summary = root.child(_SUMMARY_STREAM)
     if summary is not None and summary.is_stream:
         try:
             summary.data, count = _mask_property_set(summary.data, rules)
+            left = _loose_hits(summary.data, rules)  # 다루지 않는 형식(VT_BSTR · 벡터 등)에 남은 것
         except _Unreadable:
-            count = _loose_hits(summary.data, rules)
-            if count:
-                root.children.remove(summary)  # 읽지 못하는 요약 정보에 걸린 것이 있으면 통째로 뺀다
+            count, left = 0, _loose_hits(summary.data, rules)
+        if left:
+            root.children.remove(summary)  # 읽지 못하거나 남은 것이 있으면 요약 정보를 통째로 뺀다
+            count += left
         hits += count
     extra = 0
     preview = root.child("PrvText")
@@ -583,14 +611,16 @@ def mask_hwp(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
         text = preview.data.decode("utf-16-le", errors="surrogatepass")
         # 미리보기는 본문 앞부분을 잘라 옮긴 글이다. 매치 한가운데서 잘렸으면 규칙이 다시 못 찾으므로, 본문을 고쳤으면
         # 고친 본문에서 같은 길이로 다시 만든다.
-        rebuilt = "\r\n".join(body_lines).replace("\n", "\r\n").replace("\r\r\n", "\r\n")[:len(text)] if hits else None
         found = apply_rules(text, rules)
-        new_text = rebuilt if rebuilt is not None else found.text
+        new_text = found.text
+        if body_changed:
+            rebuilt = "\r\n".join(body_lines).replace("\n", "\r\n").replace("\r\r\n", "\r\n")[:len(text)]
+            new_text = apply_rules(rebuilt, rules).text  # 문단을 넘는 매치도 다시 가린다
         if new_text != text:
             preview.data = new_text.encode("utf-16-le", errors="surrogatepass")
             extra += found.total_detected
     history = root.child("DocHistory")
-    history_found = _history_hits(history, rules, budget) if history is not None else 0
+    history_found = _history_hits(history, rules, compressed, budget) if history is not None else 0
     extra += history_found
     if not hits and not extra:
         return raw, 0
@@ -624,7 +654,21 @@ def hwp_text(raw: bytes) -> str:
 #: 속성 값 안의 > 도 태그 끝으로 보지 않는다.
 _ATTRS = r"""(?:"[^"]*"|'[^']*'|[^'">])*?"""
 _XML_TOKEN = re.compile(r"<!--.*?-->|<!\[CDATA\[(.*?)\]\]>|<\?.*?\?>|<(/?)([A-Za-z_][\w.:-]*)\b" + _ATTRS + r"(/?)>", re.S)
-_LEAF_TEXT = re.compile(r"(<([A-Za-z_][\w.:-]*)(?:\s" + _ATTRS + r")?>)([^<]+)(</\2>)")
+#: 잎 요소: 글은 3번 묶음(CDATA 가 섞여도 된다).
+_LEAF_TEXT = re.compile(r"(<([A-Za-z_][\w.:-]*)(?:\s" + _ATTRS + r")?>)((?:[^<]|<!\[CDATA\[.*?\]\]>)+)(</\2>)", re.S)
+_CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+
+
+def _leaf_value(content: str) -> str:
+    """잎 요소 글: CDATA 밖은 엔티티를 풀고 CDATA 안은 그대로."""
+    out: List[str] = []
+    last = 0
+    for match in _CDATA.finditer(content):
+        out.append(html_lib.unescape(content[last:match.start()]))
+        out.append(match.group(1))
+        last = match.end()
+    out.append(html_lib.unescape(content[last:]))
+    return "".join(out)
 #: 문단 글 밖에 사람이 쓴 글을 드는 HWPX 요소: 필드 매개변수(하이퍼링크 주소 · mailto 등), 개체 설명, 수식 스크립트.
 _HWPX_STRING_LEAVES = frozenset({"stringParam", "shapeComment", "script"})
 #: content.hpf 에서 사람이 쓴 글인 메타데이터(날짜 등 정해진 꼴의 값은 건드리지 않는다).
@@ -748,11 +792,11 @@ def _mask_hwpx_section(xml: str, rules: Sequence[MaskingRule]) -> Tuple[str, int
             s, e = paragraph["lineseg"]
             edits.append((s, e, ""))  # 줄 배치 캐시: 한컴이 다시 계산한다
     for leaf in _string_leaves(xml):
-        text = html_lib.unescape(leaf.group(3))
-        result = apply_rules(text, rules)
-        if result.text != text:
-            hits += result.total_detected
-            edits.append((leaf.start(3), leaf.end(3), _xml_text_mask(result.text)))
+        text = _leaf_value(leaf.group(3))
+        masked, count = _mask_same_length(text, rules)  # 필드 매개변수도 값마다 길이를 적어 둔다
+        if count:
+            hits += count
+            edits.append((leaf.start(3), leaf.end(3), _xml_text_mask(masked)))
     if not edits:
         return xml, 0
     edits.sort()
@@ -774,12 +818,12 @@ def _mask_leaf_text(xml: str, rules: Sequence[MaskingRule], keep=None) -> Tuple[
         nonlocal hits
         if keep is not None and not keep(match):
             return match.group(0)
-        text = html_lib.unescape(match.group(3))
+        text = _leaf_value(match.group(3))
         result = apply_rules(text, rules)
         if result.text == text:
             return match.group(0)
         hits += result.total_detected
-        return match.group(1) + _xml_text_mask(result.text) + match.group(4)
+        return match.group(1) + _xml_text_mask(result.text) + match.group(4)  # CDATA 는 이스케이프한 글로 다시 쓴다
 
     masked = _LEAF_TEXT.sub(fix, xml)
     return masked, hits
@@ -841,7 +885,7 @@ def _check_zip(source: zipfile.ZipFile) -> None:
 
 def _section_lines(xml: str) -> List[str]:
     lines = ["".join(_segment_text(xml, s) for s in p["segments"]) for p in _hwpx_paragraphs(xml) if p["segments"]]
-    lines.extend(html_lib.unescape(leaf.group(3)) for leaf in _string_leaves(xml))
+    lines.extend(_leaf_value(leaf.group(3)) for leaf in _string_leaves(xml))
     return lines
 
 
@@ -905,5 +949,5 @@ def hwpx_text(raw: bytes) -> str:
                 lines.extend(_section_lines(source.read(item.filename).decode("utf-8")))
             elif kind == "meta":
                 xml = source.read(item.filename).decode("utf-8")
-                lines.extend(html_lib.unescape(m.group(3)) for m in _LEAF_TEXT.finditer(xml) if _hpf_text_meta(m))
+                lines.extend(_leaf_value(m.group(3)) for m in _LEAF_TEXT.finditer(xml) if _hpf_text_meta(m))
     return "\n".join(lines)

@@ -186,9 +186,10 @@ _TEXT, _RAW, _MARKUP = "text", "raw", "markup"
 
 
 def _tag_end(document: str, pos: int) -> int:
-    """태그 끝(``>`` 다음 위치). 속성 값 따옴표 안의 ``>`` 는 건너뛴다. 닫히지 않은 따옴표면 첫 ``>`` 에서 끝낸다.
+    """태그 끝(``>`` 다음 위치). 속성 값(``=`` 바로 뒤 따옴표) 안의 ``>`` 는 건너뛴다. ``=`` 뒤가 아닌 따옴표
+    (``it's``)는 값의 시작이 아니다(브라우저와 같다). 닫히지 않은 값이면 첫 ``>`` 에서 끝낸다.
 
-    따옴표를 찾을 때마다 앞으로만 간다(닫히지 않은 따옴표가 많은 문서도 문서를 한 번만 지나간다).
+    앞으로만 간다(따옴표가 많은 문서도 한 번만 지나간다).
     """
     n = len(document)
     i = pos
@@ -196,11 +197,22 @@ def _tag_end(document: str, pos: int) -> int:
         gt = document.find(">", i)
         if gt < 0:
             return n
-        quotes = [q for q in (document.find('"', i, gt), document.find("'", i, gt)) if q >= 0]
-        if not quotes:
+        j, quote = i, -1
+        while True:
+            found = [q for q in (document.find('"', j, gt), document.find("'", j, gt)) if q >= 0]
+            if not found:
+                break
+            q = min(found)
+            k = q - 1
+            while k >= pos and document[k] in " \t\r\n":
+                k -= 1
+            if k >= pos and document[k] == "=":
+                quote = q
+                break
+            j = q + 1
+        if quote < 0:
             return gt + 1
-        q = min(quotes)
-        close = document.find(document[q], q + 1)
+        close = document.find(document[quote], quote + 1)
         if close < 0:
             return gt + 1
         i = close + 1
@@ -482,7 +494,7 @@ def _xml_parts(source: zipfile.ZipFile) -> List[zipfile.ZipInfo]:
 def _mask_ooxml(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
     """OOXML(zip) 안 XML 파트의 문자 데이터만 바꾼다. 파트는 UTF-8 고정(ECMA-376). 항목 순서 · 시각 · 압축 방식 유지.
 
-    걸린 것이 있으면 문서 썸네일(docProps/thumbnail.*, 첫 쪽 · 첫 슬라이드를 그린 그림)은 빈 그림으로 바꾼다.
+    걸린 것이 있으면 문서 썸네일(docProps/thumbnail.*, 첫 쪽 · 첫 슬라이드를 그린 그림)은 패키지 관계와 함께 뺀다.
     """
     hits = 0
     replaced: Dict[str, bytes] = {}
@@ -500,19 +512,31 @@ def _mask_ooxml(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
                 replaced[item.filename] = masked_xml.encode("utf-8")
         if not hits:
             return raw, 0
-        from ._hwp import _blank_png
-
+        thumbnails = {item.filename for item in source.infolist()
+                      if item.filename.lower().startswith("docprops/thumbnail")}
+        for part in ("_rels/.rels", "[Content_Types].xml"):
+            if thumbnails and part in source.namelist():
+                xml = replaced.get(part, source.read(part)).decode("utf-8")
+                replaced[part] = _without_thumbnail(xml, thumbnails).encode("utf-8")
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
             for item in source.infolist():
-                if item.filename.lower().startswith("docprops/thumbnail"):
-                    data = _blank_png()
-                else:
-                    data = replaced.get(item.filename)
-                    if data is None:
-                        data = source.read(item.filename)
+                if item.filename in thumbnails:
+                    continue
+                data = replaced.get(item.filename)
+                if data is None:
+                    data = source.read(item.filename)
                 target.writestr(item, data)
     return output.getvalue(), hits
+
+
+def _without_thumbnail(xml: str, thumbnails: set) -> str:
+    """패키지 관계 · 콘텐츠 형식에서 썸네일 파트를 가리키는 줄을 뺀다."""
+    for name in thumbnails:
+        target = re.escape(name)
+        xml = re.sub(r"<Relationship\b[^>]*\bTarget=\"/?" + target + r"\"[^>]*/>", "", xml)
+        xml = re.sub(r"<Override\b[^>]*\bPartName=\"/" + target + r"\"[^>]*/>", "", xml, flags=re.I)
+    return xml
 
 
 def _ooxml_text(raw: bytes) -> str:
