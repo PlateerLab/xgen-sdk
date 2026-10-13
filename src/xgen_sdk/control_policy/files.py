@@ -9,10 +9,12 @@
     txt · md · csv · json · 코드 등         원래 인코딩으로 되돌아가게 읽고 글 전체에 적용
     html · htm · xhtml                     태그 밖 글과 주석만(태그 · 속성 · 스크립트 · 스타일은 바이트 그대로)
     docx · xlsx · pptx (+ 매크로 변형)      문단 · 셀(w:p · a:p · si · is)마다 텍스트 노드를 이어 찾고,
-                                           걸린 노드만 다시 쓴다(나머지 노드는 원문 그대로)
+                                           걸린 노드만 다시 쓴다(나머지 노드는 원문 그대로). 문서 속성(docProps)도
+    hwp (한글 5.0) · hwpx                  문단 글(표 · 머리말 · 각주 · 글상자 포함)과 미리보기 · 문서 요약 정보.
+                                           자세한 것은 ``_hwp`` 모듈
     pdf                                    페이지 글에서 찾아 좌표로 redaction(글자를 실제로 지운다)
 
-글을 읽을 수 없는 형식(그림 · 한글 · 옛 Office · 압축 등), 텍스트 레이어가 없는 PDF(스캔), 암호 PDF,
+글을 읽을 수 없는 형식(그림 · 옛 Office · 압축 등), 텍스트 레이어가 없는 PDF(스캔), 암호 PDF · 암호 · 배포용 한글 문서,
 상한(:data:`MASKING_MAX_BYTES`, 압축을 푼 Office 는 :data:`MASKING_MAX_UNZIPPED_BYTES`)을 넘는 파일은
 :class:`MaskingUnsupportedError`. 그때 어떻게 할지(원본 거절 · 그대로 둠)는 부르는 쪽이 정한다.
 
@@ -183,6 +185,62 @@ _HTML_ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-
 _TEXT, _RAW, _MARKUP = "text", "raw", "markup"
 
 
+_TAG_SPACE = re.compile(r"\s*")
+_TAG_NAME = re.compile(r"[^\s/>]*")
+_ATTR_NAME = re.compile(r"[^\s/>][^\s/>=]*")
+_UNQUOTED = re.compile(r"[^\s>]*")
+
+
+class _TagScanner:
+    """태그 끝 찾기: 속성을 브라우저처럼 읽는다(이름, ``=``, 값). 값을 여는 따옴표 안의 ``>`` 만 건너뛴다.
+
+    ``it's`` 처럼 값이 아닌 자리의 따옴표나 따옴표 없는 값 뒤의 따옴표는 이름 글자일 뿐이다. 닫는 따옴표 찾기는
+    문서마다 기억해(닫히지 않은 따옴표가 많은 문서도) 앞으로만 간다. 닫히지 않은 값이면 그 뒤 첫 ``>`` 에서
+    끝낸다(뒤를 글로 보고 가린다: 덜 가리는 쪽으로 틀리지 않게).
+    """
+
+    def __init__(self, document: str):
+        self.document = document
+        self.found: Dict[str, Tuple[int, int]] = {}
+
+    def _find(self, quote: str, start: int) -> int:
+        hit = self.found.get(quote)
+        if hit is not None and hit[0] <= start and (hit[1] < 0 or hit[1] >= start):
+            return hit[1]
+        result = self.document.find(quote, start)
+        self.found[quote] = (start, result)
+        return result
+
+    def end(self, pos: int) -> int:
+        document, n = self.document, len(self.document)
+        i = _TAG_NAME.match(document, pos).end()
+        while i < n:
+            i = _TAG_SPACE.match(document, i).end()
+            if i >= n:
+                return n
+            ch = document[i]
+            if ch == ">":
+                return i + 1
+            if ch == "/":
+                i += 1
+                continue
+            i = _ATTR_NAME.match(document, i).end()
+            j = _TAG_SPACE.match(document, i).end()
+            if j < n and document[j] == "=":
+                j = _TAG_SPACE.match(document, j + 1).end()
+                if j < n and document[j] in "\"'":
+                    close = self._find(document[j], j + 1)
+                    if close < 0:
+                        gt = document.find(">", j)
+                        return n if gt < 0 else gt + 1
+                    i = close + 1
+                else:
+                    i = _UNQUOTED.match(document, j).end()
+            else:
+                i = j
+        return n
+
+
 def _html_segments(document: str) -> List[Tuple[int, int, str]]:
     """``(시작, 끝, 종류)`` 구간들. 한 번 훑는다(닫히지 않은 주석 · 스크립트가 많아도 다시 훑지 않는다).
 
@@ -190,6 +248,7 @@ def _html_segments(document: str) -> List[Tuple[int, int, str]]:
     """
     segments: List[Tuple[int, int, str]] = []
     pos, text_start, n = 0, 0, len(document)
+    tag_end = _TagScanner(document).end
 
     def flush(end: int) -> None:
         if end > text_start:
@@ -217,16 +276,28 @@ def _html_segments(document: str) -> List[Tuple[int, int, str]]:
         else:
             raw = _HTML_RAW_TEXT.match(document, lt)
             if raw:
-                closing = re.compile(r"</" + raw.group(1) + r"\s*>", re.I).search(document, raw.end())
+                # 스크립트 · 스타일: 여닫는 태그는 그대로, 안의 글(인라인 JSON 데이터 등)은 엔티티를 풀지 않고 본다.
+                open_end = tag_end(raw.end())
+                closing = re.compile(r"</" + raw.group(1) + r"\s*>", re.I).search(document, open_end)
+                segments.append((lt, open_end, _MARKUP))
+                content_end = n if closing is None else closing.start()
+                if content_end > open_end:
+                    segments.append((open_end, content_end, _RAW))
                 end = n if closing is None else closing.end()
+                if closing is not None:
+                    segments.append((closing.start(), end, _MARKUP))
             else:
-                gt = document.find(">", lt)
-                end = n if gt < 0 else gt + 1
-            segments.append((lt, end, _MARKUP))
+                end = tag_end(lt + 1)
+                segments.append((lt, end, _MARKUP))
             pos = end
         text_start = pos
     flush(n)
     return segments
+
+
+def _raw_safe(mask: str) -> str:
+    # 주석 · CDATA · 스크립트 안에 쓰는 마스크가 그 구간을 닫지 않게.
+    return mask.replace("</", "<\\/").replace("-->", "-- >").replace("]]>", "]] >")
 
 
 def _mask_html_text(segment: str, rules: Sequence[MaskingRule], *, decode_entities: bool) -> Tuple[str, int]:
@@ -275,14 +346,14 @@ def _mask_html_text(segment: str, rules: Sequence[MaskingRule], *, decode_entiti
         if r_start < last:  # 한 참조가 두 구간에 걸친 드문 경우: 앞 구간에 붙인다
             r_start = last
         out.append(segment[last:r_start])
-        out.append(html_lib.escape(mask, quote=False) if decode_entities else mask)
+        out.append(html_lib.escape(mask, quote=False) if decode_entities else _raw_safe(mask))
         last = max(last, r_end)
     out.append(segment[last:])
     return "".join(out), len(spans)
 
 
 def mask_html_document(document: str, rules: Sequence[MaskingRule]) -> Tuple[str, int]:
-    """HTML 의 글과 주석만 가린다: 태그 · 속성(인라인 base64 그림 등) · 스크립트 · 스타일 · 문자 집합 표기는
+    """HTML 의 글 · 주석 · 스크립트와 스타일 안 글을 가린다: 태그 · 속성(인라인 base64 그림 등) · 문자 집합 표기는
     바이트 그대로다(파서로 다시 쓰면 문서 모양과 charset 표기가 바뀐다)."""
     if not document or not rules:
         return document, 0
@@ -405,6 +476,23 @@ def _mask_ooxml_fragment(fragment: str, rules: Sequence[MaskingRule], *, joined:
     return "".join(result), hits
 
 
+def _is_doc_props(name: str) -> bool:
+    # 문서 속성(제목 · 작성자 · 회사 · 사용자 지정 속성). 글 노드 태그가 아니라 잎 요소마다 글이 있다.
+    return name.lower().startswith("docprops/")
+
+
+#: 문서 속성 가운데 사람이 쓴 글인 요소(core · app · custom). 날짜 · 판 번호 · 편집 시간 같은 정해진 꼴의 값은
+#: 건드리지 않는다(규칙이 숫자를 지우면 값이 깨진다).
+_DOC_PROPS_TEXT = frozenset({
+    "title", "subject", "creator", "keywords", "description", "lastModifiedBy", "category", "contentStatus",
+    "identifier", "Company", "Manager", "HyperlinkBase", "lpwstr", "lpstr", "bstr",
+})
+
+
+def _doc_props_text(match: "re.Match[str]") -> bool:
+    return match.group(2).rsplit(":", 1)[-1] in _DOC_PROPS_TEXT
+
+
 def _mask_ooxml_part(xml: str, rules: Sequence[MaskingRule]) -> Tuple[str, int]:
     segments: List[str] = []
     hits = 0
@@ -420,25 +508,67 @@ def _xml_parts(source: zipfile.ZipFile) -> List[zipfile.ZipInfo]:
     # 그림 등 모든 항목을 다시 담으며 압축을 풀기 때문에 상한은 전체 항목에 건다(zipfile 은 적힌 크기를 지킨다).
     if sum(item.file_size for item in source.infolist()) > MASKING_MAX_UNZIPPED_BYTES:
         raise MaskingUnsupportedError("ooxml", f"압축을 푼 크기가 {MASKING_MAX_UNZIPPED_BYTES} 바이트 상한 초과")
+    names = [item.filename for item in source.infolist()]
+    if len(names) != len(set(names)):
+        raise MaskingUnsupportedError("ooxml", "zip 항목 이름이 겹침")  # 읽는 쪽마다 다른 항목을 볼 수 있다
     return [item for item in source.infolist() if item.filename.lower().endswith(".xml")]
 
 
 def _mask_ooxml(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
-    """OOXML(zip) 안 XML 파트의 문자 데이터만 바꾼다. 파트는 UTF-8 고정(ECMA-376). 항목 순서 · 시각 · 압축 방식 유지."""
+    """OOXML(zip) 안 XML 파트의 문자 데이터만 바꾼다. 파트는 UTF-8 고정(ECMA-376). 항목 순서 · 시각 · 압축 방식 유지.
+
+    걸린 것이 있으면 문서 썸네일(docProps/thumbnail.*, 첫 쪽 · 첫 슬라이드를 그린 그림)은 패키지 관계와 함께 뺀다.
+    """
     hits = 0
-    output = io.BytesIO()
+    replaced: Dict[str, bytes] = {}
     with zipfile.ZipFile(io.BytesIO(raw)) as source:
-        xml_parts = {item.filename for item in _xml_parts(source)}
+        for item in _xml_parts(source):
+            data = source.read(item.filename)
+            if _is_doc_props(item.filename):
+                from ._hwp import _mask_leaf_text
+
+                masked_xml, count = _mask_leaf_text(data.decode("utf-8"), rules, keep=_doc_props_text)
+            else:
+                masked_xml, count = _mask_ooxml_part(data.decode("utf-8"), rules)
+            if count:
+                hits += count
+                replaced[item.filename] = masked_xml.encode("utf-8")
+        if not hits:
+            return raw, 0
+        thumbnails = {item.filename for item in source.infolist()
+                      if item.filename.lower().startswith("docprops/thumbnail")}
+        for part in ("_rels/.rels", "[Content_Types].xml"):
+            if thumbnails and part in source.namelist():
+                xml = replaced.get(part, source.read(part)).decode("utf-8")
+                replaced[part] = _without_thumbnail(xml, thumbnails).encode("utf-8")
+        rels = replaced.get("_rels/.rels", b"").decode("utf-8").lower()
+        blank = {name for name in thumbnails if name.lower() in rels}  # 관계를 못 뺐으면 파트는 남기고 빈 그림으로
+        output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
             for item in source.infolist():
-                data = source.read(item.filename)
-                if item.filename in xml_parts:
-                    masked_xml, count = _mask_ooxml_part(data.decode("utf-8"), rules)
-                    if count:
-                        hits += count
-                        data = masked_xml.encode("utf-8")
+                if item.filename in blank:
+                    from ._hwp import _blank_png
+
+                    target.writestr(item, _blank_png())
+                    continue
+                if item.filename in thumbnails:
+                    continue
+                data = replaced.get(item.filename)
+                if data is None:
+                    data = source.read(item.filename)
                 target.writestr(item, data)
-    return (output.getvalue() if hits else raw), hits
+    return output.getvalue(), hits
+
+
+def _without_thumbnail(xml: str, thumbnails: set) -> str:
+    """패키지 관계 · 콘텐츠 형식에서 썸네일 파트를 가리키는 요소를 뺀다(따옴표 · 공백 · 대소문자 무관)."""
+    names = {name.lower() for name in thumbnails}
+
+    def keep(match: "re.Match[str]") -> str:
+        value = re.search(r"""\b(?:Target|PartName)\s*=\s*(["'])(.*?)\1""", match.group(0), re.I)
+        return "" if value and value.group(2).lstrip("/").lower() in names else match.group(0)
+
+    return re.sub(r"<(Relationship|Override)\b[^>]*?(?:/>|>.*?</\1\s*>)", keep, xml, flags=re.S)
 
 
 def _ooxml_text(raw: bytes) -> str:
@@ -446,6 +576,11 @@ def _ooxml_text(raw: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(raw)) as source:
         for item in _xml_parts(source):
             xml = source.read(item.filename).decode("utf-8")
+            if _is_doc_props(item.filename):
+                from ._hwp import _LEAF_TEXT
+
+                lines.extend(_unescape_xml(m.group(3)) for m in _LEAF_TEXT.finditer(xml) if _doc_props_text(m))
+                continue
             for start, end, joined in _ooxml_groups(xml):
                 pieces = [_unescape_xml(node.group(3)) for node in _OOXML_TEXT_RE.finditer(xml, start, end)]
                 if not pieces:
@@ -659,6 +794,33 @@ def _pdf_text(raw: bytes) -> str:
     return _run_pdf("_pdf_text_job", raw)
 
 
+# ── 한글(HWP 5.0 · HWPX) ──────────────────────────────────────────────
+
+
+def _mask_hwp(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
+    from ._hwp import mask_hwp
+
+    return mask_hwp(raw, rules)
+
+
+def _hwp_text(raw: bytes) -> str:
+    from ._hwp import hwp_text
+
+    return hwp_text(raw)
+
+
+def _mask_hwpx(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
+    from ._hwp import mask_hwpx
+
+    return mask_hwpx(raw, rules)
+
+
+def _hwpx_text(raw: bytes) -> str:
+    from ._hwp import hwpx_text
+
+    return hwpx_text(raw)
+
+
 # ── 형식 목록 ─────────────────────────────────────────────────────────
 
 
@@ -675,6 +837,8 @@ FORMAT_MASKERS: Tuple[FormatMasker, ...] = (
     FormatMasker("pdf", frozenset({"pdf"}), _mask_pdf, _pdf_text),
     FormatMasker("html", frozenset({"html", "htm", "xhtml"}), _mask_html, _html_text),
     FormatMasker("ooxml", frozenset({"docx", "docm", "pptx", "pptm", "xlsx", "xlsm"}), _mask_ooxml, _ooxml_text),
+    FormatMasker("hwp", frozenset({"hwp"}), _mask_hwp, _hwp_text),
+    FormatMasker("hwpx", frozenset({"hwpx"}), _mask_hwpx, _hwpx_text),
     FormatMasker(
         "text",
         frozenset({
