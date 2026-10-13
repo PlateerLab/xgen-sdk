@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -96,6 +97,8 @@ class MaskingRule:
         그대로 나온다. 그래서 찾은 문맥의 매치 객체로 템플릿을 펼친다. 템플릿이 깨졌으면(없는 그룹 \\1)
         ``****`` 로 가린다(fail-closed).
         """
+        if match.end() == match.start():
+            return ""  # 빈 매치(\d* 등): 숨길 글자가 없다. 마스크를 끼워 넣으면 글만 망가진다
         if self.masking_mode == MASK_MODE_PARTIAL:
             return self._partial(match.group(0))
         try:
@@ -178,7 +181,7 @@ def apply_rules(text: str, rules: Sequence[MaskingRule], *, mask: bool = True) -
         return result
     for rule in rules:
         try:
-            hits = list(rule.pattern.finditer(result.text))
+            hits = [hit for hit in rule.pattern.finditer(result.text) if hit.end() > hit.start()]
         except re.error as exc:  # pragma: no cover, compile 을 통과한 패턴은 여기서 안 깨진다
             logger.warning("%s 정규식 오류 '%s': %s", rule.policy_type, rule.policy_name, exc)
             continue
@@ -217,17 +220,17 @@ def find_masked_spans(text: str, rules: Sequence[MaskingRule]) -> List[Tuple[int
     """가릴 구간 ``(원문 시작, 원문 끝, 치환문)``: 조각난 글(OOXML run · HTML 문자 참조 · PDF 줄)을 되돌려 쓸 때 쓴다.
 
     :func:`apply_rules` 와 **같은 결과**를 낸다: 규칙을 차례로, 앞 규칙이 가린 글 위에서 다시 찾는다(앞 마스크의
-    일부까지 걸릴 수 있다). 글자마다 원문의 어느 구간에서 왔는지를 묶음으로 따라가 마지막에 원문 위치로 되짚는다.
-    걸린 것이 없으면 아무것도 만들지 않는다(대부분의 문단).
+    일부까지 걸릴 수 있다). 지금 글을 조각(원문 그대로인 구간 · 치환문)으로 들고, 치환문 조각은 원문의 어느 구간을
+    덮는지 묶음으로 따라간다. 조각 수는 매치 수에 비례한다(글 길이와 상관없다: 큰 HTML 한 곳만 걸려도 가볍다).
     """
     if not text or not rules:
         return []
+    # 조각: (묶음, 원문 시작, 글). 묶음 -1 은 원문 그대로인 구간이고 원문 시작이 뜻이 있다.
+    pieces: List[Tuple[int, int, str]] = [(-1, 0, text)]
     current = text
-    owner: Optional[List[int]] = None  # 지금 글의 글자마다 묶음 번호(처음 걸릴 때 만든다)
     parent: List[int] = []
     lo: List[int] = []
     hi: List[int] = []
-    replaced: List[bool] = []
 
     def find(unit: int) -> int:
         while parent[unit] != unit:
@@ -235,54 +238,76 @@ def find_masked_spans(text: str, rules: Sequence[MaskingRule]) -> List[Tuple[int
             unit = parent[unit]
         return unit
 
-    def make(a: int, b: int, rep: bool) -> int:
-        parent.append(len(parent))
-        lo.append(a)
-        hi.append(b)
-        replaced.append(rep)
-        return len(parent) - 1
+    def cut(piece: Tuple[int, int, str], a: int, b: int) -> Tuple[int, int, str]:
+        unit, start, body = piece
+        return (unit, start + a if unit < 0 else start, body[a:b])
 
     ghosts: List[int] = []  # 빈 치환문(글자가 남지 않는 마스크)의 묶음
     for rule in rules:
         matches = [m for m in rule.pattern.finditer(current) if m.end() > m.start()]
         if not matches:
             continue
-        if owner is None:
-            owner = [make(i, i + 1, False) for i in range(len(text))]
-        out_text: List[str] = []
-        out_owner: List[int] = []
-        last = 0
+        out: List[Tuple[int, int, str]] = []
+        queue = deque(pieces)
+        offset = 0  # queue[0] 이 지금 글에서 시작하는 위치
         for match in matches:
             ms, me = match.span()
-            out_text.append(current[last:ms])
-            out_owner.extend(owner[last:ms])
-            touched = {find(u) for u in owner[ms:me]}
-            unit = make(min(lo[t] for t in touched), max(hi[t] for t in touched), True)
-            for t in touched:
-                parent[t] = unit
+            while queue and offset + len(queue[0][2]) <= ms:
+                piece = queue.popleft()
+                out.append(piece)
+                offset += len(piece[2])
+            if queue and offset < ms:
+                piece = queue.popleft()
+                out.append(cut(piece, 0, ms - offset))
+                queue.appendleft(cut(piece, ms - offset, len(piece[2])))
+                offset = ms
+            roots = set()
+            first = last = None
+            while queue and offset < me:
+                piece = queue.popleft()
+                size = len(piece[2])
+                take = min(size, me - offset)
+                if piece[0] < 0:
+                    first = piece[1] if first is None else min(first, piece[1])
+                    last = piece[1] + take if last is None else max(last, piece[1] + take)
+                else:
+                    roots.add(find(piece[0]))
+                if take < size:
+                    queue.appendleft(cut(piece, take, size))
+                offset += take
+            bounds_lo = [lo[r] for r in roots] + ([first] if first is not None else [])
+            bounds_hi = [hi[r] for r in roots] + ([last] if last is not None else [])
+            unit = len(parent)
+            parent.append(unit)
+            lo.append(min(bounds_lo))
+            hi.append(max(bounds_hi))
+            for root in roots:
+                parent[root] = unit
             rep = rule.replacement(match)
             if rep:
-                out_text.append(rep)
-                out_owner.extend([unit] * len(rep))
+                out.append((unit, 0, rep))
             else:
                 ghosts.append(unit)
-            last = me
-        out_text.append(current[last:])
-        out_owner.extend(owner[last:])
-        current, owner = "".join(out_text), out_owner
-    if owner is None:
+        out.extend(queue)
+        pieces = out
+        current = "".join(piece[2] for piece in pieces)
+    if not parent:
         return []
     spans: List[Tuple[int, int, str]] = []
     seen: set = set()
-    i, n = 0, len(current)
+    i, n = 0, len(pieces)
     while i < n:
-        root = find(owner[i])
+        if pieces[i][0] < 0:
+            i += 1
+            continue
+        root = find(pieces[i][0])
+        body = [pieces[i][2]]
         j = i + 1
-        while j < n and find(owner[j]) == root:
+        while j < n and pieces[j][0] >= 0 and find(pieces[j][0]) == root:
+            body.append(pieces[j][2])
             j += 1
-        if replaced[root]:
-            spans.append((lo[root], hi[root], current[i:j]))
-            seen.add(root)
+        spans.append((lo[root], hi[root], "".join(body)))
+        seen.add(root)
         i = j
     for unit in ghosts:
         root = find(unit)

@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import codecs
 import hashlib
 import html as html_lib
@@ -99,12 +100,24 @@ class _Decoded:
     errors: str = "strict"
 
 
+def _round_trip(raw: bytes, encoding: str) -> Optional[_Decoded]:
+    """이 인코딩으로 읽어 다시 쓰면 같은 바이트일 때만."""
+    try:
+        text = raw.decode(encoding)
+        if text.encode(encoding) == raw:
+            return _Decoded(text, encoding)
+    except (UnicodeDecodeError, UnicodeEncodeError, LookupError):
+        pass
+    return None
+
+
 def _decode(raw: bytes) -> _Decoded:
     """원래 바이트로 **되돌아가게** 읽는다. 맞는 인코딩을 못 찾으면 모르는 바이트를 그대로 싣는다.
 
     중요한 것은 정확한 인코딩보다 되돌아감이다: 걸린 자리만 바뀌고 나머지 바이트는 그대로여야 한다. 차례는
-    BOM, UTF-8(깨진 바이트가 드물면 그것만 그대로 싣고 UTF-8 로), cp949(짧은 cp949 글을 chardet 은 라틴 문자로
-    짐작한다), 확신이 높은 chardet 짐작, 끝으로 UTF-8 + 모르는 바이트 그대로.
+    BOM, UTF-8, cp949(되돌려 같을 때만. 한글이 몇 글자뿐인 cp949 CSV 도 여기서 잡힌다), 깨진 바이트가 드문 UTF-8
+    (그 바이트만 그대로 싣는다), 확신이 높은 chardet 짐작(짧은 cp949 글을 chardet 은 라틴 문자로 짐작해서 뒤에 둔다),
+    끝으로 UTF-8 + 모르는 바이트 그대로.
     """
     for bom, encoding in _BOMS:
         if raw.startswith(bom):
@@ -115,27 +128,25 @@ def _decode(raw: bytes) -> _Decoded:
     try:
         return _Decoded(raw.decode("utf-8"), "utf-8")
     except UnicodeDecodeError:
-        loose = raw.decode("utf-8", errors="surrogateescape")
-        bad = sum(1 for ch in loose if "\udc80" <= ch <= "\udcff")
-        if bad <= max(1, int(len(loose) * _UTF8_BAD_RATIO)):
-            return _Decoded(loose, "utf-8", errors="surrogateescape")
-    candidates = ["cp949"]
+        pass
+    strict = _round_trip(raw, "cp949")
+    if strict is not None:
+        return strict
+    loose = raw.decode("utf-8", errors="surrogateescape")
+    bad = sum(1 for ch in loose if "\udc80" <= ch <= "\udcff")
+    if bad <= max(1, int(len(loose) * _UTF8_BAD_RATIO)):
+        return _Decoded(loose, "utf-8", errors="surrogateescape")
     try:
         import chardet
 
         guess = chardet.detect(raw[:64 * 1024])
         detected = guess.get("encoding")
-        if detected and (guess.get("confidence") or 0) >= _CHARDET_CONFIDENCE and detected.lower() not in candidates:
-            candidates.append(detected)
-    except Exception:  # noqa: BLE001, chardet 이 없으면 cp949 만
+        if detected and (guess.get("confidence") or 0) >= _CHARDET_CONFIDENCE and detected.lower() != "cp949":
+            guessed = _round_trip(raw, detected)
+            if guessed is not None:
+                return guessed
+    except Exception:  # noqa: BLE001, chardet 이 없으면 건너뛴다
         pass
-    for encoding in candidates:
-        try:
-            text = raw.decode(encoding)
-            if text.encode(encoding) == raw:
-                return _Decoded(text, encoding)
-        except (UnicodeDecodeError, UnicodeEncodeError, LookupError):
-            continue
     # 어느 인코딩도 아니다(섞인 바이너리 등): 못 읽는 바이트는 surrogateescape 로 실어 그대로 되돌린다.
     return _Decoded(raw.decode("utf-8", errors="surrogateescape"), "utf-8", errors="surrogateescape")
 
@@ -221,35 +232,46 @@ def _html_segments(document: str) -> List[Tuple[int, int, str]]:
 def _mask_html_text(segment: str, rules: Sequence[MaskingRule], *, decode_entities: bool) -> Tuple[str, int]:
     """글 구간 하나. 문자 참조(``R&amp;D`` · ``&#48;10``)를 풀어 찾고, 걸린 구간을 원문 위치(참조 통째)로 되짚어
     이스케이프한 마스크로 바꾼다(마스크 ``<숨김>`` 이 태그가 되지 않게)."""
+    # 풀어 쓴 참조마다 (풀린 글 시작, 끝, 원문 시작, 끝)과 그 뒤의 위치 차(원문 - 풀린 글). 참조 밖의 글자는 위치 차만큼
+    # 밀어 원문 위치를 찾는다(글자마다 표를 만들지 않는다: 큰 문서도 참조 수만큼만 든다).
+    entities: List[Tuple[int, int, int, int]] = []
+    shifts: List[int] = []
     if decode_entities and "&" in segment:
         decoded_parts: List[str] = []
-        raw_of: List[Tuple[int, int]] = []
         pos = 0
+        decoded_len = 0
         for entity in _HTML_ENTITY.finditer(segment):
-            for k in range(pos, entity.start()):
-                raw_of.append((k, k + 1))
-            decoded_parts.append(segment[pos:entity.start()])
             value = html_lib.unescape(entity.group(0))
             if value == entity.group(0):
-                for k in range(entity.start(), entity.end()):
-                    raw_of.append((k, k + 1))
-            else:
-                raw_of.extend([(entity.start(), entity.end())] * len(value))
+                continue  # 모르는 참조: 글 그대로
+            decoded_parts.append(segment[pos:entity.start()])
+            decoded_len += entity.start() - pos
+            entities.append((decoded_len, decoded_len + len(value), entity.start(), entity.end()))
             decoded_parts.append(value)
+            decoded_len += len(value)
+            shifts.append(entity.end() - decoded_len)
             pos = entity.end()
-        for k in range(pos, len(segment)):
-            raw_of.append((k, k + 1))
         decoded_parts.append(segment[pos:])
         decoded = "".join(decoded_parts)
     else:
-        decoded, raw_of = segment, None
+        decoded = segment
+    starts = [e[0] for e in entities]
+
+    def raw_range(index: int) -> Tuple[int, int]:
+        """풀린 글의 글자 하나 → 원문 구간(참조 안이면 참조 통째)."""
+        at = bisect.bisect_right(starts, index) - 1
+        if at >= 0 and index < entities[at][1]:
+            return entities[at][2], entities[at][3]
+        moved = index + (shifts[at] if at >= 0 else 0)
+        return moved, moved + 1
+
     spans = find_masked_spans(decoded, rules)
     if not spans:
         return segment, 0
     out: List[str] = []
     last = 0
     for start, end, mask in spans:
-        r_start, r_end = (raw_of[start][0], raw_of[end - 1][1]) if raw_of is not None else (start, end)
+        r_start, r_end = raw_range(start)[0], raw_range(end - 1)[1]
         if r_start < last:  # 한 참조가 두 구간에 걸친 드문 경우: 앞 구간에 붙인다
             r_start = last
         out.append(segment[last:r_start])
@@ -510,6 +532,7 @@ class _PdfWorker:
             raise MaskingUnsupportedError("pdf", "PDF 처리 중 작업 프로세스가 멈춤") from exc
         finally:
             timer.cancel()
+            timer.join()  # 이미 시작한 kill 이 끝날 때까지(끝난 뒤에 살았는지 본다)
 
 
 def _run_pdf(job: str, *args):
@@ -523,8 +546,9 @@ def _run_pdf(job: str, *args):
         if worker is None or not worker.alive():
             worker = _PdfWorker()
         status, value = worker.call(job, args)
-        with _PDF_IDLE_LOCK:
-            _PDF_IDLE.append(worker)
+        if worker.alive() and not worker.timed_out:  # 시간 상한에 걸려 죽은 프로세스는 다시 쓰지 않는다
+            with _PDF_IDLE_LOCK:
+                _PDF_IDLE.append(worker)
     if status == "ok":
         return value
     if status == "unsupported":

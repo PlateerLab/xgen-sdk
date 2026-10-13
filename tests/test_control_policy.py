@@ -389,3 +389,30 @@ def test_pdf_runs_in_a_separate_process_and_recovers():
         worker.kill()
     again = cp.strip_bytes(raw, "a.pdf", _rules(PHONE))
     assert again.changed and again.sha256 == first.sha256, "죽은 작업 프로세스는 새로 띄운다"
+
+
+# ── 3차 검토 (2026-10-13) ────────────────────────────────────────────
+
+
+def test_mostly_ascii_cp949_is_still_read_as_cp949():
+    raw = ("번호,값\n" + "".join(f"{i},{i * 7}\n" for i in range(300)) + "비고: 홍길동\n").encode("cp949")
+    rule = {"id": 5, "policy_name": "이름", "regex_pattern": "홍길동", "masking": True, "masking_pattern": "[이름]"}
+    out = cp.strip_bytes(raw, "a.csv", _rules(rule))
+    assert out.changed and out.content.decode("cp949").endswith("비고: [이름]\n")
+
+
+def test_empty_matches_hide_nothing_and_break_nothing():
+    rules = _rules({"id": 6, "policy_name": "숫자", "regex_pattern": r"\d*", "masking": True})
+    assert cp.apply_rules("a1b22c", rules).text == "a****b****c"
+    assert rules[0].pattern.sub(rules[0].repl, "a1b") == "a****b"
+
+
+def test_large_html_with_one_hit_stays_light():
+    import resource
+
+    page = "<pre>" + "일반 로그 줄 R&amp;D " * 250000 + "연락 010-1234-5678</pre>"
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    out = cp.strip_bytes(page.encode(), "big.html", _rules(PHONE))
+    grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+    assert out.hits == 1 and out.content.decode().endswith("연락 ***-****-5678</pre>")
+    assert grown_mb < 300, f"글자마다 표를 만들지 않는다 (+{grown_mb:.0f} MB)"
