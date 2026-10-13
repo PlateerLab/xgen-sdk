@@ -185,38 +185,60 @@ _HTML_ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-
 _TEXT, _RAW, _MARKUP = "text", "raw", "markup"
 
 
-def _tag_end(document: str, pos: int) -> int:
-    """태그 끝(``>`` 다음 위치). 속성 값(``=`` 바로 뒤 따옴표) 안의 ``>`` 는 건너뛴다. ``=`` 뒤가 아닌 따옴표
-    (``it's``)는 값의 시작이 아니다(브라우저와 같다). 닫히지 않은 값이면 첫 ``>`` 에서 끝낸다.
+_TAG_SPACE = re.compile(r"\s*")
+_TAG_NAME = re.compile(r"[^\s/>]*")
+_ATTR_NAME = re.compile(r"[^\s/>][^\s/>=]*")
+_UNQUOTED = re.compile(r"[^\s>]*")
 
-    앞으로만 간다(따옴표가 많은 문서도 한 번만 지나간다).
+
+class _TagScanner:
+    """태그 끝 찾기: 속성을 브라우저처럼 읽는다(이름, ``=``, 값). 값을 여는 따옴표 안의 ``>`` 만 건너뛴다.
+
+    ``it's`` 처럼 값이 아닌 자리의 따옴표나 따옴표 없는 값 뒤의 따옴표는 이름 글자일 뿐이다. 닫는 따옴표 찾기는
+    문서마다 기억해(닫히지 않은 따옴표가 많은 문서도) 앞으로만 간다. 닫히지 않은 값이면 그 뒤 첫 ``>`` 에서
+    끝낸다(뒤를 글로 보고 가린다: 덜 가리는 쪽으로 틀리지 않게).
     """
-    n = len(document)
-    i = pos
-    while i < n:
-        gt = document.find(">", i)
-        if gt < 0:
-            return n
-        j, quote = i, -1
-        while True:
-            found = [q for q in (document.find('"', j, gt), document.find("'", j, gt)) if q >= 0]
-            if not found:
-                break
-            q = min(found)
-            k = q - 1
-            while k >= pos and document[k] in " \t\r\n":
-                k -= 1
-            if k >= pos and document[k] == "=":
-                quote = q
-                break
-            j = q + 1
-        if quote < 0:
-            return gt + 1
-        close = document.find(document[quote], quote + 1)
-        if close < 0:
-            return gt + 1
-        i = close + 1
-    return n
+
+    def __init__(self, document: str):
+        self.document = document
+        self.found: Dict[str, Tuple[int, int]] = {}
+
+    def _find(self, quote: str, start: int) -> int:
+        hit = self.found.get(quote)
+        if hit is not None and hit[0] <= start and (hit[1] < 0 or hit[1] >= start):
+            return hit[1]
+        result = self.document.find(quote, start)
+        self.found[quote] = (start, result)
+        return result
+
+    def end(self, pos: int) -> int:
+        document, n = self.document, len(self.document)
+        i = _TAG_NAME.match(document, pos).end()
+        while i < n:
+            i = _TAG_SPACE.match(document, i).end()
+            if i >= n:
+                return n
+            ch = document[i]
+            if ch == ">":
+                return i + 1
+            if ch == "/":
+                i += 1
+                continue
+            i = _ATTR_NAME.match(document, i).end()
+            j = _TAG_SPACE.match(document, i).end()
+            if j < n and document[j] == "=":
+                j = _TAG_SPACE.match(document, j + 1).end()
+                if j < n and document[j] in "\"'":
+                    close = self._find(document[j], j + 1)
+                    if close < 0:
+                        gt = document.find(">", j)
+                        return n if gt < 0 else gt + 1
+                    i = close + 1
+                else:
+                    i = _UNQUOTED.match(document, j).end()
+            else:
+                i = j
+        return n
 
 
 def _html_segments(document: str) -> List[Tuple[int, int, str]]:
@@ -226,6 +248,7 @@ def _html_segments(document: str) -> List[Tuple[int, int, str]]:
     """
     segments: List[Tuple[int, int, str]] = []
     pos, text_start, n = 0, 0, len(document)
+    tag_end = _TagScanner(document).end
 
     def flush(end: int) -> None:
         if end > text_start:
@@ -254,7 +277,7 @@ def _html_segments(document: str) -> List[Tuple[int, int, str]]:
             raw = _HTML_RAW_TEXT.match(document, lt)
             if raw:
                 # 스크립트 · 스타일: 여닫는 태그는 그대로, 안의 글(인라인 JSON 데이터 등)은 엔티티를 풀지 않고 본다.
-                open_end = _tag_end(document, raw.end())
+                open_end = tag_end(raw.end())
                 closing = re.compile(r"</" + raw.group(1) + r"\s*>", re.I).search(document, open_end)
                 segments.append((lt, open_end, _MARKUP))
                 content_end = n if closing is None else closing.start()
@@ -264,7 +287,7 @@ def _html_segments(document: str) -> List[Tuple[int, int, str]]:
                 if closing is not None:
                     segments.append((closing.start(), end, _MARKUP))
             else:
-                end = _tag_end(document, lt + 1)
+                end = tag_end(lt + 1)
                 segments.append((lt, end, _MARKUP))
             pos = end
         text_start = pos
@@ -518,9 +541,16 @@ def _mask_ooxml(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
             if thumbnails and part in source.namelist():
                 xml = replaced.get(part, source.read(part)).decode("utf-8")
                 replaced[part] = _without_thumbnail(xml, thumbnails).encode("utf-8")
+        rels = replaced.get("_rels/.rels", b"").decode("utf-8").lower()
+        blank = {name for name in thumbnails if name.lower() in rels}  # 관계를 못 뺐으면 파트는 남기고 빈 그림으로
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
             for item in source.infolist():
+                if item.filename in blank:
+                    from ._hwp import _blank_png
+
+                    target.writestr(item, _blank_png())
+                    continue
                 if item.filename in thumbnails:
                     continue
                 data = replaced.get(item.filename)
@@ -531,12 +561,14 @@ def _mask_ooxml(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
 
 
 def _without_thumbnail(xml: str, thumbnails: set) -> str:
-    """패키지 관계 · 콘텐츠 형식에서 썸네일 파트를 가리키는 줄을 뺀다."""
-    for name in thumbnails:
-        target = re.escape(name)
-        xml = re.sub(r"<Relationship\b[^>]*\bTarget=\"/?" + target + r"\"[^>]*/>", "", xml)
-        xml = re.sub(r"<Override\b[^>]*\bPartName=\"/" + target + r"\"[^>]*/>", "", xml, flags=re.I)
-    return xml
+    """패키지 관계 · 콘텐츠 형식에서 썸네일 파트를 가리키는 요소를 뺀다(따옴표 · 공백 · 대소문자 무관)."""
+    names = {name.lower() for name in thumbnails}
+
+    def keep(match: "re.Match[str]") -> str:
+        value = re.search(r"""\b(?:Target|PartName)\s*=\s*(["'])(.*?)\1""", match.group(0), re.I)
+        return "" if value and value.group(2).lstrip("/").lower() in names else match.group(0)
+
+    return re.sub(r"<(Relationship|Override)\b[^>]*?(?:/>|>.*?</\1\s*>)", keep, xml, flags=re.S)
 
 
 def _ooxml_text(raw: bytes) -> str:

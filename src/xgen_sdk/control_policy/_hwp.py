@@ -304,8 +304,12 @@ def _string_slot(record: "_Record") -> Optional[int]:
     return None
 
 
+def _utf16_units(text: str) -> int:
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
 def _mask_same_length(text: str, rules: Sequence[MaskingRule]) -> Tuple[str, int]:
-    """걸린 구간마다 마스크를 원문과 같은 길이로 맞춰 넣는다(늘면 자르고 줄면 * 로 채운다).
+    """걸린 구간마다 마스크를 원문과 같은 길이(UTF-16 단위)로 맞춰 넣는다(늘면 자르고 줄면 * 로 채운다).
 
     누름틀 명령처럼 값마다 길이를 적어 두는 글(``Clickhere:set:N:Direction:wstring:22:…``)은 길이가 바뀌면 뒤가
     어긋난다. 구간 밖 글자(줄바꿈 포함)는 그대로다.
@@ -316,10 +320,16 @@ def _mask_same_length(text: str, rules: Sequence[MaskingRule]) -> Tuple[str, int
     out: List[str] = []
     last = 0
     for start, end, mask in spans:
-        size = end - start
-        fitted = _safe_mask(mask)[:size]
+        units = _utf16_units(text[start:end])
+        fitted, used = [], 0
+        for ch in _safe_mask(mask):
+            width = _utf16_units(ch)
+            if used + width > units:
+                break
+            fitted.append(ch)
+            used += width
         out.append(text[last:start])
-        out.append(fitted + "*" * (size - len(fitted)))
+        out.append("".join(fitted) + "*" * (units - used))
         last = end
     out.append(text[last:])
     return "".join(out), len(spans)
@@ -411,14 +421,18 @@ def _property_sections(data: bytes) -> List[Tuple[int, bytes]]:
     return out
 
 
-def _mask_property_set(data: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
-    """속성 집합의 글 속성(VT_LPSTR · VT_LPWSTR)만 가리고 위치를 다시 맞춘다. 읽지 못하면 :class:`_Unreadable`."""
+def _mask_property_set(data: bytes, rules: Sequence[MaskingRule],
+                       leftovers: Optional[List[bytes]] = None) -> Tuple[bytes, int]:
+    """속성 집합의 글 속성(VT_LPSTR · VT_LPWSTR)만 가리고 위치를 다시 맞춘다. 읽지 못하면 :class:`_Unreadable`.
+
+    ``leftovers`` 에는 가리지 못하는 형식이지만 글이 들 수 있는 값(VT_BSTR · 글 벡터 · 변형 벡터 · BLOB)을 담는다.
+    """
     try:
         parts = _property_sections(data)
         sections: List[bytes] = []
         hits = 0
         for _offset, section in parts:
-            masked, found = _mask_property_section(section, rules)
+            masked, found = _mask_property_section(section, rules, leftovers=leftovers)
             sections.append(masked)
             hits += found
     except (struct.error, IndexError, UnicodeError, LookupError, KeyError) as exc:
@@ -453,8 +467,13 @@ def _loose_hits(data: bytes, rules: Sequence[MaskingRule]) -> int:
     return found
 
 
+#: 글이 들 수 있지만 다시 쓰지 않는 형식: VT_BSTR · VT_BLOB · 벡터(LPSTR · LPWSTR · VARIANT).
+_PROPERTY_TEXTISH = frozenset({0x08, 0x41, 0x101E, 0x101F, 0x100C})
+
+
 def _mask_property_section(section: bytes, rules: Sequence[MaskingRule], *,
-                           collect: Optional[List[str]] = None) -> Tuple[bytes, int]:
+                           collect: Optional[List[str]] = None,
+                           leftovers: Optional[List[bytes]] = None) -> Tuple[bytes, int]:
     size, count = struct.unpack_from("<II", section, 0)
     entries = [struct.unpack_from("<II", section, 8 + i * 8) for i in range(count)]
     codepage = 1252
@@ -469,6 +488,8 @@ def _mask_property_section(section: bytes, rules: Sequence[MaskingRule], *,
     for pid, offset in entries:
         value = section[offset:bounds[offset]]
         kind = struct.unpack_from("<I", value, 0)[0] if len(value) >= 4 else 0
+        if leftovers is not None and pid > 1 and kind in _PROPERTY_TEXTISH:
+            leftovers.append(value[4:])
         if pid > 1 and kind in (0x1E, 0x1F) and len(value) >= 8:
             length = struct.unpack_from("<I", value, 4)[0]
             if kind == 0x1F:
@@ -561,17 +582,16 @@ def _compress(data: bytes) -> bytes:
 
 
 def _history_hits(history: _cfb.Entry, rules: Sequence[MaskingRule], compressed: bool, budget: List[int]) -> int:
-    """문서 이력(예전 판들)에 걸린 것이 있는가. 구조를 읽지 않고 스트림마다 (압축 문서면 풀어) 글로 보이는 것을
-    찾는다. 풀지 못하는 스트림이 있으면 볼 수 없으니 걸린 것으로 친다(이력을 지운다)."""
+    """문서 이력(예전 판들)에 걸린 것이 있는가. 스트림마다 (압축 문서면 풀어) 레코드로 읽히면 문단 글 · 문단 밖 글만
+    본다. 풀지 못하거나 레코드로 읽히지 않는 스트림은 안을 볼 수 없으니 걸린 것으로 친다(이력을 지운다)."""
     found = 0
     for _path, entry in history.streams():
-        data = entry.data
-        if compressed:
-            try:
-                data = _inflate(entry.data, budget)
-            except Exception:  # noqa: BLE001, 못 풀면(상한 · 깨짐) 안을 볼 수 없다
-                return max(found, 1)
-        found += _loose_hits(data, rules)
+        try:
+            data = _inflate(entry.data, budget) if compressed else entry.data
+            text = _section_text(data) if data else ""
+        except Exception:  # noqa: BLE001, 못 풀거나 못 읽으면 안을 볼 수 없다
+            return max(found, 1)
+        found += apply_rules(text, rules, mask=False).total_detected
     return found
 
 
@@ -597,8 +617,9 @@ def mask_hwp(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
     summary = root.child(_SUMMARY_STREAM)
     if summary is not None and summary.is_stream:
         try:
-            summary.data, count = _mask_property_set(summary.data, rules)
-            left = _loose_hits(summary.data, rules)  # 다루지 않는 형식(VT_BSTR · 벡터 등)에 남은 것
+            leftovers: List[bytes] = []
+            summary.data, count = _mask_property_set(summary.data, rules, leftovers)
+            left = sum(_loose_hits(value, rules) for value in leftovers)  # 다시 쓰지 않는 형식에 걸린 것
         except _Unreadable:
             count, left = 0, _loose_hits(summary.data, rules)
         if left:
@@ -621,7 +642,7 @@ def mask_hwp(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
             extra += found.total_detected
     history = root.child("DocHistory")
     history_found = _history_hits(history, rules, compressed, budget) if history is not None else 0
-    extra += history_found
+    extra += min(history_found, 1)  # 이력은 본문의 옛 판이라 지웠다는 사실 하나로 센다
     if not hits and not extra:
         return raw, 0
     image = root.child("PrvImage")
@@ -655,8 +676,10 @@ def hwp_text(raw: bytes) -> str:
 _ATTRS = r"""(?:"[^"]*"|'[^']*'|[^'">])*?"""
 _XML_TOKEN = re.compile(r"<!--.*?-->|<!\[CDATA\[(.*?)\]\]>|<\?.*?\?>|<(/?)([A-Za-z_][\w.:-]*)\b" + _ATTRS + r"(/?)>", re.S)
 #: 잎 요소: 글은 3번 묶음(CDATA 가 섞여도 된다).
-_LEAF_TEXT = re.compile(r"(<([A-Za-z_][\w.:-]*)(?:\s" + _ATTRS + r")?>)((?:[^<]|<!\[CDATA\[.*?\]\]>)+)(</\2>)", re.S)
-_CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+_CDATA_SECTION = r"<!\[CDATA\[([^\]]*(?:\](?!\]>)[^\]]*)*)\]\]>"
+_LEAF_TEXT = re.compile(r"(<([A-Za-z_][\w.:-]*)(?:\s" + _ATTRS + r")?>)((?:[^<]|" + _CDATA_SECTION.replace("(", "(?:", 1)
+                        + r")+)(</\2>)")
+_CDATA = re.compile(_CDATA_SECTION)
 
 
 def _leaf_value(content: str) -> str:
@@ -897,6 +920,7 @@ def mask_hwpx(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
     hits = 0
     replaced: Dict[str, bytes] = {}
     body_lines: List[str] = []
+    body_changed = False
     preview_item: Optional[zipfile.ZipInfo] = None
     with zipfile.ZipFile(io.BytesIO(raw)) as source:
         _check_zip(source)
@@ -909,9 +933,12 @@ def mask_hwpx(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
                     hits += count
                     replaced[item.filename] = masked.encode("utf-8")
                 if kind == "section":
-                    body_lines.extend(
-                        "".join(_segment_text(masked, s) for s in p["segments"])
-                        for p in _hwpx_paragraphs(masked) if p["segments"])
+                    lines = ["".join(_segment_text(masked, s) for s in p["segments"])
+                             for p in _hwpx_paragraphs(masked) if p["segments"]]
+                    body_lines.extend(lines)
+                    if count and not body_changed:
+                        body_changed = lines != ["".join(_segment_text(xml, s) for s in p["segments"])
+                                                 for p in _hwpx_paragraphs(xml) if p["segments"]]
             elif kind == "preview_text":
                 preview_item = item
         extra = 0
@@ -920,7 +947,9 @@ def mask_hwpx(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
             decoded = _decode(data)
             found = apply_rules(decoded.text, rules)
             # 미리보기는 본문 앞부분을 잘라 옮긴 글이다: 본문을 고쳤으면 고친 본문에서 같은 길이로 다시 만든다.
-            new_text = "\r\n".join(body_lines)[:len(decoded.text)] if hits else found.text
+            new_text = found.text
+            if body_changed:  # 문단을 넘는 매치도 다시 가린다
+                new_text = apply_rules("\r\n".join(body_lines)[:len(decoded.text)], rules).text
             if new_text != decoded.text:
                 replaced[preview_item.filename] = _encode(new_text, decoded)
                 extra = found.total_detected

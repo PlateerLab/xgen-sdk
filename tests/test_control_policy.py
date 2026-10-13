@@ -769,3 +769,63 @@ def test_hwpx_cdata_in_string_leaves_and_metadata():
     result = cp.strip_bytes(raw, "a.hwpx", rules)
     z = zipfile.ZipFile(io.BytesIO(result.content))
     assert result.hits == 2 and "@" not in z.read("Contents/section0.xml").decode() + z.read("Contents/content.hpf").decode()
+
+
+# ── 최종 검토 ────────────────────────────────────────────────────────
+
+
+def test_summary_binary_values_are_not_read_as_text():
+    raw = _hwp_doc(_paragraph("hello".encode("utf-16-le") + PARA_END, [(0, 0)]), author="kim")
+    root = _cfb.read(raw)
+    summary = bytearray(root.find("\x05HwpSummaryInformation").data)
+    # 시각(VT_FILETIME) 값이 UTF-16 으로 읽으면 한글("가각")이 되는 바이트
+    filetime = struct.pack("<I", 0x40) + "가각".encode("utf-16-le") + b"\0" * 4
+    section_at = 48
+    size, count = struct.unpack_from("<II", summary, section_at)
+    table_end = section_at + 8 + count * 8
+    body = bytes(summary[table_end:section_at + size])
+    entries = [struct.unpack_from("<II", summary, section_at + 8 + i * 8) for i in range(count)]
+    shift = 8
+    table = b"".join(struct.pack("<II", pid, off + shift) for pid, off in entries)
+    table += struct.pack("<II", 12, 8 + (count + 1) * 8 + len(body))
+    section = struct.pack("<II", 8 + (count + 1) * 8 + len(body) + len(filetime), count + 1) + table + body + filetime
+    root.find("\x05HwpSummaryInformation").data = bytes(summary[:section_at]) + section
+    korean_name = _rules({"id": 4, "policy_name": "이름", "regex_pattern": "[가-힣]{2,4}", "masking": True})
+    result = cp.strip_bytes(_cfb.write(root), "a.hwp", korean_name)
+    assert result.status == cp.STATUS_CLEAN, "시각 바이트를 글로 읽어 깨끗한 문서를 고치지 않는다"
+
+
+def test_hwpx_cdata_does_not_run_across_elements_and_previews_recheck():
+    section = ('<hp:p><hp:run><hp:t><![CDATA[a]]><hp:tab/>b</hp:t></hp:run></hp:p>'
+               '<hp:pic><hp:shapeComment>kim@x.com</hp:shapeComment></hp:pic>'
+               '<hp:p><hp:run><hp:t><![CDATA[c]]></hp:t></hp:run></hp:p>')
+    mail = _rules({"id": 9, "policy_name": "메일", "regex_pattern": r"\w+@\w+\.com", "masking": True,
+                   "masking_pattern": "[EMAIL]"})
+    result = cp.strip_bytes(_hwpx(section), "a.hwpx", mail)
+    assert result.changed and "kim@" not in zipfile.ZipFile(io.BytesIO(result.content)).read("Contents/section0.xml").decode()
+    name = {"id": 4, "policy_name": "이름", "regex_pattern": r"이름:\s*\S+", "masking": True, "masking_pattern": "[이름]"}
+    body = ('<hp:p><hp:run><hp:t>이름:</hp:t></hp:run></hp:p>'
+            '<hp:p><hp:run><hp:t>홍길동 전화 010-1234-5678</hp:t></hp:run></hp:p>')
+    out = cp.strip_bytes(_hwpx(body, preview="이름:\r\n홍길동 전화 010-1234-5678"), "a.hwpx", _rules(PHONE, name))
+    preview = zipfile.ZipFile(io.BytesIO(out.content)).read("Preview/PrvText.txt").decode()
+    assert "홍길동" not in preview and "010-1234" not in preview
+
+
+def test_same_length_counts_utf16_units_and_odd_html_attributes():
+    rules = _rules({"id": 4, "policy_name": "이름", "regex_pattern": "홍.길동", "masking": True, "masking_pattern": "😀😀😀"})
+    masked, hits = _hwp._mask_same_length("담당 홍😀길동 끝", rules)
+    assert hits == 1 and _hwp._utf16_units(masked) == _hwp._utf16_units("담당 홍😀길동 끝")
+    page = '<a href=/q?a= "x>010-1234-5678">'
+    assert "010-1234" not in cp.strip_bytes(page.encode(), "a.html", _rules(PHONE)).content.decode(), \
+        "따옴표 없는 값 뒤의 따옴표는 값이 아니다(브라우저에 보이는 글)"
+
+
+def test_office_thumbnail_relationship_in_single_quotes():
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("word/document.xml", "<w:document><w:p><w:r><w:t>010-1234-5678</w:t></w:r></w:p></w:document>")
+        z.writestr("docProps/thumbnail.jpeg", b"\xff\xd8 first page")
+        z.writestr("_rels/.rels", "<Relationships><Relationship Id='r1' Target = '/DocProps/thumbnail.jpeg' Type='t'>"
+                                  "</Relationship></Relationships>")
+    z = zipfile.ZipFile(io.BytesIO(cp.strip_bytes(out.getvalue(), "a.docx", _rules(PHONE)).content))
+    assert "docProps/thumbnail.jpeg" not in z.namelist() and "thumbnail" not in z.read("_rels/.rels").decode()
