@@ -9,10 +9,12 @@
     txt · md · csv · json · 코드 등         원래 인코딩으로 되돌아가게 읽고 글 전체에 적용
     html · htm · xhtml                     태그 밖 글과 주석만(태그 · 속성 · 스크립트 · 스타일은 바이트 그대로)
     docx · xlsx · pptx (+ 매크로 변형)      문단 · 셀(w:p · a:p · si · is)마다 텍스트 노드를 이어 찾고,
-                                           걸린 노드만 다시 쓴다(나머지 노드는 원문 그대로)
+                                           걸린 노드만 다시 쓴다(나머지 노드는 원문 그대로). 문서 속성(docProps)도
+    hwp (한글 5.0) · hwpx                  문단 글(표 · 머리말 · 각주 · 글상자 포함)과 미리보기 · 문서 요약 정보.
+                                           자세한 것은 ``_hwp`` 모듈
     pdf                                    페이지 글에서 찾아 좌표로 redaction(글자를 실제로 지운다)
 
-글을 읽을 수 없는 형식(그림 · 한글 · 옛 Office · 압축 등), 텍스트 레이어가 없는 PDF(스캔), 암호 PDF,
+글을 읽을 수 없는 형식(그림 · 옛 Office · 압축 등), 텍스트 레이어가 없는 PDF(스캔), 암호 PDF · 암호 · 배포용 한글 문서,
 상한(:data:`MASKING_MAX_BYTES`, 압축을 푼 Office 는 :data:`MASKING_MAX_UNZIPPED_BYTES`)을 넘는 파일은
 :class:`MaskingUnsupportedError`. 그때 어떻게 할지(원본 거절 · 그대로 둠)는 부르는 쪽이 정한다.
 
@@ -405,6 +407,11 @@ def _mask_ooxml_fragment(fragment: str, rules: Sequence[MaskingRule], *, joined:
     return "".join(result), hits
 
 
+def _is_doc_props(name: str) -> bool:
+    # 문서 속성(제목 · 작성자 · 회사 · 사용자 지정 속성). 글 노드 태그가 아니라 잎 요소마다 글이 있다.
+    return name.lower().startswith("docprops/")
+
+
 def _mask_ooxml_part(xml: str, rules: Sequence[MaskingRule]) -> Tuple[str, int]:
     segments: List[str] = []
     hits = 0
@@ -433,7 +440,12 @@ def _mask_ooxml(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
             for item in source.infolist():
                 data = source.read(item.filename)
                 if item.filename in xml_parts:
-                    masked_xml, count = _mask_ooxml_part(data.decode("utf-8"), rules)
+                    if _is_doc_props(item.filename):
+                        from ._hwp import _mask_leaf_text
+
+                        masked_xml, count = _mask_leaf_text(data.decode("utf-8"), rules)
+                    else:
+                        masked_xml, count = _mask_ooxml_part(data.decode("utf-8"), rules)
                     if count:
                         hits += count
                         data = masked_xml.encode("utf-8")
@@ -446,6 +458,11 @@ def _ooxml_text(raw: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(raw)) as source:
         for item in _xml_parts(source):
             xml = source.read(item.filename).decode("utf-8")
+            if _is_doc_props(item.filename):
+                from ._hwp import _LEAF_TEXT
+
+                lines.extend(_unescape_xml(m.group(3)) for m in _LEAF_TEXT.finditer(xml))
+                continue
             for start, end, joined in _ooxml_groups(xml):
                 pieces = [_unescape_xml(node.group(3)) for node in _OOXML_TEXT_RE.finditer(xml, start, end)]
                 if not pieces:
@@ -659,6 +676,33 @@ def _pdf_text(raw: bytes) -> str:
     return _run_pdf("_pdf_text_job", raw)
 
 
+# ── 한글(HWP 5.0 · HWPX) ──────────────────────────────────────────────
+
+
+def _mask_hwp(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
+    from ._hwp import mask_hwp
+
+    return mask_hwp(raw, rules)
+
+
+def _hwp_text(raw: bytes) -> str:
+    from ._hwp import hwp_text
+
+    return hwp_text(raw)
+
+
+def _mask_hwpx(raw: bytes, rules: Sequence[MaskingRule]) -> Tuple[bytes, int]:
+    from ._hwp import mask_hwpx
+
+    return mask_hwpx(raw, rules)
+
+
+def _hwpx_text(raw: bytes) -> str:
+    from ._hwp import hwpx_text
+
+    return hwpx_text(raw)
+
+
 # ── 형식 목록 ─────────────────────────────────────────────────────────
 
 
@@ -675,6 +719,8 @@ FORMAT_MASKERS: Tuple[FormatMasker, ...] = (
     FormatMasker("pdf", frozenset({"pdf"}), _mask_pdf, _pdf_text),
     FormatMasker("html", frozenset({"html", "htm", "xhtml"}), _mask_html, _html_text),
     FormatMasker("ooxml", frozenset({"docx", "docm", "pptx", "pptm", "xlsx", "xlsm"}), _mask_ooxml, _ooxml_text),
+    FormatMasker("hwp", frozenset({"hwp"}), _mask_hwp, _hwp_text),
+    FormatMasker("hwpx", frozenset({"hwpx"}), _mask_hwpx, _hwpx_text),
     FormatMasker(
         "text",
         frozenset({

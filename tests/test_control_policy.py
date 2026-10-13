@@ -416,3 +416,190 @@ def test_large_html_with_one_hit_stays_light():
     grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
     assert out.hits == 1 and out.content.decode().endswith("연락 ***-****-5678</pre>")
     assert grown_mb < 300, f"글자마다 표를 만들지 않는다 (+{grown_mb:.0f} MB)"
+
+
+# ── 한글 문서(HWP 5.0 · HWPX) ───────────────────────────────────────
+
+import struct  # noqa: E402
+import zlib  # noqa: E402
+
+from xgen_sdk.control_policy import _cfb, _hwp  # noqa: E402
+
+FIELD_START = struct.pack("<H", 3) + b"klh%" + b"\0" * 8 + struct.pack("<H", 3)  # 하이퍼링크 필드 시작(8 글자)
+FIELD_END = struct.pack("<H", 4) + b"\0" * 12 + struct.pack("<H", 4)
+PARA_END = struct.pack("<H", 13)
+
+
+def _raw_deflate(data: bytes) -> bytes:
+    packer = zlib.compressobj(9, zlib.DEFLATED, -15)
+    return packer.compress(data) + packer.flush()
+
+
+def _record(tag: int, level: int, payload: bytes) -> bytes:
+    size = len(payload)
+    if size >= 0xFFF:
+        return struct.pack("<II", tag | (level << 10) | (0xFFF << 20), size) + payload
+    return struct.pack("<I", tag | (level << 10) | (size << 20)) + payload
+
+
+def _paragraph(text: bytes, shapes) -> bytes:
+    chars = len(text) // 2
+    header = struct.pack("<IIHBBHHHIH", chars | 0x80000000, 0, 0, 0, 0, len(shapes), 1, 1, 0, 0)
+    return (_record(66, 0, header) + _record(67, 1, text)
+            + _record(68, 1, b"".join(struct.pack("<II", p, s) for p, s in shapes))
+            + _record(69, 1, struct.pack("<IiiiiiiiI", 0, 0, 1000, 1000, 850, 600, 0, 42520, 0x60000))
+            + _record(70, 1, struct.pack("<III", 0, chars, 1 << 24)))
+
+
+def _summary(author: str) -> bytes:
+    value = (author + "\0").encode("utf-16-le")
+    props = [struct.pack("<IH", 2, 1200) + b"\0\0", struct.pack("<II", 0x1F, len(value) // 2) + value]
+    props[1] += b"\0" * (-len(props[1]) % 4)
+    start = 8 + 2 * 8
+    table = struct.pack("<II", 1, start) + struct.pack("<II", 4, start + len(props[0]))
+    section = struct.pack("<II", start + sum(map(len, props)), 2) + table + b"".join(props)
+    return struct.pack("<HHI", 0xFFFE, 0, 0) + b"\0" * 16 + struct.pack("<I", 1) + b"\x11" * 16 + struct.pack("<I", 48) + section
+
+
+def _hwp_doc(body: bytes, *, flags: int = 1, prv: str = "", author: str = "", history: bool = False) -> bytes:
+    pack = _raw_deflate if flags & 1 else (lambda d: d)
+    children = [
+        _cfb.Entry("FileHeader", 2, data=b"HWP Document File".ljust(32, b"\0") + struct.pack("<II", 0x05000107, flags)
+                   + b"\0" * 216),
+        _cfb.Entry("DocInfo", 2, data=pack(b"")),
+        _cfb.Entry("BodyText", 1, children=[_cfb.Entry("Section0", 2, data=pack(body))]),
+        _cfb.Entry("PrvText", 2, data=prv.encode("utf-16-le")),
+        _cfb.Entry("PrvImage", 2, data=b"GIF89a" + b"\0" * 40),
+        _cfb.Entry("\x05HwpSummaryInformation", 2, data=_summary(author)),
+    ]
+    if history:
+        children.append(_cfb.Entry("DocHistory", 1, children=[_cfb.Entry("VersionLog0", 2, data=b"010-1234-5678")]))
+    return _cfb.write(_cfb.Entry("Root Entry", 5, children=children))
+
+
+def _section_records(content: bytes):
+    root = _cfb.read(content)
+    return root, _hwp._records(zlib.decompress(root.find("BodyText/Section0").data, -15))
+
+
+def test_hwp_body_preview_summary_and_history_are_masked():
+    first = "전화 ".encode("utf-16-le") + FIELD_START + "010-1234-5678".encode("utf-16-le") + FIELD_END \
+        + " 끝".encode("utf-16-le") + PARA_END
+    second = "다른 문단".encode("utf-16-le") + PARA_END
+    raw = _hwp_doc(_paragraph(first, [(0, 0), (11, 1)]) + _paragraph(second, [(0, 0)]),
+                   prv="전화 010-1234-5678 끝", author="홍길동", history=True)
+    assert "010-1234-5678" in cp.detection_text(raw, "a.hwp")
+    rules = _rules(PHONE, {"id": 7, "policy_name": "이름", "regex_pattern": "홍길동", "masking": True,
+                           "masking_pattern": "[이름]"})
+    result = cp.strip_bytes(raw, "보고서.hwp", rules)
+    assert result.changed and result.hits == 2, "본문 1 + 작성자 1(미리보기는 본문을 옮긴 글이라 세지 않는다)"
+    assert cp.detection_text(result.content, "a.hwp") == "전화 ***-****-5678 끝\n다른 문단"
+    root, records = _section_records(result.content)
+    assert root.find("PrvText").data.decode("utf-16-le") == "전화 ***-****-5678 끝"
+    assert root.find("PrvImage").data.startswith(b"\x89PNG"), "첫 쪽 그림은 빈 그림으로"
+    assert "홍길동" not in root.find("\x05HwpSummaryInformation").data.decode("utf-16-le", "ignore")
+    assert root.find("DocHistory") is None and not struct.unpack_from("<I", root.find("FileHeader").data, 36)[0] & 0x40
+    header, text, shapes = records[0], records[1], records[2]
+    assert text.payload.count(FIELD_START) == 1 and text.payload.count(FIELD_END) == 1 and text.payload.endswith(PARA_END)
+    assert struct.unpack_from("<I", header.payload, 0)[0] == 0x80000000 | len(text.payload) // 2, "문단 글자 수"
+    assert [r.tag for r in records[:4]] == [66, 67, 68, 70] and struct.unpack_from("<H", header.payload, 16)[0] == 0, \
+        "고친 문단의 줄 배치 캐시는 지운다(한컴이 다시 계산)"
+    assert list(struct.iter_unpack("<II", shapes.payload)) == [(0, 0), (11, 1)]
+    assert struct.unpack_from("<II", records[3].payload)[1] == len(text.payload) // 2, "영역 태그 끝도 새 글자 수로"
+    untouched = _hwp._records(zlib.decompress(_cfb.read(raw).find("BodyText/Section0").data, -15))[5:]
+    assert [r.raw for r in records[4:]] == [r.raw for r in untouched], "걸리지 않은 문단은 바이트 그대로"
+
+
+def test_hwp_controls_inside_a_match_stay_in_place():
+    text = "g".encode("utf-16-le") + FIELD_START + "mail 끝".encode("utf-16-le") + PARA_END
+    raw = _hwp_doc(_paragraph(text, [(0, 0)]))
+    rules = _rules({"id": 8, "policy_name": "메일", "regex_pattern": "gmail", "masking": True,
+                    "masking_mode": "partial", "keep_prefix": 1})
+    _, records = _section_records(cp.strip_bytes(raw, "a.hwp", rules).content)
+    assert records[1].payload == "g".encode("utf-16-le") + FIELD_START + "**** 끝".encode("utf-16-le") + PARA_END, \
+        "필드 시작은 매치 안 같은 자리(링크가 덮는 범위가 옮겨 가지 않게)"
+
+
+def test_locked_or_old_hwp_is_left_alone():
+    body = _paragraph("010-1234-5678".encode("utf-16-le") + PARA_END, [(0, 0)])
+    rules = _rules(PHONE)
+    for flags, reason in ((0x3, "암호"), (0x5, "배포용"), (0x11, "DRM")):
+        result = cp.strip_bytes(_hwp_doc(body, flags=flags), "a.hwp", rules)
+        assert result.status == cp.STATUS_UNMASKABLE and reason in result.reason
+    assert "97" in cp.strip_bytes(b"HWP Document File V3.00 \x1a\x01\x02\x03\x04\x05", "a.hwp", rules).reason
+    assert cp.strip_bytes(b"not a document", "a.hwp", rules).status == cp.STATUS_UNMASKABLE
+    plain = cp.strip_bytes(_hwp_doc(body, flags=0), "a.hwp", rules)
+    assert plain.changed and "010-1234" not in cp.detection_text(plain.content, "a.hwp"), "압축하지 않은 문서도"
+
+
+def _hwpx(section: str, *, creator: str = "", preview: str = "") -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/hwp+zip")  # 첫 항목 · 무압축
+        z.writestr("Contents/header.xml", '<hh:head xmlns:hh="h"><hh:docInfo/></hh:head>')
+        z.writestr("Contents/section0.xml", '<?xml version="1.0" encoding="UTF-8"?><hs:sec xmlns:hs="s" xmlns:hp="p">'
+                   + section + "</hs:sec>")
+        z.writestr("Contents/content.hpf", '<opf:package xmlns:opf="o"><opf:metadata><opf:meta name="creator" '
+                   f'content="text">{creator}</opf:meta></opf:metadata></opf:package>')
+        z.writestr("Preview/PrvText.txt", preview.encode("utf-8"))
+        z.writestr("Preview/PrvImage.png", b"\x89PNG old")
+    return out.getvalue()
+
+
+LINESEG = '<hp:linesegarray><hp:lineseg textpos="0" vertpos="0"/></hp:linesegarray>'
+
+
+def test_hwpx_paragraphs_tables_and_layout_cache():
+    section = (
+        f'<hp:p id="1"><hp:run><hp:t>전화 010-12<hp:tab width="4000"/>34-5678 &amp; 끝</hp:t></hp:run>{LINESEG}</hp:p>'
+        f'<hp:p id="2"><hp:run><hp:tbl><hp:tr><hp:tc><hp:subList><hp:p id="3"><hp:run><hp:t>홍길동</hp:t></hp:run>'
+        f'{LINESEG}</hp:p></hp:subList></hp:tc></hp:tr></hp:tbl><hp:t>표 뒤 글</hp:t></hp:run>{LINESEG}</hp:p>'
+    )
+    raw = _hwpx(section, creator="홍길동", preview="전화 010-1234-5678")
+    rules = _rules(PHONE, {"id": 7, "policy_name": "이름", "regex_pattern": "홍길동", "masking": True,
+                           "masking_pattern": "<이름>"})
+    result = cp.strip_bytes(raw, "a.hwpx", rules)
+    assert result.changed and result.hits == 3
+    with zipfile.ZipFile(io.BytesIO(result.content)) as z:
+        assert [i.filename for i in z.infolist()][0] == "mimetype" and z.infolist()[0].compress_type == zipfile.ZIP_STORED
+        xml = z.read("Contents/section0.xml").decode()
+        assert '<hp:t>전화 ***-**<hp:tab width="4000"/>**-5678 &amp; 끝</hp:t>' in xml, "탭은 같은 비율 자리에"
+        assert "<hp:t>&lt;이름&gt;</hp:t>" in xml
+        assert xml.count("<hp:linesegarray>") == 1 and "표 뒤 글</hp:t></hp:run>" + LINESEG in xml, \
+            "바뀐 문단(1 · 3)의 줄 배치 캐시만 지운다"
+        assert "홍길동" not in z.read("Contents/content.hpf").decode()
+        assert z.read("Preview/PrvText.txt").decode() == "전화 ***-****-5678"
+        assert z.read("Preview/PrvImage.png") != b"\x89PNG old"
+    assert cp.detection_text(result.content, "a.hwpx") == "전화 ***-****-5678 & 끝\n표 뒤 글\n<이름>"
+    as_hwp = cp.strip_bytes(raw, "zip으로_저장된.hwp", rules)
+    assert as_hwp.changed and as_hwp.content == result.content, "확장자가 hwp 여도 zip 이면 HWPX 로"
+
+
+def test_compound_file_round_trip_keeps_streams_and_attributes():
+    big = bytes(range(256)) * (9 * 1024 * 1024 // 256)  # FAT 이 109 섹터를 넘어 DIFAT 이 필요한 크기
+    root = _cfb.Entry("Root Entry", 5, clsid=b"\x01" * 16, children=[
+        _cfb.Entry("Big", 2, data=big),
+        _cfb.Entry("Small", 2, data=b"tiny"),
+        _cfb.Entry("Empty", 2),
+        _cfb.Entry("Store", 1, clsid=b"\x02" * 16, created=b"\x03" * 8, modified=b"\x04" * 8,
+                   children=[_cfb.Entry(f"S{i}", 2, data=bytes([i]) * (i * 700)) for i in range(12)]),
+    ])
+    again = _cfb.read(_cfb.write(root))
+    assert {p: e.data for p, e in again.streams()} == {p: e.data for p, e in root.streams()}
+    store = again.find("Store")
+    assert (store.clsid, store.created, store.modified, again.clsid) == (b"\x02" * 16, b"\x03" * 8, b"\x04" * 8, b"\x01" * 16)
+    olefile = pytest.importorskip("olefile")
+    ole = olefile.OleFileIO(_cfb.write(root))
+    assert ole.openstream("Big").read() == big and ole.openstream("Store/S11").read() == bytes([11]) * 7700
+
+
+def test_office_document_properties_are_masked():
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("word/document.xml", "<w:document><w:p><w:r><w:t>본문</w:t></w:r></w:p></w:document>")
+        z.writestr("docProps/core.xml", '<cp:coreProperties xmlns:dc="d" xmlns:cp="c"><dc:creator>홍길동</dc:creator>'
+                                        "<dc:title>보고서</dc:title></cp:coreProperties>")
+    rules = _rules({"id": 7, "policy_name": "이름", "regex_pattern": "홍길동", "masking": True, "masking_pattern": "[이름]"})
+    result = cp.strip_bytes(out.getvalue(), "a.docx", rules)
+    core = zipfile.ZipFile(io.BytesIO(result.content)).read("docProps/core.xml").decode()
+    assert result.hits == 1 and "<dc:creator>[이름]</dc:creator>" in core and "<dc:title>보고서</dc:title>" in core

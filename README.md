@@ -301,7 +301,7 @@ from xgen_sdk import control_policy as cp
 rules = cp.load_scope_rules(app_db, cp.SCOPE_CHAT_UPLOAD, workflow_id=wf_id)  # per-agent exceptions removed
 found = cp.apply_rules(text, rules, mask=False)                               # detect only
 masked = cp.apply_rules(text, rules).text                                     # full or partial masks
-result = cp.strip_file(tmp_path, "report.docx", rules)                        # txt, html, docx/xlsx/pptx, pdf
+result = cp.strip_file(tmp_path, "report.docx", rules)                        # txt, html, docx/xlsx/pptx, hwp/hwpx, pdf
 if result.changed:
     size, sha256 = result.size, result.sha256
 cp.log_result(app_db, result.found, source=cp.SOURCE_CHAT_UPLOAD, workflow_id=wf_id)
@@ -311,6 +311,14 @@ PDF needs `xgen-pdf` at runtime (and `chardet` helps guess legacy text
 encodings). Both are imported lazily, so services that never mask files do not
 need them. pdfium is not thread safe, so PDF work runs in small worker
 processes that import only this SDK, never the service's own `main` module.
+
+Hangul documents: HWP 5.0 (compound file) paragraphs, tables, headers, footnotes
+and text boxes, plus the preview text and summary information (title, author);
+the preview image is replaced with a blank one and the document history is
+dropped. Edited paragraphs lose their line layout cache so Hangul lays them out
+again. HWPX (zip) is handled the same way. Password, DRM and distribution
+documents, HWP 3.0, pictures and scanned PDFs are left as they are
+(`unmaskable`).
 
 | Variable | Default | Meaning |
 |---|---|---|
