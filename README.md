@@ -307,10 +307,17 @@ if result.changed:
 cp.log_result(app_db, result.found, source=cp.SOURCE_CHAT_UPLOAD, workflow_id=wf_id)
 ```
 
-PDF needs `xgen-pdf` and HTML needs `beautifulsoup4` at runtime. They are
-imported lazily, so services that never mask files do not need them.
-`XGEN_FILE_MASKING_MAX_BYTES` (default 32 MiB) caps the file size that is read
-into memory; larger files are left as they are (`unmaskable`).
+PDF needs `xgen-pdf` at runtime (and `chardet` helps guess legacy text
+encodings). Both are imported lazily, so services that never mask files do not
+need them. pdfium is not thread safe, so PDF work runs in small worker
+processes that import only this SDK, never the service's own `main` module.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `XGEN_FILE_MASKING_MAX_BYTES` | 32 MiB | Largest file read into memory; larger files are left as they are (`unmaskable`) |
+| `XGEN_FILE_MASKING_MAX_UNZIPPED_BYTES` | 256 MiB | Largest total unzipped size of an Office file |
+| `XGEN_FILE_MASKING_PDF_WORKERS` | 2 | PDF worker processes; `0` runs PDF work in process (tests only) |
+| `XGEN_FILE_MASKING_PDF_TIMEOUT_S` | 300 | Time limit for one PDF; the worker is killed and the file is `unmaskable` |
 
 ---
 

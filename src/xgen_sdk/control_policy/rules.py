@@ -15,7 +15,6 @@
 """
 from __future__ import annotations
 
-import bisect
 import logging
 import re
 from dataclasses import dataclass, field
@@ -74,11 +73,9 @@ class MaskingRule:
     preserve_format: bool = True
 
     @property
-    def repl(self) -> Union[str, Callable[["re.Match[str]"], str]]:
-        """``re.sub`` 에 넘길 치환자: full 은 템플릿 문자열, partial 은 매치마다 계산하는 함수."""
-        if self.masking_mode == MASK_MODE_PARTIAL:
-            return lambda m: self._partial(m.group(0))
-        return self.mask
+    def repl(self) -> Callable[["re.Match[str]"], str]:
+        """``re.sub`` 에 넘길 치환자(매치마다 계산). 깨진 템플릿은 ``****`` 로 가린다(원문을 통과시키지 않는다)."""
+        return self.replacement
 
     def _partial(self, matched: str) -> str:
         return partial_mask(matched, self.mask_char, self.keep_prefix, self.keep_suffix, self.preserve_format)
@@ -217,24 +214,88 @@ def apply_rules(text: str, rules: Sequence[MaskingRule], *, mask: bool = True) -
 
 
 def find_masked_spans(text: str, rules: Sequence[MaskingRule]) -> List[Tuple[int, int, str]]:
-    """가릴 구간 ``(시작, 끝, 치환문)``: 조각난 글(OOXML run)을 되돌려 쓸 때 쓴다.
+    """가릴 구간 ``(원문 시작, 원문 끝, 치환문)``: 조각난 글(OOXML run · HTML 문자 참조 · PDF 줄)을 되돌려 쓸 때 쓴다.
 
-    겹치는 매치는 앞 규칙이 이긴다(:func:`apply_rules` 의 차례를 재현). 구간이 많아도 느려지지 않게
-    정렬된 구간에서 이분 탐색으로 겹침을 본다.
+    :func:`apply_rules` 와 **같은 결과**를 낸다: 규칙을 차례로, 앞 규칙이 가린 글 위에서 다시 찾는다(앞 마스크의
+    일부까지 걸릴 수 있다). 글자마다 원문의 어느 구간에서 왔는지를 묶음으로 따라가 마지막에 원문 위치로 되짚는다.
+    걸린 것이 없으면 아무것도 만들지 않는다(대부분의 문단).
     """
     if not text or not rules:
         return []
-    starts: List[int] = []
-    spans: List[Tuple[int, int, str]] = []
+    current = text
+    owner: Optional[List[int]] = None  # 지금 글의 글자마다 묶음 번호(처음 걸릴 때 만든다)
+    parent: List[int] = []
+    lo: List[int] = []
+    hi: List[int] = []
+    replaced: List[bool] = []
+
+    def find(unit: int) -> int:
+        while parent[unit] != unit:
+            parent[unit] = parent[parent[unit]]
+            unit = parent[unit]
+        return unit
+
+    def make(a: int, b: int, rep: bool) -> int:
+        parent.append(len(parent))
+        lo.append(a)
+        hi.append(b)
+        replaced.append(rep)
+        return len(parent) - 1
+
+    ghosts: List[int] = []  # 빈 치환문(글자가 남지 않는 마스크)의 묶음
     for rule in rules:
-        for match in rule.pattern.finditer(text):
-            start, end = match.span()
-            if start == end:
-                continue
-            # 서로 겹치지 않는 정렬 구간이라, 끝이 end 보다 앞에서 시작하는 마지막 구간만 보면 된다.
-            idx = bisect.bisect_left(starts, end)
-            if idx > 0 and spans[idx - 1][1] > start:
-                continue
-            starts.insert(idx, start)
-            spans.insert(idx, (start, end, rule.replacement(match)))
-    return spans
+        matches = [m for m in rule.pattern.finditer(current) if m.end() > m.start()]
+        if not matches:
+            continue
+        if owner is None:
+            owner = [make(i, i + 1, False) for i in range(len(text))]
+        out_text: List[str] = []
+        out_owner: List[int] = []
+        last = 0
+        for match in matches:
+            ms, me = match.span()
+            out_text.append(current[last:ms])
+            out_owner.extend(owner[last:ms])
+            touched = {find(u) for u in owner[ms:me]}
+            unit = make(min(lo[t] for t in touched), max(hi[t] for t in touched), True)
+            for t in touched:
+                parent[t] = unit
+            rep = rule.replacement(match)
+            if rep:
+                out_text.append(rep)
+                out_owner.extend([unit] * len(rep))
+            else:
+                ghosts.append(unit)
+            last = me
+        out_text.append(current[last:])
+        out_owner.extend(owner[last:])
+        current, owner = "".join(out_text), out_owner
+    if owner is None:
+        return []
+    spans: List[Tuple[int, int, str]] = []
+    seen: set = set()
+    i, n = 0, len(current)
+    while i < n:
+        root = find(owner[i])
+        j = i + 1
+        while j < n and find(owner[j]) == root:
+            j += 1
+        if replaced[root]:
+            spans.append((lo[root], hi[root], current[i:j]))
+            seen.add(root)
+        i = j
+    for unit in ghosts:
+        root = find(unit)
+        if root not in seen:
+            seen.add(root)
+            spans.append((lo[root], hi[root], ""))
+    spans.sort(key=lambda s: (s[0], s[1]))
+    merged: List[Tuple[int, int, str]] = []
+    for span in spans:
+        # 빈 치환문 구간이 뒤 매치 구간 안에 들어간 경우(글자가 없어 묶이지 않았다): 합친다.
+        if merged and span[0] < merged[-1][1]:
+            prev = merged[-1]
+            merged[-1] = (prev[0], max(prev[1], span[1]), prev[2] + span[2])
+        else:
+            merged.append(span)
+    return merged

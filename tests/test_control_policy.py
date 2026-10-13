@@ -257,7 +257,7 @@ def test_names_without_extension_are_not_formats():
 def test_office_zip_bomb_is_refused(monkeypatch):
     from xgen_sdk.control_policy import files
 
-    monkeypatch.setattr(files, "MASKING_MAX_XML_BYTES", 1000)
+    monkeypatch.setattr(files, "MASKING_MAX_UNZIPPED_BYTES", 1000)
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("word/document.xml", "<w:p><w:t>" + "a" * 5000 + "</w:t></w:p>")
@@ -298,3 +298,94 @@ def test_bad_size_env_does_not_break_import():
     env = {**__import__("os").environ, "DOCUMENT_SOURCE_MASKING_MAX_BYTES": "32MB"}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert out.returncode == 0 and out.stdout.strip() == str(32 * 1024 * 1024)
+
+
+# ── 2차 검토에서 재현된 것들 (2026-10-13) ────────────────────────────
+
+
+def _docx_text(content: bytes) -> str:
+    import re
+
+    xml = zipfile.ZipFile(io.BytesIO(content)).read("word/document.xml").decode()
+    return "".join(re.findall(r"<w:t>([^<]*)</w:t>", xml))
+
+
+def test_chained_rules_give_the_same_text_in_every_format():
+    phone = dict(PHONE, masking_mode="full", masking_pattern="[전화]")
+    chained = {"id": 30, "policy_name": "번호 묶음", "regex_pattern": r"\[전화\] 번호", "masking": True,
+               "masking_pattern": "[가림]", "is_active": True}
+    rules = _rules(phone, chained)
+    assert cp.apply_rules("전화 010-1234-5678 번호 끝", rules).text == "전화 [가림] 끝"
+    docx = cp.strip_bytes(_docx([["전화 010-1234-5678 번", "호 끝"]]), "a.docx", rules)
+    assert _docx_text(docx.content) == "전화 [가림] 끝", "앞 마스크 위에서 다시 걸린 것도 Office 에서 같은 결과"
+    spans = cp.find_masked_spans("전화 010-1234-5678 번호 끝", rules)
+    assert [(s, e, r) for s, e, r in spans] == [(3, 19, "[가림]")]
+
+
+def test_html_entities_text_brackets_and_masks_are_handled():
+    rules = _rules(dict(PHONE, masking_mode="full", masking_pattern="<전화>"))
+    page = "<p>010&#45;1234&#45;5678 and a < b 010-1234-5678</p><script-x>010-1234-5678</script-x>"
+    out = cp.strip_bytes(page.encode(), "a.html", rules).content.decode()
+    assert out == ("<p>&lt;전화&gt; and a < b &lt;전화&gt;</p><script-x>&lt;전화&gt;</script-x>"), out
+    assert "010" not in cp.detection_text(out.encode(), "a.html")
+
+
+def test_text_decoding_keeps_utf32_and_mostly_utf8_korean():
+    utf32 = "메모 010-1234-5678".encode("utf-32")
+    assert cp.strip_bytes(utf32, "a.txt", _rules(PHONE)).content.decode("utf-32") == "메모 ***-****-5678"
+    mostly = "가나다라마바사 메모 010-1234-5678 ".encode() * 20 + b"\xff"
+    out = cp.strip_bytes(mostly, "a.txt", _rules(PHONE)).content
+    assert out.endswith(b"\xff") and out[:-1].decode() == "가나다라마바사 메모 ***-****-5678 " * 20
+
+
+def test_office_comments_deleted_text_and_prefixed_parts_are_masked():
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("word/document.xml", '<w:document><w:p><w:del><w:r><w:delText>010-1234-5678</w:delText>'
+                                        '</w:r></w:del></w:p></w:document>')
+        z.writestr("xl/comments1.xml", '<comments><commentList><comment ref="A1"><text><r><t>010-1234-5678</t>'
+                                       '</r></text></comment></commentList></comments>')
+        z.writestr("xl/sharedStrings.xml", '<x:sst><x:si><x:t>010-1234-5678</x:t></x:si></x:sst>')
+    result = cp.strip_bytes(out.getvalue(), "a.xlsx", _rules(PHONE))
+    assert result.hits == 3
+    with zipfile.ZipFile(io.BytesIO(result.content)) as z:
+        assert all("010-1234" not in z.read(name).decode() for name in z.namelist())
+
+
+def test_office_zip_bomb_counts_media_too(monkeypatch):
+    from xgen_sdk.control_policy import files
+
+    monkeypatch.setattr(files, "MASKING_MAX_UNZIPPED_BYTES", 1000)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml", "<w:p><w:t>010-1234-5678</w:t></w:p>")
+        z.writestr("word/media/image1.png", b"\x00" * 5000)
+    result = cp.strip_bytes(out.getvalue(), "a.docx", _rules(PHONE))
+    assert result.status == cp.STATUS_UNMASKABLE and "상한" in result.reason
+
+
+def test_rule_repl_with_a_broken_template_fails_closed():
+    rule = _rules(dict(PHONE, masking_mode="full", masking_pattern=r"\2"))[0]
+    assert rule.pattern.sub(rule.repl, "tel 010-1234-5678") == "tel ****", "서비스가 re.sub 에 바로 넘겨도 안전"
+
+
+def test_pdf_runs_in_a_separate_process_and_recovers():
+    pytest.importorskip("xgen_pdf")
+    import os
+
+    from xgen_sdk.control_policy import files
+
+    if files._PDF_WORKERS <= 0:
+        pytest.skip("작업 프로세스를 끈 환경")
+    pdf = __import__("xgen_pdf")
+    doc = pdf.open()
+    doc.new_page().insert_text((72, 72), "call 010-1234-5678 now")
+    raw = doc.tobytes()
+    doc.close()
+    first = cp.strip_bytes(raw, "a.pdf", _rules(PHONE))
+    workers = list(files._PDF_IDLE)
+    assert workers and all(w.process.pid != os.getpid() for w in workers)
+    for worker in workers:
+        worker.kill()
+    again = cp.strip_bytes(raw, "a.pdf", _rules(PHONE))
+    assert again.changed and again.sha256 == first.sha256, "죽은 작업 프로세스는 새로 띄운다"
