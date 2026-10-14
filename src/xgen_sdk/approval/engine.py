@@ -246,6 +246,11 @@ def open_steps(steps: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _step_of(steps: Sequence[Dict[str, Any]], actor_id: int) -> Optional[Dict[str, Any]]:
+    # The same reviewer may occur in both segments, but acts only on the
+    # currently pending occurrence. Completed signatures remain independent.
+    for s in steps:
+        if int(s.get("approver_id") or 0) == int(actor_id) and s.get("status") == PENDING:
+            return s
     for s in steps:
         if int(s.get("approver_id") or 0) == int(actor_id):
             return s
