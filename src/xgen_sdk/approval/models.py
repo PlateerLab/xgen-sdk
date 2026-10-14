@@ -50,6 +50,9 @@ class ApprovalLine(BaseModel):
         #: 이 결재선을 타는 결재가 채워야 할 양식. None 이면 **[기본 결재]** —
         #: 결재선과 결재 내용만 적는다(지금까지의 동작 그대로).
         self.form_id = kwargs.get('form_id')
+        # Legacy storage/API name: enables followup choices for new submissions.
+        self.followup_required = kwargs.get('followup_required', False)
+        self.followup_line_ids = kwargs.get('followup_line_ids', '[]')
 
     def get_table_name(self) -> str:
         return "approval_lines"
@@ -61,6 +64,8 @@ class ApprovalLine(BaseModel):
             'owner_id': 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
             'is_shared': 'BOOLEAN NOT NULL DEFAULT FALSE',
             'is_active': 'BOOLEAN NOT NULL DEFAULT TRUE',
+            'followup_required': 'BOOLEAN NOT NULL DEFAULT FALSE',
+            'followup_line_ids': "TEXT NOT NULL DEFAULT '[]'",
             # 이 결재선을 타는 결재가 채워야 할 양식. 없으면 [기본 결재]
             # — 결재선과 결재 내용만 적는다(지금까지의 동작 그대로).
             'form_id': 'INTEGER REFERENCES approval_forms(id) ON DELETE SET NULL',
@@ -146,6 +151,9 @@ class ApprovalRequest(BaseModel):
         #: "무슨 양식이었나" 는 답할 수 있어야 해서 이름도 함께 베낀다.
         self.form_id = kwargs.get('form_id')
         self.form_name = kwargs.get('form_name')
+        self.followup_config = kwargs.get('followup_config')
+        self.followup_selection = kwargs.get('followup_selection')
+        self.followup_completion = kwargs.get('followup_completion')
         self.status = kwargs.get('status', 'pending')
         #: 지금 차례인 단계 번호(= 그 한 사람). 종결되면 마지막 값에서 멈춘다.
         self.current_step_order = kwargs.get('current_step_order', 1)
@@ -179,6 +187,9 @@ class ApprovalRequest(BaseModel):
             # 이름은 지워지지 않게 **값으로** 베껴 둔다.
             'form_id': 'INTEGER REFERENCES approval_forms(id) ON DELETE SET NULL',
             'form_name': 'VARCHAR(100)',
+            'followup_config': 'TEXT',
+            'followup_selection': 'TEXT',
+            'followup_completion': 'TEXT',
             'status': 'VARCHAR(20) NOT NULL DEFAULT \'pending\'',
             'current_step_order': 'INTEGER NOT NULL DEFAULT 1',
             'decided_at': 'TIMESTAMP',
@@ -240,6 +251,7 @@ class ApprovalRequestStep(BaseModel):
         self.status = kwargs.get('status', 'waiting')
         self.acted_at = kwargs.get('acted_at')
         self.note = kwargs.get('note')
+        self.segment_order = kwargs.get('segment_order', 1)
 
     def get_table_name(self) -> str:
         return "approval_request_steps"
@@ -264,7 +276,8 @@ class ApprovalRequestStep(BaseModel):
             'status': 'VARCHAR(20) NOT NULL DEFAULT \'waiting\'',
             'acted_at': 'TIMESTAMP',
             'note': 'VARCHAR(500)',
-            'UNIQUE_request_approver': 'UNIQUE(request_id, approver_id)',
+            'segment_order': 'INTEGER NOT NULL DEFAULT 1',
+            'UNIQUE_request_segment_approver': 'UNIQUE(request_id, segment_order, approver_id)',
             # **한 차례에 한 사람** — 표가 강제한다. 이게 없으면 코드 어딘가가
             # 같은 번호에 둘을 넣었을 때 "지금 누구 차례인가" 가 두 답이 된다.
             'UNIQUE_request_order': 'UNIQUE(request_id, step_order)',
