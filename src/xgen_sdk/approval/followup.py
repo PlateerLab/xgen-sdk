@@ -73,13 +73,25 @@ def load_candidate(app_db, line_id):
     return line
 
 
-def validate_config(app_db, source_id, required, ids):
+def validate_config(app_db, source_id, required, ids, kept=()):
+    """Check a source line's followup configuration when it is saved.
+
+    ``kept`` are candidates already allowed before this edit. They are not
+    re-checked: a candidate that later became unusable (deactivated, unshared,
+    form changed) is skipped when the final reviewer chooses, and must not
+    stop an administrator from renaming or re-saving the source line.
+    """
     if not required:
         return []
     allowed = list(dict.fromkeys(int(i) for i in (ids or [])))
     if not allowed:
         raise E.ApprovalError("후속 결재선을 하나 이상 선택하세요.")
+    kept = {int(i) for i in (kept or ())}
     for line_id in allowed:
+        if source_id is not None and int(line_id) == int(source_id):
+            raise E.ApprovalError("자기 결재선을 후속 결재선으로 선택할 수 없습니다.")
+        if line_id in kept:
+            continue
         error = candidate_error(load_candidate(app_db, line_id), source_id)
         if error:
             raise E.ApprovalError(error)
@@ -103,7 +115,8 @@ def save_line(app_db, *, line_id=None, followup_required=None, followup_line_ids
                         else (old or {}).get("followup_required", False))
         ids = (followup_line_ids if followup_line_ids is not None
                else (old or {}).get("followup_line_ids", []))
-        ids = validate_config(tx, line_id, required, ids)
+        kept = (old or {}).get("followup_line_ids", []) if (old or {}).get("followup_required") else []
+        ids = validate_config(tx, line_id, required, ids, kept)
         if line_id is None:
             made = store.create_line(tx, **kwargs)
             line_id = made["id"]
@@ -115,21 +128,29 @@ def save_line(app_db, *, line_id=None, followup_required=None, followup_line_ids
 
 
 def snapshot(app_db, line_id):
+    """Fix the allowed destination IDs at submission. Nothing else is checked here.
+
+    Candidates are validated live when the final reviewer chooses
+    (:func:`candidates` and :func:`decision` skip or refuse an unusable one).
+    Re-validating them here would make one deactivated or edited destination
+    line refuse every new submission on the source line, including approvals
+    submitted by other services (agent deployment, RAG). Reading one row needs
+    no configuration lock, so submission never waits on configuration edits.
+    """
     from xgen_sdk.approval import store
     if not line_id:
         return None
     source = store.get_line(app_db, line_id)
     if not source or not source.get("followup_required"):
         return None
-    with locked_configuration(app_db) as tx:
-        source = store.get_line(tx, line_id)
-        if not source or not source.get('followup_required'):
-            return None
-        ids = validate_config(tx, line_id, True, source.get("followup_line_ids"))
-        # Keep old requests' immutable required=True snapshots intact. The
-        # legacy line column now means enabled, not mandatory for new requests.
-        return {"version": 2, "enabled": True, "required": False, "source_line_id": source["id"],
-                "source_line_name": source["name"], "line_ids": ids}
+    ids = [i for i in dict.fromkeys(int(i) for i in (source.get("followup_line_ids") or []))
+           if i != int(source["id"])]
+    if not ids:
+        return None
+    # Keep old requests' immutable required=True snapshots intact. The
+    # legacy line column now means enabled, not mandatory for new requests.
+    return {"version": 2, "enabled": True, "required": False, "source_line_id": source["id"],
+            "source_line_name": source["name"], "line_ids": ids}
 
 
 def allowed_ids(config):
