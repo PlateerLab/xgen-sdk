@@ -15,6 +15,27 @@ Workflow의 Agent Session 이벤트 계약도 `AgentSessionSnapshot`, `AgentSess
 
 Workflow의 `GET /api/agentflow/agent-sessions/{id}/messages`에 맞춰 `AgentSessionMessagePage`, `AgentSessionMessageCursor`, `AgentSessionMessageConflictResponse`와 `apply_message_page`를 제공한다. 이 API는 저널에 연결된 완료 턴만 돌려주므로 메시지 sequence는 이벤트 사이에서 건너뛸 수 있고, `has_more=false`여도 `next_cursor`가 `snapshot_sequence`보다 작을 수 있다. SDK는 해당 세션의 마지막 턴 ID로 겹친 페이지를 확인하고 중복을 제외한다. cursor·턴 anchor·응답 구조가 어긋나면 `AgentSessionMessageGap`으로 중단한다. 입력·출력 텍스트가 없을 수 있으며 `content_complete`와 `source`가 그 상태와 일치해야 한다. 이 페이지를 전체 대화 snapshot으로 취급하거나 Agent Session 이벤트 cursor를 전진시키지 않는다. 인증·소유권 검사와 409 `SESSION_MESSAGE_LINK_INVALID` 처리 책임은 Gateway·Workflow 및 호출자에게 있다.
 
+## 턴 상태 조회 (2026-10-15)
+
+`AgentSessionTurnStatusClient`는 호출자가 제공한 인증된 JSON GET 함수로 고정 경로 `GET /api/agentflow/agent-sessions/{session_id}/turns/{turn_id}`를 한 번 조회한다. transport는 현재 Platform Session·DPoP, HTTPS origin, 응답 크기/시간 제한, HTTP 오류 처리를 담당한다. SDK는 인증 정보·base URL·환경변수를 새로 만들지 않는다.
+
+```python
+from xgen_sdk.agent_session import AgentSessionTurnStatusClient
+
+# authenticated_json_get(path): 현재 세션/DPoP로 GET하고 JSON 객체를 반환하는 앱의 async 함수
+client = AgentSessionTurnStatusClient(authenticated_json_get)
+turn = await client.read(session_id, turn_id)
+if turn.result_available:
+    # 결과 본문은 기존 messages 조회로 읽는다.
+    pass
+```
+
+응답은 정확한9개 필드의 frozen DTO다. 정규 UUID·요청 session/turn binding·status/progress 조합·sequence 순서·terminal 결과 증거를 재검사한다. `parse_agent_session_turn_status`로 이미 받은 dict/DTO도 다시 검증할 수 있다. 검증 실패는 원시 응답을 넣지 않는 `AgentSessionTurnStatusValidationError`이며, 호출자 transport의 HTTP/취소 예외는 그대로 전달한다. 자동 polling·재시도·reconcile·실행·lease/로그인 수명 연장은 없다.
+
+`running_or_unknown`은 worker 생존을 증명하지 않으며 `cancelled/final`도 대상 process/stage 정리 완료를 증명하지 않는다. `awaiting_reconciliation`은 명시적인 기존 복구 경로가 필요한 상태다. SDK와 Frontend는 동일한 공개 JSON fixture로 유효·변조 응답의 해석을 대조한다. 패키지는 발행하지 않으며 상위 PR53은 Draft로 유지한다.
+
+The caller owns authenticated, bounded JSON GET transport. The client fixes and validates the queryless path, revalidates the exact immutable response and its requested identity, and performs no retry, execution or lease extension. A terminal journal projection is separate from target cleanup. SDK and Frontend share public fixtures; publication and full ACTIVE acceptance remain separate gates.
+
 나머지 항목은 서버 계약이 확정된 뒤 하위 브랜치와 별도 PR로 구현한다.
 
 ## Canonical 첨부 참조 계약 (2026-10-06)

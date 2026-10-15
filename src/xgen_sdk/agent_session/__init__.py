@@ -53,6 +53,13 @@ from .turns import (
     SubmitAgentSessionTurn,
     parse_turn_submission,
 )
+from .turn_status import (
+    AgentSessionTurnStatus,
+    AgentSessionTurnStatusClient,
+    AgentSessionTurnStatusGetTransport,
+    AgentSessionTurnStatusValidationError,
+    parse_agent_session_turn_status,
+)
 
 __all__ = [
     "AGENT_ATTACHMENT_MAX_BYTES",
@@ -76,6 +83,10 @@ __all__ = [
     "AgentSessionReplayGap",
     "AgentSessionSnapshot",
     "AgentSessionTurnSummary",
+    "AgentSessionTurnStatus",
+    "AgentSessionTurnStatusClient",
+    "AgentSessionTurnStatusGetTransport",
+    "AgentSessionTurnStatusValidationError",
     "AgentSessionTurnValidationError",
     "AgentSessionCreated",
     "CreateAgentSession",
@@ -93,5 +104,6 @@ __all__ = [
     "parse_attachment_references",
     "parse_attachment_scope",
     "parse_turn_submission",
+    "parse_agent_session_turn_status",
     "prepare_attachment_references",
 ]
