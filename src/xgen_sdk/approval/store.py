@@ -18,11 +18,12 @@ from xgen_sdk.approval import engine as E
 from xgen_sdk.approval import evaluation
 from xgen_sdk.approval import notifier
 from xgen_sdk.approval import templates
+from xgen_sdk.approval import followup
 from xgen_sdk.approval.registry import (
     GENERIC, has_apply, has_reject, is_registered, is_user_submittable,
     owner_of, run_apply, run_reject,
 )
-from xgen_sdk.approval.sql import q as _q, rows as _rows  # noqa: F401 — 기존 이름 보존
+from xgen_sdk.approval.sql import TransactionDB, q as _q, rows as _rows  # noqa: F401 — 기존 이름 보존
 
 logger = logging.getLogger("approval-store")
 
@@ -55,7 +56,7 @@ def list_lines(app_db, user_id: int, include_private: bool = True) -> List[Dict[
     """쓸 수 있는 결재선 — 공용 + 내가 만든 것."""
     sql = """
         SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active,
-               l.form_id, f.name AS form_name
+               l.form_id, f.name AS form_name, l.followup_required, l.followup_line_ids
           FROM approval_lines l
           LEFT JOIN approval_forms f ON f.id = l.form_id
          WHERE l.is_active = TRUE
@@ -64,6 +65,7 @@ def list_lines(app_db, user_id: int, include_private: bool = True) -> List[Dict[
     """ % ("OR l.owner_id = %s" if include_private else "")
     lines = _q(app_db, sql, (user_id,) if include_private else ())
     for ln in lines:
+        ln["followup_line_ids"] = followup.decode(ln.get("followup_line_ids"), [])
         ln["steps"] = _q(
             app_db,
             """
@@ -103,13 +105,14 @@ def get_line(app_db, line_id: int) -> Optional[Dict[str, Any]]:
     "그때 어느 결재선으로 올렸나" 를 답해야 하기 때문이다."""
     rows = _q(app_db,
               "SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active, "
-              "       l.form_id, f.name AS form_name "
+              "       l.form_id, f.name AS form_name, l.followup_required, l.followup_line_ids "
               "  FROM approval_lines l "
               "  LEFT JOIN approval_forms f ON f.id = l.form_id "
               " WHERE l.id = %s", (int(line_id),))
     if not rows:
         return None
     line = dict(rows[0])
+    line["followup_line_ids"] = followup.decode(line.get("followup_line_ids"), [])
     line["steps"] = _q(
         app_db,
         """
@@ -212,7 +215,7 @@ def list_all_shared_lines(app_db) -> List[Dict[str, Any]]:
     """
     lines = _q(app_db,
                "SELECT l.id, l.name, l.description, l.owner_id, l.is_shared, l.is_active, "
-               "       l.form_id, f.name AS form_name, "
+               "       l.form_id, f.name AS form_name, l.followup_required, l.followup_line_ids, "
                "       COALESCE(u.full_name, u.username) AS owner_name "
                "  FROM approval_lines l "
                "  LEFT JOIN users u ON u.id = l.owner_id "
@@ -220,6 +223,7 @@ def list_all_shared_lines(app_db) -> List[Dict[str, Any]]:
                " WHERE l.is_active = TRUE AND l.is_shared = TRUE "
                " ORDER BY l.name")
     for ln in lines:
+        ln["followup_line_ids"] = followup.decode(ln.get("followup_line_ids"), [])
         ln["steps"] = _q(
             app_db,
             """
@@ -350,19 +354,21 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
 
     form = _line_form(app_db, line_id)
     _guard_steps_cover_form(app_db, form, len(planned))
+    followup_config = followup.snapshot(app_db, line_id)
 
     rows = _q(
         app_db,
         """
         INSERT INTO approval_requests
             (title, reason, action_type, payload, requester_id, line_id,
-             form_id, form_name, status, current_step_order, target_ref)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id
+             form_id, form_name, status, current_step_order, target_ref, followup_config)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s) RETURNING id
         """,
         (str(title).strip()[:200], (reason or "").strip() or None, action_type,
          json.dumps(payload or {}, ensure_ascii=False), requester_id, line_id,
          (form or {}).get("id"), (form or {}).get("name"),
-         min(s["step_order"] for s in planned), ref),
+         min(s["step_order"] for s in planned), ref,
+         json.dumps(followup_config, ensure_ascii=False, default=str) if followup_config else None),
     )
     request_id = rows[0]["id"]
     for s in planned:
@@ -391,7 +397,7 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
         app_db,
         """
         SELECT r.id, r.title, r.reason, r.action_type, r.payload, r.requester_id,
-               r.line_id, r.form_id, r.form_name,
+               r.line_id, r.form_id, r.form_name, r.followup_config, r.followup_selection, r.followup_completion,
                r.status, r.current_step_order, r.decided_at,
                r.applied_at, r.apply_error, r.created_at,
                r.target_ref, r.canceled_by, r.cancel_note,
@@ -405,6 +411,9 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
     if not rows:
         raise E.ApprovalError("결재를 찾을 수 없습니다")
     req = rows[0]
+    req["followup_config"] = followup.decode(req.get("followup_config"))
+    req["followup_selection"] = followup.decode(req.get("followup_selection"))
+    req["followup_completion"] = followup.decode(req.get("followup_completion"))
     try:
         req["payload"] = json.loads(req.get("payload") or "{}")
     except (TypeError, ValueError):
@@ -413,7 +422,7 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
         app_db,
         """
         SELECT s.step_order, s.approver_id, s.status, s.acted_at, s.note,
-               u.username, u.full_name
+               u.username, u.full_name, s.segment_order
           FROM approval_request_steps s
           LEFT JOIN users u ON u.id = s.approver_id
          WHERE s.request_id = %s
@@ -427,7 +436,9 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
     return req
 
 
-def decide(app_db, request_id: int, actor_id: int, action: str, note: str = "") -> Dict[str, Any]:
+def decide(app_db, request_id: int, actor_id: int, action: str, note: str = "", *,
+           followup_line_id=None, followup_steps=None, expected_step_order=None,
+           followup_revision=None, followup_action=None) -> Dict[str, Any]:
     """승인/거절.
 
     쓰기가 **조건부**인 이유 (동시성)
@@ -446,6 +457,11 @@ def decide(app_db, request_id: int, actor_id: int, action: str, note: str = "") 
          적용(applier)과 알림을 한다 — 둘 다 하면 두 번 도는 그 버그다.
     """
     current = get(app_db, request_id)
+    if current.get("followup_config"):
+        return followup.decision(app_db, request_id, actor_id, action, note,
+                                 followup_line_id, followup_steps, expected_step_order, followup_revision, followup_action)
+    if any(value is not None for value in (followup_line_id, followup_steps, followup_revision, followup_action)):
+        raise E.ApprovalError("후속 결재가 설정되지 않은 결재입니다.")
     now = _now()
     current_order = int(current.get("current_step_order") or 1)
 
@@ -528,7 +544,7 @@ def _settle_hooks(app_db, request_id: int, loaded: Dict[str, Any]) -> None:
     여기서 바로 할지, 남겨 둘지를 가른다
     ------------------------------------
     결정은 core 한 곳에서 나지만 **행위는 남의 파드에 있다**. 지식 컬렉션을
-    실제로 여는 코드는 xgen-documents 에, 클라우드·도구는 xgen-workflow 에
+    실제로 여는 코드는 xgen-documents 에, DB·도구는 xgen-workflow 에
     있다. core 가 그 함수를 부를 수는 없으므로, 소유가 다른 건은 훅을 돌리지
     않고 ``applied_at`` 을 비워 둔다 — 소유 서비스의 워커가 그것을 표식 삼아
     가져간다(:func:`claim_settlements`).
@@ -648,6 +664,8 @@ def _apply_blocks(app_db, loaded: Dict[str, Any]) -> str:
 def cancel(app_db, request_id: int, actor_id: int) -> Dict[str, Any]:
     """기안자의 회수 — **아무도 승인하지 않았을 때만**(engine 이 판정한다)."""
     current = get(app_db, request_id)
+    if current.get("followup_config"):
+        return followup.cancel(app_db, request_id, actor_id=actor_id)
     now = _now()
     E.cancel(current, current["steps"], actor_id, now)
     return _close_as_canceled(app_db, request_id, now, by="requester", note="")
@@ -665,6 +683,8 @@ def system_cancel(app_db, request_id: int, note: str) -> Dict[str, Any]:
     알린다 — 내가 승인한 건이 왜 사라졌는지는 알아야 한다.
     """
     current = get(app_db, request_id)
+    if current.get("followup_config"):
+        return followup.cancel(app_db, request_id, note=str(note or ""))
     if str(current.get("status") or "") != E.PENDING:
         return current              # 이미 끝난 건은 건드리지 않는다
     now = _now()
@@ -698,6 +718,44 @@ def _close_as_canceled(app_db, request_id: int, now, *, by: str, note: str) -> D
     out = get(app_db, request_id)
     _settle_hooks(app_db, request_id, out)     # 올려 둔 것이 있으면 치운다
     return get(app_db, request_id)
+
+
+#: 거둔 행위의 진행 중 결재를 회수할 때 남기는 사유 — 결재자가 알림으로 받는다.
+RETIRED_NOTE = "이 결재 종류는 더 이상 쓰지 않아 시스템이 회수했습니다."
+
+
+def retire_actions(app_db, note: str = RETIRED_NOTE) -> Dict[str, int]:
+    """거둔 행위(:data:`catalog.RETIRED`)의 뒷정리 — core 가 기동할 때 부른다(멱등).
+
+    카탈로그에서 뺀 행위는 등록되지 않으므로 새로 올라가지 않는다. 그런데 이미 **진행 중**
+    이던 결재는 결재자가 승인해도 적용할 곳이 없어 영영 끝나지 않는다 — 그래서 사유와 함께
+    시스템 회수한다(승인했던 결재자에게도 알린다). [결재 목록 설정] 의 정책 행도 치운다 —
+    남겨 두면 "결재 필수" 목록에 아무도 모르는 종류가 섞인다.
+
+    반환: ``{"canceled": N, "policies": M}``.
+    """
+    from xgen_sdk.approval import catalog
+
+    kinds = list(catalog.RETIRED)
+    if not kinds:
+        return {"canceled": 0, "policies": 0}
+    marks = ", ".join(["%s"] * len(kinds))
+    rows = _q(app_db,
+              f"SELECT id FROM approval_requests WHERE status = %s AND action_type IN ({marks})",
+              (E.PENDING, *kinds)) or []
+    canceled = 0
+    for row in rows:
+        try:
+            system_cancel(app_db, int(row["id"]), note)
+            canceled += 1
+        except Exception as exc:  # noqa: BLE001 — 한 건이 나머지를 막지 않는다
+            logger.warning("거둔 행위 결재 #%s 회수 실패: %s", row.get("id"), exc)
+    dropped = _q(app_db,
+                 f"DELETE FROM approval_action_policies WHERE action_type IN ({marks}) RETURNING action_type",
+                 tuple(kinds)) or []
+    if canceled or dropped:
+        logger.info("거둔 결재 행위 정리: 회수 %s건, 정책 %s개", canceled, len(dropped))
+    return {"canceled": canceled, "policies": len(dropped)}
 
 
 def find_pending_for_target(app_db, action_type: str, target_ref: str) -> Optional[Dict[str, Any]]:
@@ -775,6 +833,9 @@ def inbox(app_db, user_id: int, *, only_pending: bool = True, limit: int = 100) 
           JOIN approval_requests r ON r.id = s.request_id
           LEFT JOIN users u ON u.id = r.requester_id
          WHERE s.approver_id = %s {cond}
+           AND s.step_order = (SELECT own.step_order FROM approval_request_steps own
+                                WHERE own.request_id = r.id AND own.approver_id = s.approver_id
+                                ORDER BY (own.status = 'pending') DESC, own.step_order DESC LIMIT 1)
          ORDER BY r.created_at DESC
          LIMIT %s
         """,
@@ -824,7 +885,8 @@ def involved(app_db, user_id: int, states: Sequence[str], *, limit: int = 200) -
                EXISTS (SELECT 1 FROM approval_request_steps x
                         WHERE x.request_id = r.id AND x.approver_id = %s) AS i_approve,
                (SELECT x.status FROM approval_request_steps x
-                 WHERE x.request_id = r.id AND x.approver_id = %s) AS my_status,
+                 WHERE x.request_id = r.id AND x.approver_id = %s
+                 ORDER BY (x.status = 'pending') DESC, x.step_order DESC LIMIT 1) AS my_status,
                (SELECT COALESCE(cu.full_name, cu.username)
                   FROM approval_request_steps c
                   LEFT JOIN users cu ON cu.id = c.approver_id
@@ -1494,6 +1556,9 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
     **자기 단계의 칸만** 채울 수 있다. 남의 단계를 대신 채우면 그 단계의 판단이
     누구 것인지 알 수 없게 된다. 기안(0단계)은 기안자만.
     """
+    if not isinstance(app_db, TransactionDB) and get(app_db, request_id).get("followup_config"):
+        with followup.locked_request(app_db, request_id) as tx:
+            return fill_block(tx, request_id=request_id, block_id=block_id, actor_id=actor_id, data=data)
     rows = _q(app_db, """
         SELECT b.id, b.step_order, b.block_type, r.requester_id, r.status
         FROM approval_request_blocks b

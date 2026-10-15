@@ -2,8 +2,8 @@
 
 왜 한 곳에 모으나
 -----------------
-행위를 실제로 여는 코드는 세 레포에 흩어져 있다(배포는 workflow, 지식은
-documents, 클라우드·DB·도구는 workflow). 그런데 관리자가 "무엇을 결재 필수로
+행위를 실제로 여는 코드는 세 레포에 흩어져 있다(배포는 workflow, 지식·파일
+저장소는 documents, DB·도구는 workflow). 그런데 관리자가 "무엇을 결재 필수로
 할까" 를 고르는 화면은 core 에 있다. 목록을 각자 갖고 있으면 core 의 화면은
 자기가 아는 것만 보여 주고, **화면에 없는 행위는 영영 켤 수 없다** — 그리고
 아무도 그 사실을 모른다(오류가 안 난다).
@@ -31,7 +31,7 @@ documents, 클라우드·DB·도구는 workflow). 그런데 관리자가 "무엇
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 #: apply 를 실행하는 서비스. 결재 원장은 하나지만 **적용은 행위를 가진 쪽**이
 #: 한다 — core 가 남의 파드 안 함수를 부를 수는 없기 때문이다.
@@ -41,7 +41,6 @@ OWNER_WORKFLOW = "workflow"
 #: 화면에서 묶어 보여 줄 갈래.
 DOMAIN_DEPLOY = "배포"
 DOMAIN_KNOWLEDGE = "지식"
-DOMAIN_CLOUD = "클라우드"
 DOMAIN_DB = "DB"
 DOMAIN_TOOL = "도구"
 DOMAIN_FREE = "일반"
@@ -88,6 +87,15 @@ AGENT_DEPLOY = "agent.deploy"
 #: 승인될 때까지 **옛 정의가 계속 돈다.** 갱신 결재가 서비스를 내리면 아무도 누르지 않는다.
 AGENT_REDEPLOY = "agent.redeploy"
 
+#: 파일 저장소 업로드 — 올린 파일은 **결재가 끝나야** 쓸 수 있다.
+#:
+#: 업로드 자체는 끝난다(바이트는 저장소에 들어간다). 그 파일은 승인 전까지 목록에
+#: "결재 대기" 로만 보이고 검색·임베딩·온톨로지·에이전트 어디에도 닿지 않는다. 여러
+#: 파일을 한 번에 올리면 **한 건**으로 올라간다 — 파일마다 올리면 결재자가 같은 묶음을
+#: N 번 본다. 적용(승인 = 파일로 들이기, 반려 = 버리기)은 파일 저장소를 가진 documents 가
+#: 한다(workflow 의 적용 워커가 documents 내부 API 로 넘긴다 — filestore.embed 와 같은 길).
+FILESTORE_UPLOAD = "filestore.upload"
+
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
@@ -128,41 +136,14 @@ CATALOG: Tuple[ActionSpec, ...] = (
         OWNER_WORKFLOW, DOMAIN_KNOWLEDGE,
     ),
     ActionSpec(
+        FILESTORE_UPLOAD, "파일 저장소 업로드",
+        "파일 저장소에 파일을 올려 쓰는 것",
+        OWNER_WORKFLOW, DOMAIN_KNOWLEDGE,
+    ),
+    ActionSpec(
         "filestore.embed", "파일 저장소 임베딩",
         "파일 저장소의 파일을 검색 색인에 넣는 것",
         OWNER_WORKFLOW, DOMAIN_KNOWLEDGE,
-    ),
-
-    # ── 클라우드 ──
-    ActionSpec(
-        "cloud.storage_create", "클라우드 저장소 생성",
-        "내 클라우드에 새 저장소를 만드는 것",
-        OWNER_WORKFLOW, DOMAIN_CLOUD,
-    ),
-    ActionSpec(
-        "cloud.upload", "클라우드 업로드",
-        "내 클라우드에 파일을 올리는 것",
-        OWNER_WORKFLOW, DOMAIN_CLOUD,
-    ),
-    ActionSpec(
-        "cloud.update", "클라우드 파일 갱신",
-        "내 클라우드의 파일을 새 판으로 바꾸는 것",
-        OWNER_WORKFLOW, DOMAIN_CLOUD,
-    ),
-    ActionSpec(
-        "cloud.share", "클라우드 공유",
-        "내 클라우드의 폴더·파일을 다른 사람에게 여는 것",
-        OWNER_WORKFLOW, DOMAIN_CLOUD,
-    ),
-    ActionSpec(
-        "cloud.device_link", "PC 연결",
-        "접속기를 설치한 PC를 계정에 연결하는 것",
-        OWNER_WORKFLOW, DOMAIN_CLOUD,
-    ),
-    ActionSpec(
-        "cloud.agent_link", "에이전트 연결",
-        "에이전트가 내 클라우드 저장소를 쓰도록 연결하는 것",
-        OWNER_WORKFLOW, DOMAIN_CLOUD,
     ),
 
     # ── DB ──
@@ -187,9 +168,35 @@ CATALOG: Tuple[ActionSpec, ...] = (
 
 _BY_TYPE: Dict[str, ActionSpec] = {s.action_type: s for s in CATALOG}
 
+#: **거둔 행위** — 더는 결재로 올라가지 않는다(카탈로그에 없으므로 등록도 안 된다).
+#:
+#: 이름을 남기는 이유: 지난 결재 문서와 결재 로그는 이 종류를 계속 보여 줘야 한다 —
+#: 이름을 잃으면 ``cloud.upload`` 같은 코드가 그대로 화면에 나온다. 진행 중이던 결재는
+#: core 가 기동할 때 :func:`xgen_sdk.approval.store.retire_actions` 가 시스템 회수하고
+#: 정책 행을 치운다(적용할 곳이 없어 영영 끝나지 않는다).
+#:
+#: 2026-09-30 [파일 클라우드]를 사이트에서 내렸다 — 파일 저장소가 완전히 대신한다.
+RETIRED: Mapping[str, str] = {
+    "cloud.storage_create": "클라우드 저장소 생성",
+    "cloud.upload": "클라우드 업로드",
+    "cloud.update": "클라우드 파일 갱신",
+    "cloud.share": "클라우드 공유",
+    "cloud.device_link": "PC 연결",
+    "cloud.agent_link": "에이전트 연결",
+}
+
 
 def spec(action_type: str) -> Optional[ActionSpec]:
     return _BY_TYPE.get(str(action_type or ""))
+
+
+def label_of(action_type: str) -> str:
+    """사람이 읽는 이름 — 지금 행위든 거둔 행위든. 모르면 코드 그대로."""
+    key = str(action_type or "")
+    sp = _BY_TYPE.get(key)
+    if sp is not None:
+        return sp.label
+    return RETIRED.get(key, key)
 
 
 def gated_specs() -> Tuple[ActionSpec, ...]:

@@ -3,7 +3,7 @@
 왜 이 검사가 필요한가
 ---------------------
 행위를 실제로 여는 코드는 흩어져 있는데(배포는 workflow, 지식은 documents,
-클라우드·DB·도구는 workflow), 관리자가 "무엇을 결재 필수로 할까" 를 고르는
+DB·도구는 workflow), 관리자가 "무엇을 결재 필수로 할까" 를 고르는
 화면은 core 에 있다. 목록이 어긋나면 **화면에 없는 행위는 영영 켤 수 없고**,
 그 사실은 아무 오류도 내지 않는다.
 """
@@ -46,15 +46,14 @@ def test_every_catalogued_action_is_registered():
 def test_the_gated_set_is_what_xgen_actually_gates_today():
     """지금 XGEN 이 실제로 승인을 받는 행위 전부 — 전수 조사(2026-09-11)의 결론.
 
-    배포 2(처음·갱신) + RAG 통제 13. 여기서 무엇이 빠지면 그 행위는 결재로 옮겨지지
-    못한 채 옛 게이트에 남거나, 아무 통제 없이 열린다.
+    배포 2(처음·갱신) + 지식·파일 저장소 5 + DB 2 + 도구 1. 여기서 무엇이 빠지면 그 행위는
+    결재로 옮겨지지 못한 채 옛 게이트에 남거나, 아무 통제 없이 열린다. 클라우드 6종은
+    2026-09-30 [파일 클라우드]와 함께 거뒀다(RETIRED).
     """
     assert {s.action_type for s in catalog.gated_specs()} == {
         "agent.deploy", "agent.redeploy",
         "collection.create", "collection.upload", "collection.update",
-        "filestore.embed",
-        "cloud.storage_create", "cloud.upload", "cloud.update", "cloud.share",
-        "cloud.device_link", "cloud.agent_link",
+        "filestore.upload", "filestore.embed",
         "db.create", "db.share",
         "tool.publish",
     }
@@ -128,3 +127,28 @@ def test_deploy_and_redeploy_are_separate_actions():
     assert first.domain == again.domain == catalog.DOMAIN_DEPLOY
     assert again.gated and not again.user_submittable
     assert again.owner == catalog.OWNER_CORE
+
+
+def test_filestore_upload_is_a_gated_action_applied_by_the_workflow_worker():
+    """파일 저장소 업로드 — 승인 전에는 파일이 쓰이지 않는다. 적용은 workflow 워커가
+    documents 내부 API 로 넘긴다(filestore.embed 와 같은 길)."""
+    sp = catalog.spec(catalog.FILESTORE_UPLOAD)
+    assert sp is not None and sp.action_type == "filestore.upload"
+    assert sp.gated and not sp.user_submittable
+    assert sp.owner == catalog.OWNER_WORKFLOW
+    assert sp.domain == catalog.spec("filestore.embed").domain
+    assert registry.is_registered("filestore.upload")
+
+
+def test_retired_actions_keep_their_names_but_cannot_be_raised():
+    """거둔 행위는 새로 올라가지 않지만, 지난 결재 문서는 이름으로 읽혀야 한다."""
+    assert set(catalog.RETIRED) == {
+        "cloud.storage_create", "cloud.upload", "cloud.update", "cloud.share",
+        "cloud.device_link", "cloud.agent_link",
+    }
+    for key, label in catalog.RETIRED.items():
+        assert catalog.spec(key) is None and not registry.is_registered(key)
+        assert catalog.label_of(key) == label
+    assert catalog.label_of("agent.deploy") == "에이전트 배포"
+    assert catalog.label_of("unknown.kind") == "unknown.kind"
+    assert not (set(catalog.RETIRED) & {s.action_type for s in catalog.CATALOG})
