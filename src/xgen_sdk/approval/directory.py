@@ -82,6 +82,7 @@ def list_users(
     role_id: Optional[int] = None,
     query: str = "",
     limit: int = 200,
+    offset: int = 0,
 ) -> List[Dict[str, Any]]:
     """결재선에 세울 수 있는 사람들.
 
@@ -91,6 +92,11 @@ def list_users(
 
     ``query`` 는 이름·아이디·메일·부서·본부를 한꺼번에 훑는다. 사람마다
     기억하는 단서가 다르기 때문이다.
+
+    ``offset`` 으로 같은 순서(이름, 아이디, id)의 다음 묶음을 이어 받는다(2.13.0+).
+    한 번에 500명까지라, 그보다 많은 조직에서 뒤쪽 사람을 목록으로 고르려면
+    이어 받아야 한다. 이름이 같은 사람끼리도 순서가 흔들리지 않게 id 를 마지막
+    기준으로 둔다(묶음 경계에서 같은 사람이 두 번 나오거나 빠지지 않게).
     """
     where: List[str] = [_ACTIVE]
     params: List[Any] = []
@@ -107,14 +113,15 @@ def list_users(
         params += [like] * len(_SEARCH_COLUMNS)
 
     params.append(max(1, min(int(limit), 500)))
+    params.append(max(0, int(offset or 0)))
     rows = _q(
         app_db,
         f"""
         SELECT u.id, u.username, u.full_name, u.department, u.top_department
           FROM users u
          WHERE {" AND ".join(where)}
-         ORDER BY u.full_name NULLS LAST, u.username
-         LIMIT %s
+         ORDER BY u.full_name NULLS LAST, u.username, u.id
+         LIMIT %s OFFSET %s
         """,
         params,
     )

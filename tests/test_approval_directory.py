@@ -143,4 +143,20 @@ def test_the_department_comes_back_for_display(db):
 
 def test_the_limit_is_capped(db):
     directory.list_users(db, limit=99999)
-    assert db.params[-1] == 500
+    assert db.params[-2] == 500  # 마지막 자리는 offset (2.13.0)
+
+
+# ── 이어 받기 (2.13.0) ────────────────────────────────────────────────
+
+
+def test_offset_continues_the_same_order(db):
+    """500명이 넘는 조직에서도 뒤쪽 사람을 목록으로 고를 수 있게 다음 묶음을 이어 받는다."""
+    directory.list_users(db, query="jang", limit=50, offset=100)
+    assert db.sql.endswith("ORDER BY u.full_name NULLS LAST, u.username, u.id LIMIT %s OFFSET %s")
+    assert db.params[-2:] == (50, 100)
+
+
+def test_offset_defaults_to_the_first_page(db):
+    """offset 을 모르는 옛 호출은 예전처럼 처음부터 받는다."""
+    directory.list_users(db)
+    assert db.params[-2:] == (200, 0)
