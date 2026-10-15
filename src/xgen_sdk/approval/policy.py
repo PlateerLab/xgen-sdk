@@ -115,10 +115,15 @@ def list_all(app_db) -> List[Dict[str, Any]]:
 
 
 def required_actions(app_db) -> List[str]:
-    """지금 결재를 타는 행위들 — 화면 요약과 위성 서비스의 빠른 판정용."""
+    """지금 결재를 타는 행위들 — 화면 요약과 위성 서비스의 빠른 판정용.
+
+    카탈로그에 있는 것만 — 거둔 행위(:data:`catalog.RETIRED`)의 정책 행이 아직 치워지기
+    전이라도 화면이 그 종류를 "결재 필수" 로 알아서는 안 된다.
+    """
     return [r["action_type"] for r in _q(
         app_db,
-        "SELECT action_type FROM approval_action_policies WHERE required = TRUE")]
+        "SELECT action_type FROM approval_action_policies WHERE required = TRUE")
+        if catalog.spec(r["action_type"])]
 
 
 # ── 쓰기 ──────────────────────────────────────────────────────────────

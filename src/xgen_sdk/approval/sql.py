@@ -12,6 +12,7 @@ store·directory·notifier 가 같은 것을 쓴다. 한 곳에 모은 이유는
 from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
+from contextlib import contextmanager
 
 
 def rows(result: Any) -> List[Dict[str, Any]]:
@@ -25,3 +26,30 @@ def rows(result: Any) -> List[Dict[str, Any]]:
 
 def q(app_db, sql: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
     return rows(app_db.execute_raw_query(sql, tuple(params)))
+
+
+class TransactionDB:
+    """One connection for a compound approval transition; never commits per query."""
+
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute_raw_query(self, sql, params=()):
+        with self.connection.cursor() as cur:
+            cur.execute(sql, tuple(params) if params else None)
+            data = cur.fetchall() if cur.description else []
+            if data and not isinstance(data[0], dict):
+                names = [column[0] for column in cur.description]
+                data = [dict(zip(names, row)) for row in data]
+            return {"data": data, "error": None}
+
+
+@contextmanager
+def transaction(app_db):
+    if isinstance(app_db, TransactionDB):
+        yield app_db
+        return
+    manager = getattr(app_db, "config_db_manager", None) or app_db
+    with manager.get_connection() as connection:
+        with connection.transaction():
+            yield TransactionDB(connection)
