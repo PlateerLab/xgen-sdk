@@ -171,6 +171,26 @@ upload_file("documents", "reports/q4.pdf", "/tmp/q4.pdf")
 url = get_presigned_url("documents", "reports/q4.pdf", expires=3600)
 ```
 
+#### Large uploads and downloads — `xgen_sdk.storage.transfer` (2.14.0+)
+
+Client uploads reach services through the backend-gateway's resumable chunked
+upload, up to 1 GiB per file. Never `await file.read()` a whole upload: spool it
+to disk and work with the path. Downloads stream from a temp file instead of
+holding the object in memory.
+
+```python
+from xgen_sdk.storage.transfer import spooled, upload_max_bytes, storage_file_response
+
+async with spooled(file, upload_max_bytes()) as (path, size):   # 413 past the limit
+    upload_file(client, path, object_name, bucket_name=bucket)
+
+return await storage_file_response(client, object_name, bucket_name=bucket,
+                                   filename="보고서.pdf", media_type="application/pdf")
+```
+
+`XGEN_UPLOAD_MAX_BYTES` (default 1 GiB) is the platform-wide limit and matches the
+gateway's `UPLOAD_MAX_FILE_BYTES`.
+
 ### Auth — `xgen_sdk.auth`
 
 ABAC-style permission system with FastAPI integration. Permissions support
