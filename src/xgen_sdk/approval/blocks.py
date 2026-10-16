@@ -42,6 +42,12 @@ EVALUATION = "evaluation"
 
 #: 예전 종류 이름 → 지금 이름. 저장된 행에 남은 옛 이름을 읽을 때만 쓴다.
 #: 목록(:func:`catalog`)에는 나오지 않는다 — 새로 고를 이름이 아니다.
+#: [파일 첨부] 칸의 파일 하나 상한 — 플랫폼 공통 업로드 상한(1GiB, 게이트웨이 공통 조각 업로드)과 같다.
+ATTACHMENT_MAX_BYTES = 1024 * 1024 * 1024
+#: 2.14.0 까지의 기본값(50MB). 양식 편집 화면에는 이 값을 고치는 칸이 없어, 저장된 이 값은 언제나
+#: 그때의 기본값이다 — :func:`xgen_sdk.approval.store.raise_legacy_attachment_limits` 가 올린다.
+LEGACY_ATTACHMENT_MAX_BYTES = 52428800
+
 LEGACY_BLOCK_TYPES: Dict[str, str] = {
     "risk_assessment": EVALUATION,
 }
@@ -191,7 +197,7 @@ REGISTRY: Dict[str, BlockSpec] = {
         ATTACHMENTS, "파일 첨부",
         description="파일을 첨부하는 칸.",
         is_filled=_has_files,
-        default_config={"extensions": [], "max_count": 10, "max_bytes": 52428800},
+        default_config={"extensions": [], "max_count": 10, "max_bytes": ATTACHMENT_MAX_BYTES},
     ),
     AGENT_DEV_PLAN: BlockSpec(
         AGENT_DEV_PLAN, "Agent 기획서",

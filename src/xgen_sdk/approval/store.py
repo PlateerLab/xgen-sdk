@@ -1335,6 +1335,35 @@ def seed_builtin_forms(app_db) -> List[str]:
     return made
 
 
+def raise_legacy_attachment_limits(app_db) -> int:
+    """[파일 첨부] 칸에 **옛 기본 상한(50MB)이 글자 그대로** 남아 있으면 지금 상한(1GiB)으로 올린다.
+
+    양식 편집 화면은 칸을 추가할 때 기본 설정을 복사해 저장하고, 상한을 고치는 칸은 없다. 그래서
+    저장된 50MB 는 조직이 고른 값이 아니라 그때의 기본값이다 — 업로드가 1GiB 까지 되는데(게이트웨이
+    공통 조각 업로드) 결재 첨부만 50MB 에 묶여 있으면 큰 문서·동영상을 결재에 붙이지 못한다.
+    다른 값(직접 정한 상한)은 건드리지 않는다. 진행 중인 결재의 칸 스냅샷도 같은 규칙으로 올린다.
+
+    기동 때마다 부를 수 있게 멱등이다. 바꾼 칸 수를 돌려준다.
+    """
+    kinds = [blocks_mod.ATTACHMENTS] + [old for old, new in blocks_mod.LEGACY_BLOCK_TYPES.items()
+                                        if new == blocks_mod.ATTACHMENTS]
+    marks = ", ".join(["%s"] * len(kinds))
+    changed = 0
+    for table in ("approval_form_blocks", "approval_request_blocks"):
+        # table 은 위 튜플의 두 이름뿐이다 — 사용자 입력이 SQL 에 들어가지 않는다.
+        for row in _q(app_db, f"SELECT id, config FROM {table} WHERE block_type IN ({marks})", tuple(kinds)):
+            cfg = blocks_mod.parse_data(row.get("config"))
+            if not isinstance(cfg, dict) or cfg.get("max_bytes") != blocks_mod.LEGACY_ATTACHMENT_MAX_BYTES:
+                continue
+            cfg["max_bytes"] = blocks_mod.ATTACHMENT_MAX_BYTES
+            _q(app_db, f"UPDATE {table} SET config = %s WHERE id = %s",
+               (json.dumps(cfg, ensure_ascii=False), row["id"]))
+            changed += 1
+    if changed:
+        logger.info("결재 [파일 첨부] 칸 %d개의 옛 기본 상한(50MB)을 1GiB 로 올렸다", changed)
+    return changed
+
+
 def _backfill_builtin_notice(app_db, row: Dict[str, Any], template: Dict[str, Any]) -> None:
     """우리가 심은 양식의 **비어 있는** 안내만 채운다.
 
