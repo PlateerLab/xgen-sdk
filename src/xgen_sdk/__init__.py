@@ -18,6 +18,7 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.anomaly: 시스템 알람 운영 이벤트 적재 · LLM 호출 결과 기록 (2.11.0+)
     - xgen_sdk.approval.followup: 같은 문서에 후속 결재선 이어 붙이기 (2.12.0+)
     - xgen_sdk.approval.directory.list_users(offset=): 결재자 목록 이어 받기 (2.13.0+)
+    - xgen_sdk.storage.transfer: 큰 업로드를 디스크로 받기 · 저장소 파일을 메모리 없이 응답 (2.14.0+)
 
 Quick Start:
     from xgen_sdk import XgenApp
@@ -29,7 +30,7 @@ Quick Start:
     config = xgen.config   # RedisConfigManager 또는 LocalConfigManager
 """
 
-__version__ = "2.13.0"
+__version__ = "2.14.0"
 
 from xgen_sdk.app import XgenApp
 
