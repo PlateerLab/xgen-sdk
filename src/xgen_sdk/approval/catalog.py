@@ -96,6 +96,10 @@ AGENT_REDEPLOY = "agent.redeploy"
 #: 한다(workflow 의 적용 워커가 documents 내부 API 로 넘긴다 — filestore.embed 와 같은 길).
 FILESTORE_UPLOAD = "filestore.upload"
 
+#: Canonical Agent Session에서 정확한 연결·도구·인자 digest로 묶인 1회 기기 실행.
+#: 승인은 권한 기록만 남기며 원격 부작용은 현재 세션/기기 검증 후 Workflow가 수행한다.
+CAPABILITY_INVOKE = "capability.invoke"
+
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
@@ -162,6 +166,11 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         "tool.publish", "도구 스토어 게시",
         "에이전트가 만든 도구를 전체 사용자에게 게시하는 것",
+        OWNER_WORKFLOW, DOMAIN_TOOL,
+    ),
+    ActionSpec(
+        CAPABILITY_INVOKE, "기기 도구 실행",
+        "검증된 Agent Session에서 선택한 기기의 정확한 도구와 입력으로 한 번 실행하는 것",
         OWNER_WORKFLOW, DOMAIN_TOOL,
     ),
 )
