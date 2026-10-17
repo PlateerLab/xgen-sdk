@@ -408,12 +408,16 @@ def test_empty_matches_hide_nothing_and_break_nothing():
 
 
 def test_large_html_with_one_hit_stays_light():
-    import resource
+    import sys
+
+    resource = pytest.importorskip("resource")
 
     page = "<pre>" + "일반 로그 줄 R&amp;D " * 250000 + "연락 010-1234-5678</pre>"
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     out = cp.strip_bytes(page.encode(), "big.html", _rules(PHONE))
-    grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+    # getrusage reports bytes on Darwin and KiB on Linux.
+    rss_units_per_mb = 1024 * 1024 if sys.platform == "darwin" else 1024
+    grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / rss_units_per_mb
     assert out.hits == 1 and out.content.decode().endswith("연락 ***-****-5678</pre>")
     assert grown_mb < 300, f"글자마다 표를 만들지 않는다 (+{grown_mb:.0f} MB)"
 

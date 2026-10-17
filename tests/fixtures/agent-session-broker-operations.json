@@ -1,0 +1,1018 @@
+{
+  "valid": {
+    "identifiers": [
+      {
+        "name": "canonical request identifiers",
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "turn_id": "22222222-2222-4222-8222-222222222222"
+      }
+    ],
+    "lists": [
+      {
+        "name": "empty operation list",
+        "response": []
+      },
+      {
+        "name": "all public operation references",
+        "response": [
+          {
+            "invocation_id": "33333333-3333-4333-8333-333333333333",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "44444444-4444-4444-8444-444444444444",
+            "operation_id": "documents.collection.documents.list"
+          },
+          {
+            "invocation_id": "55555555-5555-4555-8555-555555555555",
+            "operation_id": "workflow.actor.authorize"
+          },
+          {
+            "invocation_id": "66666666-6666-4666-8666-666666666666",
+            "operation_id": "documents.attachment.index"
+          },
+          {
+            "invocation_id": "77777777-7777-4777-8777-777777777777",
+            "operation_id": "workflow.code.execute"
+          },
+          {
+            "invocation_id": "88888888-8888-4888-8888-888888888888",
+            "operation_id": "workflow.attachments.stage"
+          }
+        ]
+      }
+    ],
+    "metadata": [
+      {
+        "name": "documents running metadata",
+        "reference": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list"
+        },
+        "response": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list",
+          "state": "running",
+          "cancel_requested": false,
+          "target_cleanup": "not_applicable",
+          "result_available": false,
+          "expires_at": 1
+        }
+      },
+      {
+        "name": "sandbox completed result metadata",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 9007199254740991
+        }
+      },
+      {
+        "name": "sandbox cancelled cleanup pending metadata",
+        "reference": {
+          "invocation_id": "88888888-8888-4888-8888-888888888888",
+          "operation_id": "workflow.attachments.stage"
+        },
+        "response": {
+          "invocation_id": "88888888-8888-4888-8888-888888888888",
+          "operation_id": "workflow.attachments.stage",
+          "state": "cancelled",
+          "cancel_requested": true,
+          "target_cleanup": "pending",
+          "result_available": false,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "sandbox unknown cleanup metadata",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "unknown",
+          "cancel_requested": true,
+          "target_cleanup": "unknown",
+          "result_available": false,
+          "expires_at": 1770000030
+        }
+      }
+    ],
+    "cancellations": [
+      {
+        "name": "cancellation accepted",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "cancel_requested": true
+        }
+      }
+    ]
+  },
+  "invalid": {
+    "identifiers": [
+      {
+        "name": "nil session identifier",
+        "field": "session_id",
+        "value": "00000000-0000-0000-0000-000000000000"
+      },
+      {
+        "name": "uppercase turn identifier",
+        "field": "turn_id",
+        "value": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+      },
+      {
+        "name": "noncanonical invocation identifier",
+        "field": "invocation_id",
+        "value": "{77777777-7777-4777-8777-777777777777}"
+      },
+      {
+        "name": "null identifier",
+        "field": "session_id",
+        "value": null
+      }
+    ],
+    "lists": [
+      {
+        "name": "list response is null",
+        "response": null
+      },
+      {
+        "name": "reference has private result field",
+        "response": [
+          {
+            "invocation_id": "33333333-3333-4333-8333-333333333333",
+            "operation_id": "documents.collections.list",
+            "result": {
+              "private": "redacted"
+            }
+          }
+        ]
+      },
+      {
+        "name": "reference has unknown operation",
+        "response": [
+          {
+            "invocation_id": "33333333-3333-4333-8333-333333333333",
+            "operation_id": "documents.secret.read"
+          }
+        ]
+      },
+      {
+        "name": "duplicate invocation identifiers",
+        "response": [
+          {
+            "invocation_id": "33333333-3333-4333-8333-333333333333",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "33333333-3333-4333-8333-333333333333",
+            "operation_id": "workflow.code.execute"
+          }
+        ]
+      },
+      {
+        "name": "list exceeds 128 references",
+        "response": [
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000001",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000002",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000003",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000004",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000005",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000006",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000007",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000008",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000009",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000010",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000011",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000012",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000013",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000014",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000015",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000016",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000017",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000018",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000019",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000020",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000021",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000022",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000023",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000024",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000025",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000026",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000027",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000028",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000029",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000030",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000031",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000032",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000033",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000034",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000035",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000036",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000037",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000038",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000039",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000040",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000041",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000042",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000043",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000044",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000045",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000046",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000047",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000048",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000049",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000050",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000051",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000052",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000053",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000054",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000055",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000056",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000057",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000058",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000059",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000060",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000061",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000062",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000063",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000064",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000065",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000066",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000067",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000068",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000069",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000070",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000071",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000072",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000073",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000074",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000075",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000076",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000077",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000078",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000079",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000080",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000081",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000082",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000083",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000084",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000085",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000086",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000087",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000088",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000089",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000090",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000091",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000092",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000093",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000094",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000095",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000096",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000097",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000098",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000099",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000100",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000101",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000102",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000103",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000104",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000105",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000106",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000107",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000108",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000109",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000110",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000111",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000112",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000113",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000114",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000115",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000116",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000117",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000118",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000119",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000120",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000121",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000122",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000123",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000124",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000125",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000126",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000127",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000128",
+            "operation_id": "documents.collections.list"
+          },
+          {
+            "invocation_id": "90000000-0000-4000-8000-000000000129",
+            "operation_id": "documents.collections.list"
+          }
+        ]
+      }
+    ],
+    "metadata": [
+      {
+        "name": "stale invocation metadata",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "99999999-9999-4999-8999-999999999999",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "wrong operation metadata",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.attachments.stage",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "metadata exposes private result",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 1770000030,
+          "result": {
+            "private": "redacted"
+          }
+        }
+      },
+      {
+        "name": "metadata is null",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": null
+      },
+      {
+        "name": "boolean expiry",
+        "reference": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list"
+        },
+        "response": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list",
+          "state": "running",
+          "cancel_requested": false,
+          "target_cleanup": "not_applicable",
+          "result_available": false,
+          "expires_at": true
+        }
+      },
+      {
+        "name": "zero expiry",
+        "reference": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list"
+        },
+        "response": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list",
+          "state": "running",
+          "cancel_requested": false,
+          "target_cleanup": "not_applicable",
+          "result_available": false,
+          "expires_at": 0
+        }
+      },
+      {
+        "name": "expiry exceeds safe integer",
+        "reference": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list"
+        },
+        "response": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list",
+          "state": "running",
+          "cancel_requested": false,
+          "target_cleanup": "not_applicable",
+          "result_available": false,
+          "expires_at": 9007199254740992
+        }
+      },
+      {
+        "name": "non-sandbox result availability",
+        "reference": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list"
+        },
+        "response": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "not_applicable",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "running sandbox result availability",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "running",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "non-sandbox cleanup pending",
+        "reference": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list"
+        },
+        "response": {
+          "invocation_id": "33333333-3333-4333-8333-333333333333",
+          "operation_id": "documents.collections.list",
+          "state": "running",
+          "cancel_requested": false,
+          "target_cleanup": "pending",
+          "result_available": false,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "sandbox cleanup not applicable",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "not_applicable",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "unknown state value",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "queued",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "unknown cleanup value",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "removed",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "numeric cancel requested",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": 1,
+          "target_cleanup": "complete",
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "numeric result available",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": "complete",
+          "result_available": 1,
+          "expires_at": 1770000030
+        }
+      },
+      {
+        "name": "null cleanup",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute",
+          "state": "completed",
+          "cancel_requested": false,
+          "target_cleanup": null,
+          "result_available": true,
+          "expires_at": 1770000030
+        }
+      }
+    ],
+    "cancellations": [
+      {
+        "name": "stale invocation cancellation",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "99999999-9999-4999-8999-999999999999",
+          "cancel_requested": true
+        }
+      },
+      {
+        "name": "cancellation not accepted",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "cancel_requested": false
+        }
+      },
+      {
+        "name": "cancellation exposes cleanup",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "cancel_requested": true,
+          "target_cleanup": "complete"
+        }
+      },
+      {
+        "name": "cancellation is null",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": null
+      },
+      {
+        "name": "numeric cancellation acknowledgement",
+        "reference": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "operation_id": "workflow.code.execute"
+        },
+        "response": {
+          "invocation_id": "77777777-7777-4777-8777-777777777777",
+          "cancel_requested": 1
+        }
+      }
+    ]
+  }
+}
