@@ -20,6 +20,7 @@ xgen-sdk: XGen Platform Shared SDK
     - xgen_sdk.approval.directory.list_users(offset=): 결재자 목록 이어 받기 (2.13.0+)
     - xgen_sdk.storage.transfer: 큰 업로드를 디스크로 받기 · 저장소 파일을 메모리 없이 응답 (2.14.0+)
     - xgen_sdk.approval: [파일 첨부] 칸 기본 상한 1GiB · 옛 기본값(50MB) 올리기 raise_legacy_attachment_limits (2.15.0+)
+    - xgen_sdk.storage.folder_zip: 폴더 하나를 zip 으로 흘려 보내기(plan_tree · stream), 파일 저장소 · 에이전트 스토리지 공용 (2.16.0+)
 
 Quick Start:
     from xgen_sdk import XgenApp
@@ -31,7 +32,7 @@ Quick Start:
     config = xgen.config   # RedisConfigManager 또는 LocalConfigManager
 """
 
-__version__ = "2.15.0"
+__version__ = "2.16.0"
 
 from xgen_sdk.app import XgenApp
 
