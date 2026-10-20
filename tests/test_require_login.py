@@ -10,8 +10,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import time
 
 import pytest
+from Crypto.Hash import SHA256
+from Crypto.PublicKey import RSA
+from Crypto.Signature import pkcs1_15
 from fastapi import HTTPException
 from starlette.requests import Request
 
@@ -19,7 +25,61 @@ from xgen_sdk.auth import require_login, require_perm
 from xgen_sdk.auth.permission_registry import registry
 
 
+PRIVATE_KEY = RSA.generate(2048)
+
+
+@pytest.fixture(autouse=True)
+def _gateway_public_key(monkeypatch):
+    monkeypatch.setenv("XGEN_GATEWAY_PUBLIC_KEY_PEM", PRIVATE_KEY.public_key().export_key().decode("ascii"))
+    monkeypatch.setenv("XGEN_SERVICE_NAME", "xgen-workflow")
+
+
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _gateway_token(headers: dict[str, str]) -> str:
+    canonical = {
+        "x-user-id": headers["X-User-ID"],
+        "x-user-name": headers["X-User-Name"],
+        "x-user-superuser": headers.get("X-User-Superuser", "false"),
+        "x-user-roles": headers.get("X-User-Roles", ""),
+        "x-user-permissions": headers.get("X-User-Permissions", ""),
+        "x-user-supervision-full": headers.get("X-User-Supervision-Full", ""),
+    }
+    now = int(time.time())
+    protected = _b64(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":"), sort_keys=True).encode())
+    payload = _b64(
+        json.dumps(
+            {
+                "iss": "xgen-gateway",
+                "aud": "xgen-workflow",
+                "type": "principal",
+                "iat": now,
+                "exp": now + 60,
+                "headers": canonical,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    )
+    signing_input = f"{protected}.{payload}".encode("ascii")
+    signature = pkcs1_15.new(PRIVATE_KEY).sign(SHA256.new(signing_input))
+    return f"{protected}.{payload}.{_b64(signature)}"
+
+
 def _request(headers: dict[str, str] | None = None) -> Request:
+    if headers:
+        token = _gateway_token(headers)
+        headers = {
+            "X-User-ID": headers["X-User-ID"],
+            "X-User-Name": headers["X-User-Name"],
+            "X-User-Superuser": headers.get("X-User-Superuser", "false"),
+            "X-User-Roles": headers.get("X-User-Roles", ""),
+            "X-User-Permissions": headers.get("X-User-Permissions", ""),
+            "X-User-Supervision-Full": headers.get("X-User-Supervision-Full", ""),
+            "X-Xgen-Principal": token,
+        }
     raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     scope = {"type": "http", "method": "GET", "path": "/", "headers": raw, "query_string": b""}
     return Request(scope)

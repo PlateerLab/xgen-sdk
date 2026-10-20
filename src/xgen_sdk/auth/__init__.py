@@ -28,6 +28,14 @@ from xgen_sdk.auth.gateway import (
     require_superuser,
     extract_user_id,
 )
+from xgen_sdk.auth.principal import (
+    PrincipalConfigurationError,
+    PrincipalMiddleware,
+    PrincipalValidationError,
+    get_verified_principal_headers,
+    service_principal_headers,
+    sign_principal_for_service,
+)
 from xgen_sdk.auth.permission_constants import (
     permission_string,
     all_permission_strings,
@@ -65,6 +73,12 @@ __all__ = [
     "require_any_permission",
     "require_superuser",
     "extract_user_id",
+    "PrincipalConfigurationError",
+    "PrincipalMiddleware",
+    "PrincipalValidationError",
+    "get_verified_principal_headers",
+    "service_principal_headers",
+    "sign_principal_for_service",
     # constants (utility)
     "permission_string",
     "all_permission_strings",

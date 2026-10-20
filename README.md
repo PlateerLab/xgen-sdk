@@ -199,8 +199,11 @@ The decorator pattern doubles as a self-registering permission catalog —
 the act of declaring an endpoint is the act of declaring its permission.
 
 ```python
-from fastapi import Depends, Request
-from xgen_sdk.auth import require_perm, require_any_perm, require_superuser
+from fastapi import Depends, FastAPI, Request
+from xgen_sdk.auth import PrincipalMiddleware, require_perm, require_any_perm, require_superuser
+
+app = FastAPI()
+app.add_middleware(PrincipalMiddleware)
 
 @router.get("/roles")
 async def list_roles(
@@ -217,6 +220,30 @@ async def reset(_=Depends(require_superuser())):
 At startup, call `validate_and_sync(db)` to push all decorator-declared
 permissions into the database — the frontend then reads them back to build
 its role-assignment UI. No more drift between code and DB.
+
+Gateway identity headers are accepted only when their exact values are bound to
+an RS256 `X-Xgen-Principal` assertion. Configure every receiving service with
+the Gateway's public key in `XGEN_GATEWAY_PUBLIC_KEY_PEM`; only the Gateway holds
+the corresponding private key. Set `XGEN_SERVICE_NAME` to the exact audience
+that the Gateway uses for that service; broad or missing audiences are rejected.
+For scoped service-to-service delegation, issuers use `XGEN_SERVICE_NAME` and
+`XGEN_SERVICE_SIGNING_KEY`; receivers configure an explicit JSON trust map:
+
+```json
+{
+  "workflow-service": {
+    "key": "a-distinct-secret-with-at-least-32-bytes",
+    "permissions": ["document:read", "workflow:execute"]
+  }
+}
+```
+
+Set that JSON as `XGEN_TRUSTED_SERVICES`. Service assertions cannot grant
+superuser or wildcard permissions, and their declared permissions must be a
+subset of the issuer's configured list. Use `get_verified_principal_headers()`
+only to forward an existing verified proof within the same audience. To call a
+different backend, use `service_principal_headers(..., audience="target-service")`
+with a user profile obtained from trusted server state.
 
 ### Logging — `xgen_sdk.logging`
 
