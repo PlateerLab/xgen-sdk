@@ -26,7 +26,10 @@ from xgen_sdk.auth import (
 
 PRIVATE_KEY = RSA.generate(2048)
 PUBLIC_KEY_PEM = PRIVATE_KEY.public_key().export_key().decode("ascii")
+PREVIOUS_PRIVATE_KEY = RSA.generate(2048)
+PREVIOUS_PUBLIC_KEY_PEM = PREVIOUS_PRIVATE_KEY.public_key().export_key().decode("ascii")
 SERVICE_KEY = "service-test-key-that-is-at-least-32-bytes"
+PREVIOUS_SERVICE_KEY = "previous-service-test-key-at-least-32-bytes"
 CANONICAL = {
     "x-user-id": "42",
     "x-user-name": "Kim%20Hae-soo",
@@ -39,6 +42,9 @@ CANONICAL = {
 
 @pytest.fixture(autouse=True)
 def _principal_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("XGEN_GATEWAY_PUBLIC_KEYS", raising=False)
+    monkeypatch.delenv("XGEN_GATEWAY_KEY_ID", raising=False)
+    monkeypatch.delenv("XGEN_SERVICE_KEY_ID", raising=False)
     monkeypatch.setenv("XGEN_GATEWAY_PUBLIC_KEY_PEM", PUBLIC_KEY_PEM)
     monkeypatch.setenv("XGEN_SERVICE_NAME", "xgen-workflow")
     monkeypatch.setenv(
@@ -63,6 +69,7 @@ def _gateway_token(
     *,
     claim_overrides: Mapping[str, object] | None = None,
     protected: Mapping[str, object] | None = None,
+    private_key: RSA.RsaKey = PRIVATE_KEY,
 ) -> str:
     now = int(time.time())
     claims: dict[str, object] = {
@@ -78,7 +85,7 @@ def _gateway_token(
     encoded_header = _b64(json.dumps(jwt_header, separators=(",", ":"), sort_keys=True).encode())
     encoded_claims = _b64(json.dumps(claims, separators=(",", ":"), sort_keys=True).encode())
     signing_input = f"{encoded_header}.{encoded_claims}".encode("ascii")
-    signature = pkcs1_15.new(PRIVATE_KEY).sign(SHA256.new(signing_input))
+    signature = pkcs1_15.new(private_key).sign(SHA256.new(signing_input))
     return f"{encoded_header}.{encoded_claims}.{_b64(signature)}"
 
 
@@ -168,6 +175,63 @@ def test_gateway_principal_rejects_extra_payload_fields():
     assert exc.value.status_code == 401
 
 
+def test_gateway_keyring_accepts_current_and_bounded_previous_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cutoff = int(time.time()) + 120
+    monkeypatch.setenv("XGEN_GATEWAY_KEY_ID", "current")
+    monkeypatch.setenv(
+        "XGEN_GATEWAY_PUBLIC_KEYS",
+        json.dumps(
+            {
+                "current": {"key": PUBLIC_KEY_PEM},
+                "previous": {"key": PREVIOUS_PUBLIC_KEY_PEM, "not_after": cutoff},
+            }
+        ),
+    )
+
+    current = _signed_request(protected={"alg": "RS256", "typ": "JWT", "kid": "current"})
+    previous = _signed_request(
+        protected={"alg": "RS256", "typ": "JWT", "kid": "previous"},
+        private_key=PREVIOUS_PRIVATE_KEY,
+    )
+
+    assert get_user_info_by_gateway(current)["user_id"] == 42
+    assert get_user_info_by_gateway(previous)["user_id"] == 42
+
+
+def test_gateway_keyring_rejects_unkeyed_unknown_and_overlapping_previous_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = int(time.time())
+    monkeypatch.setenv("XGEN_GATEWAY_KEY_ID", "current")
+    monkeypatch.setenv(
+        "XGEN_GATEWAY_PUBLIC_KEYS",
+        json.dumps(
+            {
+                "current": {"key": PUBLIC_KEY_PEM},
+                "previous": {"key": PREVIOUS_PUBLIC_KEY_PEM, "not_after": now + 30},
+            }
+        ),
+    )
+    candidates = [
+        _signed_request(),
+        _signed_request(
+            protected={"alg": "RS256", "typ": "JWT", "kid": "unknown"}
+        ),
+        _signed_request(
+            protected={"alg": "RS256", "typ": "JWT", "kid": "previous"},
+            private_key=PREVIOUS_PRIVATE_KEY,
+            claim_overrides={"iat": now, "exp": now + 60},
+        ),
+    ]
+
+    for request in candidates:
+        with pytest.raises(HTTPException) as exc:
+            get_user_info_by_gateway(request)
+        assert exc.value.status_code == 401
+
+
 @pytest.mark.parametrize("duplicate", ["x-user-id", "x-xgen-principal"])
 def test_gateway_principal_rejects_duplicate_security_headers(duplicate: str):
     request = _signed_request()
@@ -216,6 +280,107 @@ def test_service_assertion_is_scoped_and_accepted():
     assert session["user_id"] == 7
     assert session["permissions"] == {"document:read"}
     assert session["is_superuser"] is False
+
+
+def test_service_keyring_accepts_current_and_bounded_previous_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = int(time.time())
+    monkeypatch.setenv(
+        "XGEN_TRUSTED_SERVICES",
+        json.dumps(
+            {
+                "workflow-service": {
+                    "keys": {
+                        "current": {"key": SERVICE_KEY},
+                        "previous": {
+                            "key": PREVIOUS_SERVICE_KEY,
+                            "not_after": now + 120,
+                        },
+                    },
+                    "permissions": ["document:read"],
+                }
+            }
+        ),
+    )
+    delegated = {
+        "X-User-ID": "7",
+        "X-User-Name": "worker",
+        "X-User-Permissions": "document:read",
+    }
+
+    current = service_principal_headers(
+        delegated,
+        audience="xgen-workflow",
+        service_name="workflow-service",
+        signing_key=SERVICE_KEY,
+        key_id="current",
+    )
+    previous = service_principal_headers(
+        delegated,
+        audience="xgen-workflow",
+        service_name="workflow-service",
+        signing_key=PREVIOUS_SERVICE_KEY,
+        key_id="previous",
+    )
+
+    assert get_user_info_by_gateway(_request(current))["user_id"] == 7
+    assert get_user_info_by_gateway(_request(previous))["user_id"] == 7
+
+
+def test_service_keyring_rejects_unkeyed_revoked_and_cutoff_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = int(time.time())
+    delegated = {
+        "X-User-ID": "7",
+        "X-User-Name": "worker",
+        "X-User-Permissions": "document:read",
+    }
+    monkeypatch.setenv(
+        "XGEN_TRUSTED_SERVICES",
+        json.dumps(
+            {
+                "workflow-service": {
+                    "keys": {
+                        "current": {"key": SERVICE_KEY},
+                        "previous": {
+                            "key": PREVIOUS_SERVICE_KEY,
+                            "not_after": now + 30,
+                        },
+                    },
+                    "permissions": ["document:read"],
+                }
+            }
+        ),
+    )
+    unkeyed = service_principal_headers(
+        delegated,
+        audience="xgen-workflow",
+        service_name="workflow-service",
+        signing_key=SERVICE_KEY,
+    )
+    overlap = service_principal_headers(
+        delegated,
+        audience="xgen-workflow",
+        service_name="workflow-service",
+        signing_key=PREVIOUS_SERVICE_KEY,
+        key_id="previous",
+        now=now,
+        ttl_seconds=60,
+    )
+    revoked = service_principal_headers(
+        delegated,
+        audience="xgen-workflow",
+        service_name="workflow-service",
+        signing_key=PREVIOUS_SERVICE_KEY,
+        key_id="revoked",
+    )
+
+    for headers in (unkeyed, overlap, revoked):
+        with pytest.raises(HTTPException) as exc:
+            get_user_info_by_gateway(_request(headers))
+        assert exc.value.status_code == 401
 
 
 def test_service_assertion_rejects_permissions_outside_receiver_allowlist():

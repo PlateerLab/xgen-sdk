@@ -24,8 +24,11 @@ from Crypto.Signature import pkcs1_15
 
 
 GATEWAY_PUBLIC_KEY_ENV = "XGEN_GATEWAY_PUBLIC_KEY_PEM"
+GATEWAY_PUBLIC_KEYS_ENV = "XGEN_GATEWAY_PUBLIC_KEYS"
+GATEWAY_KEY_ID_ENV = "XGEN_GATEWAY_KEY_ID"
 SERVICE_NAME_ENV = "XGEN_SERVICE_NAME"
 SERVICE_SIGNING_KEY_ENV = "XGEN_SERVICE_SIGNING_KEY"
+SERVICE_KEY_ID_ENV = "XGEN_SERVICE_KEY_ID"
 TRUSTED_SERVICES_ENV = "XGEN_TRUSTED_SERVICES"
 
 PROOF_HEADER = "x-xgen-principal"
@@ -51,6 +54,7 @@ _GATEWAY_JWT_HEADER = {"alg": "RS256", "typ": "JWT"}
 _SERVICE_JWT_HEADER = {"alg": "HS256", "typ": "JWT"}
 _CLAIM_KEYS = frozenset({"iss", "aud", "type", "iat", "exp", "headers"})
 _SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_KEY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _B64_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_ASSERTION_BYTES = 16_384
 
@@ -121,18 +125,89 @@ def _key_bytes(value: str | None, *, env_name: str) -> bytes:
     return value.encode("utf-8")
 
 
-def _gateway_public_key(value: str | None) -> RSA.RsaKey:
+def _gateway_public_key(value: str | None, *, source: str = GATEWAY_PUBLIC_KEY_ENV) -> RSA.RsaKey:
     if not isinstance(value, str) or not value:
-        raise _misconfigured(f"{GATEWAY_PUBLIC_KEY_ENV} is not configured")
+        raise _misconfigured(f"{source} is not configured")
     try:
         key = RSA.import_key(value)
     except (ValueError, IndexError, TypeError) as exc:
-        raise _misconfigured(f"{GATEWAY_PUBLIC_KEY_ENV} is not a valid RSA public key") from exc
+        raise _misconfigured(f"{source} is not a valid RSA public key") from exc
     if key.has_private():
-        raise _misconfigured(f"{GATEWAY_PUBLIC_KEY_ENV} must contain a public key only")
+        raise _misconfigured(f"{source} must contain a public key only")
     if key.size_in_bits() < 2048:
-        raise _misconfigured(f"{GATEWAY_PUBLIC_KEY_ENV} must be at least 2048 bits")
+        raise _misconfigured(f"{source} must be at least 2048 bits")
     return key
+
+
+def _key_id(value: Any, *, source: str, configuration: bool) -> str:
+    if not isinstance(value, str) or not _KEY_ID_RE.fullmatch(value):
+        if configuration:
+            raise _misconfigured(f"{source} must be a valid key id")
+        raise _invalid("invalid key id")
+    return value
+
+
+def _not_after(value: Any, *, source: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise _misconfigured(f"{source} must be a positive integer Unix timestamp")
+    return value
+
+
+def _json_config(raw: str | None, *, env_name: str) -> dict[str, Any]:
+    if not isinstance(raw, str) or not raw:
+        raise _misconfigured(f"{env_name} is not configured")
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+    except (json.JSONDecodeError, PrincipalValidationError) as exc:
+        raise _misconfigured(f"invalid {env_name}") from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise _misconfigured(f"invalid {env_name}")
+    return parsed
+
+
+def _gateway_verification_key(header: Mapping[str, Any]) -> tuple[RSA.RsaKey, int | None]:
+    raw_ring = os.getenv(GATEWAY_PUBLIC_KEYS_ENV)
+    if raw_ring is None:
+        if header != _GATEWAY_JWT_HEADER:
+            raise _invalid("gateway principals require RS256 without a kid in legacy mode")
+        return _gateway_public_key(os.getenv(GATEWAY_PUBLIC_KEY_ENV)), None
+
+    ring = _json_config(raw_ring, env_name=GATEWAY_PUBLIC_KEYS_ENV)
+    active_kid = _key_id(
+        os.getenv(GATEWAY_KEY_ID_ENV), source=GATEWAY_KEY_ID_ENV, configuration=True
+    )
+    if active_kid not in ring:
+        raise _misconfigured(f"{GATEWAY_KEY_ID_ENV} is not present in {GATEWAY_PUBLIC_KEYS_ENV}")
+
+    parsed: dict[str, tuple[RSA.RsaKey, int | None]] = {}
+    for raw_kid, config in ring.items():
+        kid = _key_id(raw_kid, source=GATEWAY_PUBLIC_KEYS_ENV, configuration=True)
+        expected = {"key"} if kid == active_kid else {"key", "not_after"}
+        if not isinstance(config, dict) or set(config) != expected:
+            if kid == active_kid:
+                raise _misconfigured("the active gateway key requires only key")
+            raise _misconfigured("retiring gateway keys require only key and not_after")
+        cutoff = (
+            None
+            if kid == active_kid
+            else _not_after(
+                config["not_after"], source=f"{GATEWAY_PUBLIC_KEYS_ENV}.{kid}.not_after"
+            )
+        )
+        parsed[kid] = (
+            _gateway_public_key(config["key"], source=f"{GATEWAY_PUBLIC_KEYS_ENV}.{kid}.key"),
+            cutoff,
+        )
+
+    if set(header) != {"alg", "typ", "kid"} or header.get("alg") != "RS256" or header.get(
+        "typ"
+    ) != "JWT":
+        raise _invalid("gateway principals require RS256 and a key id")
+    incoming_kid = _key_id(header.get("kid"), source="JWT kid", configuration=False)
+    selected = parsed.get(incoming_kid)
+    if selected is None:
+        raise _invalid("unknown gateway key id")
+    return selected
 
 
 def _service_name(value: str | None, *, source: str) -> str:
@@ -181,22 +256,23 @@ def _split_permissions(value: str) -> frozenset[str]:
     return frozenset(unquote(item.strip()) for item in value.split(",") if item.strip())
 
 
-def _trusted_services(raw: str | None) -> dict[str, tuple[bytes, frozenset[str]]]:
-    if not raw:
-        raise _misconfigured(f"{TRUSTED_SERVICES_ENV} is not configured")
-    try:
-        parsed = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
-    except (json.JSONDecodeError, PrincipalValidationError) as exc:
-        raise _misconfigured(f"invalid {TRUSTED_SERVICES_ENV}") from exc
-    if not isinstance(parsed, dict):
-        raise _misconfigured(f"invalid {TRUSTED_SERVICES_ENV}")
-
-    trusted: dict[str, tuple[bytes, frozenset[str]]] = {}
+def _trusted_services(
+    raw: str | None,
+) -> dict[str, tuple[dict[str | None, tuple[bytes, int | None]], frozenset[str]]]:
+    parsed = _json_config(raw, env_name=TRUSTED_SERVICES_ENV)
+    trusted: dict[
+        str, tuple[dict[str | None, tuple[bytes, int | None]], frozenset[str]]
+    ] = {}
     for service, config in parsed.items():
         if not isinstance(service, str) or not _SERVICE_NAME_RE.fullmatch(service):
             raise _misconfigured("invalid trusted service name")
-        if not isinstance(config, dict) or set(config) != {"key", "permissions"}:
-            raise _misconfigured("trusted service entries require only key and permissions")
+        if not isinstance(config, dict) or set(config) not in (
+            {"key", "permissions"},
+            {"keys", "permissions"},
+        ):
+            raise _misconfigured(
+                "trusted service entries require permissions and exactly one of key or keys"
+            )
         permissions = config["permissions"]
         if (
             not isinstance(permissions, list)
@@ -209,10 +285,52 @@ def _trusted_services(raw: str | None) -> dict[str, tuple[bytes, frozenset[str]]
             or len(set(permissions)) != len(permissions)
         ):
             raise _misconfigured("trusted service permissions must be unique finite strings")
-        trusted[service] = (
-            _key_bytes(config["key"], env_name=f"{TRUSTED_SERVICES_ENV}.{service}.key"),
-            frozenset(permissions),
-        )
+        if "key" in config:
+            keys: dict[str | None, tuple[bytes, int | None]] = {
+                None: (
+                    _key_bytes(
+                        config["key"], env_name=f"{TRUSTED_SERVICES_ENV}.{service}.key"
+                    ),
+                    None,
+                )
+            }
+        else:
+            raw_keys = config["keys"]
+            if not isinstance(raw_keys, dict) or not raw_keys:
+                raise _misconfigured("trusted service keys must be a non-empty object")
+            keys = {}
+            active_count = 0
+            for raw_kid, key_config in raw_keys.items():
+                kid = _key_id(
+                    raw_kid,
+                    source=f"{TRUSTED_SERVICES_ENV}.{service}.keys",
+                    configuration=True,
+                )
+                if not isinstance(key_config, dict) or set(key_config) not in (
+                    {"key"},
+                    {"key", "not_after"},
+                ):
+                    raise _misconfigured(
+                        "trusted service key entries require key and optional not_after"
+                    )
+                if "not_after" in key_config:
+                    cutoff = _not_after(
+                        key_config["not_after"],
+                        source=f"{TRUSTED_SERVICES_ENV}.{service}.keys.{kid}.not_after",
+                    )
+                else:
+                    cutoff = None
+                    active_count += 1
+                keys[kid] = (
+                    _key_bytes(
+                        key_config["key"],
+                        env_name=f"{TRUSTED_SERVICES_ENV}.{service}.keys.{kid}.key",
+                    ),
+                    cutoff,
+                )
+            if active_count != 1:
+                raise _misconfigured("trusted service keyrings require exactly one active key")
+        trusted[service] = (keys, frozenset(permissions))
     return trusted
 
 
@@ -270,18 +388,29 @@ def _verify_assertion(
     principal_type = payload.get("type")
     issuer = payload.get("iss")
     service_permissions: frozenset[str] | None = None
+    key_not_after: int | None = None
     if principal_type == "principal" and issuer == "xgen-gateway":
-        if header != _GATEWAY_JWT_HEADER:
-            raise _invalid("gateway principals require RS256")
-        gateway_key = _gateway_public_key(os.getenv(GATEWAY_PUBLIC_KEY_ENV))
+        gateway_key, key_not_after = _gateway_verification_key(header)
         service_key = None
     elif principal_type == "service" and isinstance(issuer, str):
-        if header != _SERVICE_JWT_HEADER:
-            raise _invalid("service principals require HS256")
         service = _trusted_services(os.getenv(TRUSTED_SERVICES_ENV)).get(issuer)
         if service is None:
             raise _invalid("untrusted service issuer")
-        service_key, service_permissions = service
+        service_keys, service_permissions = service
+        if None in service_keys:
+            if header != _SERVICE_JWT_HEADER:
+                raise _invalid("legacy service principals require HS256 without a key id")
+            service_key, key_not_after = service_keys[None]
+        else:
+            if set(header) != {"alg", "typ", "kid"} or header.get(
+                "alg"
+            ) != "HS256" or header.get("typ") != "JWT":
+                raise _invalid("service principals require HS256 and a key id")
+            incoming_kid = _key_id(header.get("kid"), source="JWT kid", configuration=False)
+            selected = service_keys.get(incoming_kid)
+            if selected is None:
+                raise _invalid("unknown service key id")
+            service_key, key_not_after = selected
         gateway_key = None
     else:
         raise _invalid("invalid principal issuer or type")
@@ -315,6 +444,8 @@ def _verify_assertion(
     current = int(time.time()) if now is None else now
     if iat > current or exp <= current or exp <= iat or exp > iat + 60:
         raise _invalid("expired or invalid principal lifetime")
+    if key_not_after is not None and exp > key_not_after:
+        raise _invalid("principal expires after the signing key retirement cutoff")
 
     claimed_headers = payload["headers"]
     if not isinstance(claimed_headers, dict):
@@ -371,6 +502,7 @@ def sign_principal_for_service(
     audience: str,
     service_name: str | None = None,
     signing_key: str | None = None,
+    key_id: str | None = None,
     ttl_seconds: int = 60,
     now: int | None = None,
 ) -> str:
@@ -390,6 +522,11 @@ def sign_principal_for_service(
         signing_key if signing_key is not None else os.getenv(SERVICE_SIGNING_KEY_ENV),
         env_name=SERVICE_SIGNING_KEY_ENV,
     )
+    selected_key_id = key_id if key_id is not None else os.getenv(SERVICE_KEY_ID_ENV)
+    if selected_key_id is not None:
+        selected_key_id = _key_id(
+            selected_key_id, source=SERVICE_KEY_ID_ENV, configuration=True
+        )
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 60:
         raise _invalid("service assertion ttl_seconds must be between 1 and 60")
 
@@ -411,7 +548,10 @@ def sign_principal_for_service(
         "exp": issued_at + ttl_seconds,
         "headers": headers,
     }
-    protected = _json_segment(_SERVICE_JWT_HEADER)
+    jwt_header = dict(_SERVICE_JWT_HEADER)
+    if selected_key_id is not None:
+        jwt_header["kid"] = selected_key_id
+    protected = _json_segment(jwt_header)
     body = _json_segment(payload)
     signature = hmac.new(key, f"{protected}.{body}".encode("ascii"), hashlib.sha256).digest()
     return f"{protected}.{body}.{_b64encode(signature)}"
@@ -423,6 +563,7 @@ def service_principal_headers(
     audience: str,
     service_name: str | None = None,
     signing_key: str | None = None,
+    key_id: str | None = None,
     ttl_seconds: int = 60,
     now: int | None = None,
 ) -> dict[str, str]:
@@ -434,6 +575,7 @@ def service_principal_headers(
         audience=audience,
         service_name=service_name,
         signing_key=signing_key,
+        key_id=key_id,
         ttl_seconds=ttl_seconds,
         now=now,
     )
@@ -498,12 +640,15 @@ class PrincipalMiddleware:
 
 __all__ = [
     "GATEWAY_PUBLIC_KEY_ENV",
+    "GATEWAY_PUBLIC_KEYS_ENV",
+    "GATEWAY_KEY_ID_ENV",
     "IDENTITY_HEADERS",
     "PROOF_HEADER",
     "PrincipalMiddleware",
     "PrincipalConfigurationError",
     "PrincipalValidationError",
     "SERVICE_NAME_ENV",
+    "SERVICE_KEY_ID_ENV",
     "SERVICE_SIGNING_KEY_ENV",
     "TRUSTED_SERVICES_ENV",
     "get_verified_principal_headers",
