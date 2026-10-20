@@ -11,6 +11,12 @@ from urllib.parse import unquote
 
 from fastapi import HTTPException, Request
 
+from xgen_sdk.auth.principal import (
+    PrincipalConfigurationError,
+    PrincipalValidationError,
+    verified_identity_headers,
+)
+
 logger = logging.getLogger("xgen-sdk.auth.gateway")
 
 
@@ -42,11 +48,20 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         dict 은 모든 환경의 코드가 ``supervision_full`` 로 마이그레이션된 후 제거 예정
         (≥ 2026-05-30 권장).
     """
-    user_id = request.headers.get("X-User-ID")
-    user_name_encoded = request.headers.get("X-User-Name")
+    try:
+        trusted_headers = verified_identity_headers(request.scope)
+    except PrincipalConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="사용자 인증 검증 설정이 필요합니다") from exc
+    except PrincipalValidationError as exc:
+        raise HTTPException(status_code=401, detail="유효하지 않은 사용자 인증 정보입니다") from exc
+    if trusted_headers is None:
+        raise HTTPException(status_code=401, detail="사용자 인증이 필요합니다")
+
+    user_id = trusted_headers["x-user-id"]
+    user_name_encoded = trusted_headers["x-user-name"]
     logger.info(f"헤더에서 사용자 정보 추출 시도: X-User-ID={user_id}, X-User-Name={user_name_encoded}")
     user_name = unquote(user_name_encoded) if user_name_encoded else None
-    is_superuser = request.headers.get("X-User-Superuser", "false").lower() == "true"
+    is_superuser = trusted_headers["x-user-superuser"].lower() == "true"
 
     logger.info(f"사용자 인증 정보: user_id={user_id}, user_name={user_name}, is_superuser={is_superuser}")
 
@@ -64,14 +79,14 @@ def get_user_info_by_gateway(request: Request) -> Dict[str, Any]:
         )
 
     # 역할/권한 파싱
-    roles = _parse_comma_list(request.headers.get("X-User-Roles", ""))
-    permissions = set(_parse_comma_list(request.headers.get("X-User-Permissions", "")))
+    roles = _parse_comma_list(trusted_headers["x-user-roles"])
+    permissions = set(_parse_comma_list(trusted_headers["x-user-permissions"]))
 
     if is_superuser:
         permissions = {"*:*"}
 
     # 감독 범위 파싱 — 단일 'full' 헤더만 사용
-    supervision_full = _parse_comma_list(request.headers.get("X-User-Supervision-Full", ""))
+    supervision_full = _parse_comma_list(trusted_headers["x-user-supervision-full"])
 
     return {
         "user_id": normalized_user_id,

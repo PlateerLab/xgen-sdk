@@ -199,8 +199,11 @@ The decorator pattern doubles as a self-registering permission catalog —
 the act of declaring an endpoint is the act of declaring its permission.
 
 ```python
-from fastapi import Depends, Request
-from xgen_sdk.auth import require_perm, require_any_perm, require_superuser
+from fastapi import Depends, FastAPI, Request
+from xgen_sdk.auth import PrincipalMiddleware, require_perm, require_any_perm, require_superuser
+
+app = FastAPI()
+app.add_middleware(PrincipalMiddleware)
 
 @router.get("/roles")
 async def list_roles(
@@ -217,6 +220,93 @@ async def reset(_=Depends(require_superuser())):
 At startup, call `validate_and_sync(db)` to push all decorator-declared
 permissions into the database — the frontend then reads them back to build
 its role-assignment UI. No more drift between code and DB.
+
+Gateway identity headers are accepted only when their exact values are bound to
+an RS256 `X-Xgen-Principal` assertion. Configure every receiving service with
+the Gateway's public key in `XGEN_GATEWAY_PUBLIC_KEY_PEM`; only the Gateway holds
+the corresponding private key. Set `XGEN_SERVICE_NAME` to the exact audience
+that the Gateway uses for that service; broad or missing audiences are rejected.
+The single-key variable remains available for compatibility. For rotation, set
+`XGEN_GATEWAY_KEY_ID` and replace it with a strict keyring in
+`XGEN_GATEWAY_PUBLIC_KEYS`:
+
+```json
+{
+  "2026-10": {"key": "-----BEGIN PUBLIC KEY-----..."},
+  "2026-09": {"key": "-----BEGIN PUBLIC KEY-----...", "not_after": 1792454460}
+}
+```
+
+The current key named by `XGEN_GATEWAY_KEY_ID` is the sole entry without
+`not_after`. Every retiring key requires that cutoff, and a token's `exp` may
+not extend beyond it. Once a keyring is configured, assertions without `kid`,
+unknown keys, and the legacy single-key fallback are rejected. Remove a retired
+entry to revoke it immediately.
+
+For scoped service-to-service delegation, issuers use `XGEN_SERVICE_NAME` and
+`XGEN_SERVICE_SIGNING_KEY`. Set `XGEN_SERVICE_KEY_ID` while rotating keys;
+service assertions then carry that exact `kid`. Receivers configure an explicit
+JSON trust map. The legacy single-key form remains supported:
+
+```json
+{
+  "workflow-service": {
+    "key": "a-distinct-secret-with-at-least-32-bytes",
+    "permissions": ["document:read", "workflow:execute"]
+  }
+}
+```
+
+The rotation form replaces `key` with `keys`. Exactly one key is active and has
+no cutoff; every other key is retiring and requires `not_after`:
+
+```json
+{
+  "workflow-service": {
+    "keys": {
+      "2026-10": {"key": "current-secret-at-least-32-bytes"},
+      "2026-09": {"key": "previous-secret-at-least-32-bytes", "not_after": 1792454460}
+    },
+    "permissions": ["document:read", "workflow:execute"]
+  }
+}
+```
+
+Set that JSON as `XGEN_TRUSTED_SERVICES`. Service assertions cannot grant
+superuser or wildcard permissions, and their declared permissions must be a
+subset of the issuer's configured list. Use `get_verified_principal_headers()`
+only to forward an existing verified proof within the same audience. To call a
+different backend, use `service_principal_headers(..., audience="target-service")`
+with a user profile obtained from trusted server state.
+
+Document resource grants use a separate, strict HS256 capability codec. These
+tokens always use issuer and audience `xgen-documents`, type
+`document-capability`, and a lifetime of at most 60 seconds. They bind a
+deployment, workflow, policy digest, resource id, resource digest, and a unique
+non-empty subset of `fetch`, `metadata`, `access`, and `download`:
+
+```python
+from xgen_sdk.auth import sign_document_capability, verify_document_capability
+
+token = sign_document_capability({
+    "deployment_id": deployment["id"],
+    "workflow_id": deployment["workflow_id"],
+    "policy_digest": policy_digest,
+    "resource_id": resource_id,
+    "resource_digest": resource_digest,
+    "operations": ["fetch", "metadata"],
+})
+claims = verify_document_capability(token)
+```
+
+Signing uses `XGEN_SERVICE_SIGNING_KEY` and `XGEN_SERVICE_KEY_ID`. Verification
+uses that current pair by default. To retain bounded previous keys, set
+`XGEN_DOCUMENT_CAPABILITY_KEYS` to the same `{kid: {key, not_after?}}` keyring
+shape used inside a trusted service entry. A configured capability keyring also
+disables fallback to the standalone current key. Use
+`deployment_policy_digest(row)` to bind the fixed deployment authorization
+fields; timestamp and unrelated database columns are intentionally excluded,
+and a JSON string in `public_policy` is canonicalized before hashing.
 
 ### Logging — `xgen_sdk.logging`
 

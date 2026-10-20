@@ -28,6 +28,30 @@ from xgen_sdk.auth.gateway import (
     require_superuser,
     extract_user_id,
 )
+from xgen_sdk.auth.principal import (
+    PrincipalConfigurationError,
+    PrincipalMiddleware,
+    PrincipalValidationError,
+    get_verified_principal_headers,
+    service_principal_headers,
+    sign_principal_for_service,
+)
+from xgen_sdk.auth.document_capability import (
+    DOCUMENT_CAPABILITY_AUDIENCE,
+    DOCUMENT_CAPABILITY_ISSUER,
+    DOCUMENT_CAPABILITY_KEYS_ENV,
+    DOCUMENT_CAPABILITY_OPERATIONS,
+    DOCUMENT_CAPABILITY_TYPE,
+    DocumentCapabilityConfigurationError,
+    DocumentCapabilityValidationError,
+    sign_document_capability,
+    verify_document_capability,
+)
+from xgen_sdk.auth.deployment_policy import (
+    DEPLOYMENT_POLICY_FIELDS,
+    DeploymentPolicyDigestError,
+    deployment_policy_digest,
+)
 from xgen_sdk.auth.permission_constants import (
     permission_string,
     all_permission_strings,
@@ -65,6 +89,24 @@ __all__ = [
     "require_any_permission",
     "require_superuser",
     "extract_user_id",
+    "PrincipalConfigurationError",
+    "PrincipalMiddleware",
+    "PrincipalValidationError",
+    "get_verified_principal_headers",
+    "service_principal_headers",
+    "sign_principal_for_service",
+    "DOCUMENT_CAPABILITY_AUDIENCE",
+    "DOCUMENT_CAPABILITY_ISSUER",
+    "DOCUMENT_CAPABILITY_KEYS_ENV",
+    "DOCUMENT_CAPABILITY_OPERATIONS",
+    "DOCUMENT_CAPABILITY_TYPE",
+    "DocumentCapabilityConfigurationError",
+    "DocumentCapabilityValidationError",
+    "sign_document_capability",
+    "verify_document_capability",
+    "DEPLOYMENT_POLICY_FIELDS",
+    "DeploymentPolicyDigestError",
+    "deployment_policy_digest",
     # constants (utility)
     "permission_string",
     "all_permission_strings",
