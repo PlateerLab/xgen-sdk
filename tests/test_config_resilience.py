@@ -126,13 +126,51 @@ def test_factory_never_returns_none_when_db_exists():
         mgr = create_config_manager(db_manager=object())
         assert mgr is not None, "DB 가 있으면 None 을 돌려주면 안 된다"
         assert isinstance(mgr, _Down)
-        # DB 도 없으면 메모리 매니저로라도 내려간다.
+        # Redis 를 아예 설정하지 않은 배포(로컬·시험)만 메모리 매니저로 간다.
         mem = create_config_manager(db_manager=None)
         assert isinstance(mem, LocalConfigManager)
     finally:
         rc.RedisConfigManager = saved
         if original is not None:
             lc.RedisConfigManager = original
+
+
+def test_a_configured_but_unreachable_redis_is_not_traded_for_memory(monkeypatch):
+    """철학 2 를 DB 없는 파드에도. 기동 순간 Redis 가 없었다고 메모리에 묶이면 안 된다.
+
+    2026-10-19 develop: 호스트가 다시 뜨며 valkey 가 sandbox control 보다 늦었다. DB 없는 control 은
+    메모리 매니저로 내려갔고, 그 매니저는 Redis 가 돌아온 뒤에도 영영 다시 붙지 않아 저장소 암호화
+    키를 끝내 못 읽었다. 그 control 이 만든 워커는 모두 키가 없어 attach 마다 503 이었다.
+    """
+    from xgen_sdk.redis import RedisSettings
+    import xgen_sdk.redis as redis_pkg
+
+    flaky = _FlakyRedis(alive=False, data={"config:XGEN_STORAGE_ENCRYPTION_KEY": json.dumps({"value": "k"})})
+    monkeypatch.setattr(redis_pkg, "create_sync_redis", lambda **_: flaky)
+    settings = RedisSettings.from_env({"REDIS_HOST": "valkey"})
+
+    import xgen_sdk.config.redis_config as rc
+    real = rc.RedisConfigManager
+    monkeypatch.setattr(rc, "RedisConfigManager", lambda db_manager=None: real(db_manager=db_manager, settings=settings))
+
+    mgr = create_config_manager(db_manager=None)
+    assert isinstance(mgr, real), "설정된 Redis 가 잠깐 없다고 메모리 매니저로 바꾸지 않는다"
+    mgr._reconnect_cooldown = 0.0
+    # 끊긴 동안은 "없음" 이 아니라 "못 읽음" 이다. 호출자가 키 없는 워커를 만들지 않을 수 있게.
+    assert mgr.probe_value("XGEN_STORAGE_ENCRYPTION_KEY")[0] == "error"
+
+    flaky.alive = True                     # valkey 가 떴다
+    assert mgr.probe_value("XGEN_STORAGE_ENCRYPTION_KEY")[:2] == ("ok", "k")
+
+
+def test_memory_manager_only_when_redis_is_not_configured(monkeypatch):
+    from xgen_sdk.redis import RedisSettings
+
+    import xgen_sdk.config.redis_config as rc
+    real = rc.RedisConfigManager
+    empty = RedisSettings.from_env({})
+    monkeypatch.setattr(rc, "RedisConfigManager", lambda db_manager=None: real(db_manager=db_manager, settings=empty))
+    assert isinstance(create_config_manager(db_manager=None), LocalConfigManager)
 
 
 class _Composer(ConfigComposer):
