@@ -49,7 +49,17 @@ from .files import (
     strip_bytes,
     strip_file,
 )
-from .loader import EXCEPTIONS_TABLE, excepted_policy_ids, load_rules, load_scope_rules
+from .errors import PolicyError, PolicyInvalidError, PolicyUnavailableError
+from .loader import (
+    EXCEPTIONS_TABLE,
+    excepted_policy_ids,
+    excepted_policy_ids_strict,
+    load_rules,
+    load_rules_strict,
+    load_scope_rules,
+    load_scope_rules_strict,
+)
+from .outcome import PolicyDecision, PolicyLoadResult, PolicyLoadState, PolicyOutcome
 from .rules import (
     DEFAULT_MASK,
     MASK_MODE_FULL,
@@ -59,6 +69,7 @@ from .rules import (
     MaskingRule,
     apply_rules,
     compile_rules,
+    compile_rules_strict,
     find_masked_spans,
     partial_mask,
 )
@@ -75,10 +86,13 @@ from .settings import (
     PolicyKind,
     as_bool,
     config_flag,
+    config_flag_strict,
     kind_of,
     kinds_on,
+    kinds_on_strict,
     scope_key,
     scope_on,
+    scope_on_strict,
     scope_settings,
 )
 
@@ -87,11 +101,16 @@ __all__ = [
     "PII", "FORBIDDEN_WORD", "KINDS", "PolicyKind", "kind_of",
     "SCOPE_CHAT_INPUT", "SCOPE_MODEL_INPUT", "SCOPE_CHAT_UPLOAD", "SCOPE_FILESTORE_UPLOAD",
     "SCOPES", "SCOPE_DEFAULTS", "scope_key", "scope_settings", "scope_on", "kinds_on", "config_flag", "as_bool",
+    "scope_on_strict", "kinds_on_strict", "config_flag_strict",
+    # outcomes/errors
+    "PolicyLoadState", "PolicyLoadResult", "PolicyDecision", "PolicyOutcome",
+    "PolicyError", "PolicyUnavailableError", "PolicyInvalidError",
     # rules
     "DEFAULT_MASK", "MASK_MODE_FULL", "MASK_MODE_PARTIAL", "SAMPLE_LIMIT",
-    "MaskingRule", "MaskingResult", "partial_mask", "compile_rules", "apply_rules", "find_masked_spans",
+    "MaskingRule", "MaskingResult", "partial_mask", "compile_rules", "compile_rules_strict", "apply_rules", "find_masked_spans",
     # loader
-    "EXCEPTIONS_TABLE", "excepted_policy_ids", "load_rules", "load_scope_rules",
+    "EXCEPTIONS_TABLE", "excepted_policy_ids", "excepted_policy_ids_strict", "load_rules", "load_rules_strict",
+    "load_scope_rules", "load_scope_rules_strict",
     # files
     "MASKING_MAX_BYTES", "MASKING_MAX_UNZIPPED_BYTES", "MaskingUnsupportedError", "FormatMasker", "FORMAT_MASKERS", "FileMasking",
     "STATUS_OFF", "STATUS_CLEAN", "STATUS_MASKED", "STATUS_UNMASKABLE",

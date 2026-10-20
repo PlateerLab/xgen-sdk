@@ -8,15 +8,36 @@ Permission Resolver
     else: (사용자 역할의 권한 합집합) ∪ (직접 추가 권한) - (직접 차단 권한)
 """
 import logging
+import re
+import uuid
+from collections.abc import Mapping
 from typing import Set, List, Optional
 
 logger = logging.getLogger("permission-resolver")
+
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+class PermissionResolutionError(RuntimeError):
+    """A redacted authority-store failure safe to map to HTTP 503."""
+
+    def __init__(self, code: str = "permission_store_unavailable", *,
+                 request_id: Optional[str] = None, retryable: bool = True) -> None:
+        self.code = code if code in {"permission_store_unavailable", "permission_store_invalid"} else "permission_store_unavailable"
+        self.request_id = (
+            str(request_id) if request_id is not None and _SAFE_REQUEST_ID.fullmatch(str(request_id))
+            else uuid.uuid4().hex
+        )
+        self.retryable = bool(retryable)
+        super().__init__(f"{self.code} (request_id={self.request_id})")
 
 
 def resolve_user_permissions(
     app_db,
     user_id: int,
     is_superuser: bool,
+    *,
+    request_id: Optional[str] = None,
 ) -> Set[str]:
     """사용자의 최종 권한 집합을 해석한다.
 
@@ -31,21 +52,14 @@ def resolve_user_permissions(
     if is_superuser:
         return {"*:*"}
 
-    # 1. 사용자 역할의 권한 (user_roles → role_permissions → permissions)
-    role_perms = _get_permissions_from_user_roles(app_db, user_id)
-
-    # 2. 직접 부여 (user_permissions WHERE granted=TRUE)
-    granted = _get_directly_granted_permissions(app_db, user_id)
-
-    # 3. 직접 차단 (user_permissions WHERE granted=FALSE)
-    denied = _get_directly_denied_permissions(app_db, user_id)
-
-    # 4. 합산: (역할 권한 ∪ 직접 부여) - 직접 차단
+    # 역할·직접 부여·직접 차단을 한 statement 의 DB snapshot 에서 읽는다.
+    role_perms, granted, denied = _get_permission_authority_snapshot(
+        app_db, user_id, request_id=request_id,
+    )
     final = (role_perms | granted) - denied
 
     logger.debug(
-        f"Resolved permissions for user {user_id}: "
-        f"role={len(role_perms)}, "
+        f"Resolved permissions: role={len(role_perms)}, "
         f"granted={len(granted)}, denied={len(denied)}, "
         f"final={len(final)}"
     )
@@ -104,27 +118,137 @@ def get_user_roles(app_db, user_id: int) -> List[str]:
     Returns:
         List[str]: 역할 이름 목록
     """
+    try:
+        return get_user_roles_strict(app_db, user_id)
+    except PermissionResolutionError as exc:
+        logger.warning("User role lookup failed: code=%s request_id=%s", exc.code, exc.request_id)
+        return []
+
+
+def get_user_roles_strict(app_db, user_id: int, *, request_id: Optional[str] = None) -> List[str]:
+    """Return roles only after a successful, well-formed authority-store read."""
     query = """
         SELECT r.name
         FROM roles r
         JOIN user_roles ur ON ur.role_id = r.id
         WHERE ur.user_id = %s
     """
-    try:
-        result = app_db.execute_raw_query(query, (user_id,))
-        if result.get("success") and result.get("data"):
-            return [row['name'] for row in result["data"]]
-        return []
-    except Exception as e:
-        logger.error(f"Failed to get user roles for user {user_id}: {e}")
-        return []
+    rows = _read_query_rows(app_db, query, user_id, request_id=request_id)
+    roles = []
+    for row in rows:
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            raise PermissionResolutionError(
+                "permission_store_invalid", request_id=request_id, retryable=False,
+            )
+        roles.append(name)
+    return roles
 
 
 # ─────────────────────────────────────────────────────────
 # 내부 헬퍼 함수
 # ─────────────────────────────────────────────────────────
 
-def _get_permissions_from_user_roles(app_db, user_id: int) -> Set[str]:
+def _read_query_rows(app_db, query: str, user_id: int, *,
+                     request_id: Optional[str] = None) -> List[Mapping]:
+    if app_db is None or not hasattr(app_db, "execute_raw_query"):
+        raise PermissionResolutionError(request_id=request_id)
+    try:
+        result = app_db.execute_raw_query(query, (user_id,))
+    except Exception:  # noqa: BLE001
+        failure = PermissionResolutionError(request_id=request_id)
+        logger.warning("Permission lookup failed: code=%s request_id=%s", failure.code, failure.request_id)
+        raise failure from None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        failure = PermissionResolutionError(request_id=request_id)
+        logger.warning("Permission lookup failed: code=%s request_id=%s", failure.code, failure.request_id)
+        raise failure
+    rows = result.get("data")
+    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+        failure = PermissionResolutionError(
+            "permission_store_invalid", request_id=request_id, retryable=False,
+        )
+        logger.warning("Permission lookup failed: code=%s request_id=%s", failure.code, failure.request_id)
+        raise failure
+    return rows
+
+
+def _permission_set(app_db, query: str, user_id: int, *,
+                    request_id: Optional[str] = None) -> Set[str]:
+    rows = _read_query_rows(app_db, query, user_id, request_id=request_id)
+    permissions = set()
+    for row in rows:
+        permission = row.get("perm")
+        if not isinstance(permission, str) or not permission or ":" not in permission:
+            raise PermissionResolutionError(
+                "permission_store_invalid", request_id=request_id, retryable=False,
+            )
+        permissions.add(permission)
+    return permissions
+
+
+def _get_permission_authority_snapshot(app_db, user_id: int, *,
+                                       request_id: Optional[str] = None) -> tuple[Set[str], Set[str], Set[str]]:
+    """Read role grants and direct allow/deny rows in one database statement."""
+    query = """
+        WITH authority AS (
+            SELECT DISTINCT p.resource || ':' || p.action AS perm, 'role' AS source
+            FROM permissions p
+            JOIN role_permissions rp ON rp.permission_id = p.id
+            JOIN user_roles ur ON ur.role_id = rp.role_id
+            WHERE ur.user_id = %s
+            UNION ALL
+            SELECT DISTINCT p.resource || ':' || p.action AS perm,
+                   CASE WHEN up.granted = TRUE THEN 'grant' ELSE 'deny' END AS source
+            FROM permissions p
+            JOIN user_permissions up ON up.permission_id = p.id
+            WHERE up.user_id = %s
+        )
+        SELECT perm, source FROM authority
+    """
+    if app_db is None or not hasattr(app_db, "execute_raw_query"):
+        raise PermissionResolutionError(request_id=request_id)
+    try:
+        result = app_db.execute_raw_query(query, (user_id, user_id))
+    except Exception:  # noqa: BLE001
+        failure = PermissionResolutionError(request_id=request_id)
+        logger.warning("Permission lookup failed: code=%s request_id=%s", failure.code, failure.request_id)
+        raise failure from None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        failure = PermissionResolutionError(request_id=request_id)
+        logger.warning("Permission lookup failed: code=%s request_id=%s", failure.code, failure.request_id)
+        raise failure
+    rows = result.get("data")
+    if not isinstance(rows, list):
+        failure = PermissionResolutionError(
+            "permission_store_invalid", request_id=request_id, retryable=False,
+        )
+        logger.warning("Permission lookup failed: code=%s request_id=%s", failure.code, failure.request_id)
+        raise failure
+
+    by_source = {"role": set(), "grant": set(), "deny": set()}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise PermissionResolutionError(
+                "permission_store_invalid", request_id=request_id, retryable=False,
+            )
+        permission = row.get("perm")
+        source = row.get("source")
+        if (
+            not isinstance(permission, str)
+            or not permission
+            or ":" not in permission
+            or source not in by_source
+        ):
+            raise PermissionResolutionError(
+                "permission_store_invalid", request_id=request_id, retryable=False,
+            )
+        by_source[source].add(permission)
+    return by_source["role"], by_source["grant"], by_source["deny"]
+
+
+def _get_permissions_from_user_roles(app_db, user_id: int, *,
+                                     request_id: Optional[str] = None) -> Set[str]:
     """user_roles → role_permissions → permissions 경로로 권한 조회"""
     query = """
         SELECT DISTINCT p.resource || ':' || p.action AS perm
@@ -133,17 +257,11 @@ def _get_permissions_from_user_roles(app_db, user_id: int) -> Set[str]:
         JOIN user_roles ur ON ur.role_id = rp.role_id
         WHERE ur.user_id = %s
     """
-    try:
-        result = app_db.execute_raw_query(query, (user_id,))
-        if result.get("success") and result.get("data"):
-            return {row['perm'] for row in result["data"]}
-        return set()
-    except Exception as e:
-        logger.error(f"Failed to get role permissions for user {user_id}: {e}")
-        return set()
+    return _permission_set(app_db, query, user_id, request_id=request_id)
 
 
-def _get_directly_granted_permissions(app_db, user_id: int) -> Set[str]:
+def _get_directly_granted_permissions(app_db, user_id: int, *,
+                                      request_id: Optional[str] = None) -> Set[str]:
     """user_permissions WHERE granted=TRUE 경로로 직접 부여 권한 조회"""
     query = """
         SELECT DISTINCT p.resource || ':' || p.action AS perm
@@ -151,17 +269,11 @@ def _get_directly_granted_permissions(app_db, user_id: int) -> Set[str]:
         JOIN user_permissions up ON up.permission_id = p.id
         WHERE up.user_id = %s AND up.granted = TRUE
     """
-    try:
-        result = app_db.execute_raw_query(query, (user_id,))
-        if result.get("success") and result.get("data"):
-            return {row['perm'] for row in result["data"]}
-        return set()
-    except Exception as e:
-        logger.error(f"Failed to get granted permissions for user {user_id}: {e}")
-        return set()
+    return _permission_set(app_db, query, user_id, request_id=request_id)
 
 
-def _get_directly_denied_permissions(app_db, user_id: int) -> Set[str]:
+def _get_directly_denied_permissions(app_db, user_id: int, *,
+                                     request_id: Optional[str] = None) -> Set[str]:
     """user_permissions WHERE granted=FALSE 경로로 직접 차단 권한 조회"""
     query = """
         SELECT DISTINCT p.resource || ':' || p.action AS perm
@@ -169,11 +281,13 @@ def _get_directly_denied_permissions(app_db, user_id: int) -> Set[str]:
         JOIN user_permissions up ON up.permission_id = p.id
         WHERE up.user_id = %s AND up.granted = FALSE
     """
-    try:
-        result = app_db.execute_raw_query(query, (user_id,))
-        if result.get("success") and result.get("data"):
-            return {row['perm'] for row in result["data"]}
-        return set()
-    except Exception as e:
-        logger.error(f"Failed to get denied permissions for user {user_id}: {e}")
-        return set()
+    return _permission_set(app_db, query, user_id, request_id=request_id)
+
+
+__all__ = [
+    "PermissionResolutionError",
+    "resolve_user_permissions",
+    "has_permission",
+    "get_user_roles",
+    "get_user_roles_strict",
+]

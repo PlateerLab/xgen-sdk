@@ -19,7 +19,9 @@ import logging
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+
+from .errors import PolicyInvalidError
 
 logger = logging.getLogger("xgen-sdk.control-policy")
 
@@ -126,8 +128,8 @@ def compile_rules(rows: Optional[Iterable[Dict[str, Any]]], policy_type: str, *,
             continue
         try:
             pattern = re.compile(regex)
-        except re.error as exc:
-            logger.warning("%s 정규식 오류 '%s': %s", policy_type, row.get("policy_name"), exc)
+        except re.error:
+            logger.warning("통제 정책 정규식 오류: code=policy_data_invalid")
             continue
         mode = str(row.get("masking_mode") or MASK_MODE_FULL).strip().lower()
         rules.append(MaskingRule(
@@ -144,6 +146,87 @@ def compile_rules(rows: Optional[Iterable[Dict[str, Any]]], policy_type: str, *,
             preserve_format=bool(row.get("preserve_format", True)),
         ))
     return rules
+
+
+def _strict_nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError
+    parsed = int(value or 0)
+    if parsed < 0:
+        raise ValueError
+    return parsed
+
+
+def compile_rules_strict(rows: Optional[Iterable[Mapping[str, Any]]], policy_type: str, *,
+                         unmasked: str = "skip", request_id: Optional[str] = None) -> List[MaskingRule]:
+    """Compile authoritative rows or raise :class:`PolicyInvalidError`.
+
+    Unlike :func:`compile_rules`, an invalid active row is never skipped.  The
+    exception deliberately omits row values and regular expressions.
+    """
+    if unmasked not in ("skip", "default"):
+        raise ValueError(f"unmasked 는 skip 또는 default: {unmasked}")
+    if rows is None:
+        raise PolicyInvalidError(request_id=request_id)
+    try:
+        materialized = list(rows)
+    except (TypeError, ValueError):
+        raise PolicyInvalidError(request_id=request_id) from None
+
+    normalized: List[Dict[str, Any]] = []
+    for row in materialized:
+        try:
+            if not isinstance(row, Mapping):
+                raise ValueError
+            if row.get("id") is None:
+                raise ValueError
+            name = row.get("policy_name")
+            regex = row.get("regex_pattern")
+            masking = row.get("masking")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError
+            if not isinstance(regex, str) or not regex.strip():
+                raise ValueError
+            if not isinstance(masking, bool):
+                raise ValueError
+            pattern = re.compile(regex)
+            mode = str(row.get("masking_mode") or MASK_MODE_FULL).strip().lower()
+            if mode not in (MASK_MODE_FULL, MASK_MODE_PARTIAL):
+                raise ValueError
+            keep_prefix = _strict_nonnegative_int(row.get("keep_prefix"))
+            keep_suffix = _strict_nonnegative_int(row.get("keep_suffix"))
+            preserve = row.get("preserve_format", True)
+            if preserve not in (True, False, 0, 1):
+                raise ValueError
+            mask_char = row.get("mask_char", "*") or "*"
+            if not isinstance(mask_char, str):
+                raise ValueError
+            mask = row.get("masking_pattern")
+            if mask is not None and not isinstance(mask, str):
+                raise ValueError
+            if masking:
+                names_by_index = {index: name for name, index in pattern.groupindex.items()}
+                validator_pattern = "".join(
+                    f"(?P<{names_by_index[index]}>)" if index in names_by_index else "()"
+                    for index in range(1, pattern.groups + 1)
+                )
+                validator = re.compile(validator_pattern).match("")
+                assert validator is not None
+                validator.expand(mask or DEFAULT_MASK)
+            normalized.append({
+                **dict(row),
+                "policy_name": name,
+                "regex_pattern": regex,
+                "masking": masking,
+                "masking_mode": mode,
+                "keep_prefix": keep_prefix,
+                "keep_suffix": keep_suffix,
+                "preserve_format": bool(preserve),
+                "mask_char": mask_char,
+            })
+        except (IndexError, TypeError, ValueError, re.error):
+            raise PolicyInvalidError(request_id=request_id) from None
+    return compile_rules(normalized, policy_type, unmasked=unmasked)
 
 
 @dataclass
@@ -182,8 +265,8 @@ def apply_rules(text: str, rules: Sequence[MaskingRule], *, mask: bool = True) -
     for rule in rules:
         try:
             hits = [hit for hit in rule.pattern.finditer(result.text) if hit.end() > hit.start()]
-        except re.error as exc:  # pragma: no cover, compile 을 통과한 패턴은 여기서 안 깨진다
-            logger.warning("%s 정규식 오류 '%s': %s", rule.policy_type, rule.policy_name, exc)
+        except re.error:  # pragma: no cover, compile 을 통과한 패턴은 여기서 안 깨진다
+            logger.warning("통제 정책 정규식 오류: code=policy_data_invalid")
             continue
         if not hits:
             continue
