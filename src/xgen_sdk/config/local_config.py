@@ -817,5 +817,25 @@ def create_config_manager(db_manager=None):
         logger.warning("🟡 Redis 연결 실패 - DB 폴백으로 계속 진행 (복구되면 자동 재연결)")
         return redis_manager
 
-    logger.warning("🟡 Redis·DB 모두 없음 - LocalConfigManager(메모리)로 fallback")
+    # Redis 를 **설정해 두었는데 지금 닿지 않는 것**은 잠깐의 장애다 (2.17.0).
+    #
+    # 예전에는 DB 가 없으면 여기서 메모리 매니저로 내려갔고, 그 매니저는 Redis 클라이언트가
+    # 없어 **Redis 가 돌아와도 영영 모른다.** 그 프로세스의 설정 조회는 죽을 때까지 "없음" 이었다.
+    # DB 없이 Redis 만 보는 위성 파드(sandbox control)가 배포 순간 valkey 가 막 뜨는 중이면
+    # 저장소 암호화 키를 끝내 못 읽어, 키 없는 워커를 만들고 그 워커의 attach 가 모두 503 이
+    # 됐다(2026-10-19 develop). DB 없이 import 시점에 클라이언트를 만드는 workflow 도 같은
+    # 자리에 묶였다(DB 가 나중에 붙어 버티기는 했지만 Redis 로는 돌아오지 않았다).
+    #
+    # 그래서 Redis 매니저를 그대로 돌려준다. 끊긴 동안 조회는 "missing" 이 아니라 **"error"** 로
+    # 답하고(설정 안 함과 구분된다), 쿨다운마다 다시 붙으며, 붙는 순간 정상으로 돌아온다.
+    # 메모리 매니저는 Redis 를 **아예 설정하지 않은** 배포(로컬 개발·시험)에만 쓴다.
+    settings = getattr(redis_manager, "_settings", None)
+    if settings is not None and getattr(settings, "configured", False):
+        logger.warning(
+            "🟡 Redis 연결 실패, DB 도 없음 - Redis 매니저로 계속 진행 "
+            "(복구되면 자동 재연결, 그동안 설정 조회는 error)"
+        )
+        return redis_manager
+
+    logger.warning("🟡 Redis 미설정·DB 없음 - LocalConfigManager(메모리)로 진행")
     return LocalConfigManager(db_manager=db_manager)
