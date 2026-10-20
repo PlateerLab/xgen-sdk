@@ -66,9 +66,11 @@ from xgen_sdk.auth.permission_registry import (
     validate_and_sync,
 )
 from xgen_sdk.auth.permission_resolver import (
+    PermissionResolutionError,
     resolve_user_permissions,
     has_permission,
     get_user_roles,
+    get_user_roles_strict,
 )
 from xgen_sdk.auth.supervision_resolver import (
     resolve_supervision_scope,
@@ -119,9 +121,11 @@ __all__ = [
     "require_login",
     "validate_and_sync",
     # resolver
+    "PermissionResolutionError",
     "resolve_user_permissions",
     "has_permission",
     "get_user_roles",
+    "get_user_roles_strict",
     # supervision
     "resolve_supervision_scope",
     "resolve_supervised_user_ids",

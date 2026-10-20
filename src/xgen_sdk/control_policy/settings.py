@@ -23,6 +23,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
 
+from .errors import PolicyError, PolicyInvalidError, PolicyUnavailableError
+
 PII = "pii"
 FORBIDDEN_WORD = "forbidden_word"
 
@@ -124,6 +126,47 @@ def config_flag(name: str, default: bool = False, *, config: Any = None) -> bool
     return as_bool(value, default)
 
 
+def _strict_bool(value: Any, *, request_id: Optional[str] = None) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        raise PolicyUnavailableError("policy_config_unavailable", request_id=request_id)
+    text = str(value).strip().lower()
+    if text in _TRUTHY:
+        return True
+    if text in _FALSY:
+        return False
+    raise PolicyInvalidError("policy_config_invalid", request_id=request_id)
+
+
+def config_flag_strict(name: str, default: bool = False, *, config: Any = None,
+                       request_id: Optional[str] = None) -> bool:
+    """Read an authoritative flag without turning absence/failure into a default.
+
+    ``default`` remains in the signature so this can be passed anywhere a
+    :class:`FlagReader` is expected.  Strict reads use it only when an explicit
+    custom reader chooses to; the built-in reader requires a stored or
+    environment-provided value.
+    """
+    del default
+    try:
+        if config is None:
+            from xgen_sdk.config.config_client import get_config_client
+
+            config = get_config_client()
+        if config is None or not hasattr(config, "get_config_by_name"):
+            raise PolicyUnavailableError("policy_config_unavailable", request_id=request_id)
+        cfg = config.get_config_by_name(name)
+        value = getattr(cfg, "value", None) if cfg is not None else None
+    except PolicyError:
+        raise
+    except Exception:  # noqa: BLE001
+        raise PolicyUnavailableError("policy_config_unavailable", request_id=request_id) from None
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = os.getenv(name)
+    return _strict_bool(value, request_id=request_id)
+
+
 def _reader(flag: Optional[FlagReader], config: Any) -> FlagReader:
     if flag is not None:
         return flag
@@ -140,3 +183,40 @@ def kinds_on(scope: str, *, flag: Optional[FlagReader] = None, config: Any = Non
     """이 자리에 켜진 종류(적용 차례대로)."""
     read = _reader(flag, config)
     return [kind for kind in KINDS if scope_on(kind, scope, flag=read)]
+
+
+def _strict_reader(flag: Optional[FlagReader], config: Any, request_id: Optional[str]) -> FlagReader:
+    if flag is None:
+        return lambda name, default: config_flag_strict(
+            name, default, config=config, request_id=request_id,
+        )
+
+    def read(name: str, default: bool) -> bool:
+        try:
+            value = flag(name, default)
+        except PolicyError:
+            raise
+        except Exception:  # noqa: BLE001
+            raise PolicyUnavailableError("policy_config_unavailable", request_id=request_id) from None
+        return _strict_bool(value, request_id=request_id)
+
+    return read
+
+
+def scope_on_strict(kind: PolicyKind, scope: str, *, flag: Optional[FlagReader] = None,
+                    config: Any = None, request_id: Optional[str] = None) -> bool:
+    """Strict counterpart to :func:`scope_on`; missing/malformed flags raise."""
+    if scope not in SCOPE_DEFAULTS:
+        raise PolicyInvalidError("policy_scope_invalid", request_id=request_id)
+    read = _strict_reader(flag, config, request_id)
+    enabled = read(kind.enable_flag, False)
+    if not enabled:
+        return False
+    return read(scope_key(kind, scope), SCOPE_DEFAULTS[scope])
+
+
+def kinds_on_strict(scope: str, *, flag: Optional[FlagReader] = None, config: Any = None,
+                    request_id: Optional[str] = None) -> List[PolicyKind]:
+    """Enabled policy kinds, preserving failure instead of returning none."""
+    read = _strict_reader(flag, config, request_id)
+    return [kind for kind in KINDS if scope_on_strict(kind, scope, flag=read, request_id=request_id)]
