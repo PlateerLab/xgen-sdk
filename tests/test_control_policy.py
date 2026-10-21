@@ -183,19 +183,33 @@ def test_unreadable_files_are_left_alone(tmp_path):
 # ── 5. 로그 ──────────────────────────────────────────────────────────
 
 
-def test_one_log_row_per_policy_type_with_capped_samples():
-    db = FakeDb()
+def test_one_typed_evidence_request_per_policy_type_without_truncating_samples():
+    class Sink:
+        def __init__(self):
+            self.requests = []
+
+        def ingest(self, request, *, actor):
+            self.requests.append((request, actor))
+            return cp.EvidenceIngestResult("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", len(self.requests), ())
+
+    db = FakeDb(workflow_meta=[{"id": 31, "workflow_id": "wfA"}])
+    sink = Sink()
     rules = _rules(PHONE) + _rules(SWEAR, policy_type=cp.FORBIDDEN_WORD)
     found = cp.apply_rules("바보 010-1234-5678 " + "x" * 200, rules, mask=False)
-    assert cp.log_result(db, found, source=cp.SOURCE_CHAT_INPUT, workflow_id="wfA", user_id=7) == 2
-    rows = {params[1]: params for params in db.inserts}
-    assert set(rows) == {cp.PII, cp.FORBIDDEN_WORD}
-    assert rows[cp.PII][0] == "chat_input" and rows[cp.PII][6] == "wfA" and rows[cp.PII][13] == 7
-    detections = json.loads(rows[cp.FORBIDDEN_WORD][5])
-    assert detections == [{"policy_id": 9, "policy_name": "욕설", "count": 1,
-                           "samples": [{"original": "바보", "masked": "**"}], "enforced": True}]
-    capped = json.loads(cp.build_detections([{"samples": [{"original": "a" * 300, "masked": ""}]}]))
-    assert len(capped[0]["samples"][0]["original"]) == cp.SAMPLE_TEXT_CAP + 1
+    assert cp.log_result(db, found, source=cp.SOURCE_CHAT_INPUT, workflow_id="wfA", user_id=7,
+                         evidence_sink=sink) == 2
+    requests = {request.event.policy_type: request for request, _actor in sink.requests}
+    assert set(requests) == {cp.PII, cp.FORBIDDEN_WORD}
+    assert requests[cp.PII].event.source == "chat_input"
+    assert requests[cp.PII].subject_type == "workflow" and requests[cp.PII].subject_id == 31
+    assert requests[cp.PII].event.user_id == 7
+    assert db.inserts == [], "SDK evidence producers may read subject identity but never write the database"
+    evidence = requests[cp.FORBIDDEN_WORD].detections
+    assert json.loads(evidence) == [{"policy_id": 9, "policy_name": "욕설", "count": 1,
+                                     "samples": [], "enforced": True}]
+    exact = cp.build_detections([{"samples": [{"original": "a" * 300, "masked": ""}]}])
+    assert exact.wire()[0]["samples"][0]["original"] == "a" * 300
+    assert "a" * 101 not in str(exact) and "a" * 101 not in repr(exact)
 
 
 # ── 검토에서 재현된 것들 (2026-10-13) ───────────────────────────────
