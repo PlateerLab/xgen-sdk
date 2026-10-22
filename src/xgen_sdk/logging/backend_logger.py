@@ -3,6 +3,7 @@ import inspect
 import json
 from typing import Dict, Optional, Any
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
 from xgen_sdk.db import XgenDB
 
 logger = logging.getLogger("backend-logger")
@@ -48,7 +49,7 @@ class BackendLogger:
                 'message': message,
                 'function_name': func_name,
                 'api_endpoint': endpoint,
-                'metadata': json.dumps(metadata) if metadata else '{}'
+                'metadata': json.dumps(jsonable_encoder(metadata)) if metadata else '{}'
             }
             self.app_db.insert_record('backend_logs', log_data)
             logger.info(f"Logged backend data with log_id: {log_id}")
