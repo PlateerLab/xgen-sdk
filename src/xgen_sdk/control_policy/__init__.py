@@ -28,6 +28,22 @@ from .events import (
     log_policy_event,
     log_result,
 )
+from .evidence import (
+    CORE_URL_ENV,
+    DEFAULT_CORE_URL,
+    EVIDENCE_PATH,
+    INGEST_PERMISSION,
+    EvidenceActor,
+    EvidenceDetection,
+    EvidenceDetections,
+    EvidenceEvent,
+    EvidenceIngestRequest,
+    EvidenceIngestResult,
+    EvidenceSample,
+    EvidenceSink,
+    EvidenceWriteError,
+    HttpEvidenceSink,
+)
 from .files import (
     FORMAT_MASKERS,
     MASKING_MAX_BYTES,
@@ -121,4 +137,8 @@ __all__ = [
     "SOURCE_WORKFLOW_TOOL", "SOURCE_DOCUMENT_UPLOAD", "SOURCE_DOCUMENT_OCR_SUPPLEMENT",
     "SOURCE_CHAT_INPUT", "SOURCE_CHAT_UPLOAD", "SOURCE_FILESTORE_UPLOAD",
     "SAMPLE_TEXT_CAP", "SAMPLES_PER_POLICY_CAP", "build_detections", "log_policy_event", "log_result",
+    "CORE_URL_ENV", "DEFAULT_CORE_URL", "EVIDENCE_PATH", "INGEST_PERMISSION",
+    "EvidenceActor", "EvidenceDetection", "EvidenceDetections", "EvidenceEvent",
+    "EvidenceIngestRequest", "EvidenceIngestResult", "EvidenceSample", "EvidenceSink",
+    "EvidenceWriteError", "HttpEvidenceSink",
 ]
