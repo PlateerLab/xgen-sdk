@@ -1,6 +1,6 @@
 [project]
 name = "xgen-sdk"
-version = "2.19.1"
+version = "2.20.0"
 description = "XGen Platform Shared SDK — unified DB, Config, Storage, Auth, Quota, Notification, and LLM Catalog for agent and RAG services"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -64,6 +64,7 @@ dependencies = [
     # storage.crypto (AES-256-GCM) — minio 의 필수 전이 의존성이라 사실상 추가 설치 없음.
     # 직접 import 하므로 명시 선언 (전이 의존 제거 시 조용한 파손 방지).
     "pycryptodome==3.23.0",
+    "cryptography>=42.0.0",
     "httpx==0.28.1",
     "pydantic==2.12.5",
     "fastapi==0.141.1",
