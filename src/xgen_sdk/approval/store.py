@@ -1048,7 +1048,8 @@ def list_forms(app_db, *, include_inactive: bool = False) -> List[Dict[str, Any]
                f.is_active, f.created_at, f.updated_at,
                (SELECT COALESCE(MAX(s.step_index), 0) FROM approval_form_steps s
                  WHERE s.form_id = f.id) AS approver_steps,
-               (SELECT COUNT(*) FROM approval_form_blocks b WHERE b.form_id = f.id) AS block_count,
+               (SELECT COUNT(*) FROM approval_form_blocks b
+                 WHERE b.form_id = f.id AND b.block_type <> 'agent_dev_plan') AS block_count,
                (SELECT COUNT(*) FROM approval_lines l WHERE l.form_id = f.id) AS line_count
         FROM approval_forms f {where} ORDER BY f.is_builtin DESC, f.id
     """)
@@ -1074,6 +1075,7 @@ def get_form(app_db, form_id: int) -> Optional[Dict[str, Any]]:
     """, (form_id,))]
     #: 결재자 수 = 가장 뒤 단계 번호(0 은 기안). 컬럼으로 따로 들고 있으면
     #: 단계를 고칠 때마다 두 곳이 어긋날 수 있어 **파생**으로 둔다.
+    form["blocks"] = [b for b in form["blocks"] if not blocks_mod.is_retired(b.get("block_type"))]
     form["approver_steps"] = max([int(st["step_index"]) for st in form["steps"]] or [0])
     return form
 
@@ -1081,6 +1083,11 @@ def get_form(app_db, form_id: int) -> Optional[Dict[str, Any]]:
 def _normalized(row: Any) -> Dict[str, Any]:
     """읽어 온 칸 행의 종류 이름을 지금 이름으로 — 옛 이름이 화면과 훅까지 새지 않게."""
     out = dict(row)
+    if blocks_mod.is_retired(out.get("block_type")):
+        # Response-only compatibility: persisted required/data remain untouched.
+        out["retired"] = True
+        out["required"] = False
+        out["retirement_reason"] = "Agent 기획서 기능 종료로 입력 요구가 해제되었습니다."
     if "block_type" in out:
         out["block_type"] = blocks_mod.normalize_block_type(out["block_type"])
     return out
@@ -1178,7 +1185,10 @@ def _write_steps(app_db, form_id: int, steps: Sequence[Dict[str, Any]]) -> None:
 
 
 def _write_blocks(app_db, form_id: int, blocks: Sequence[Dict[str, Any]]) -> None:
-    _q(app_db, "DELETE FROM approval_form_blocks WHERE form_id = %s", (form_id,))
+    # Retired rows are archived data, not editor input. Preserve them even when
+    # saving the remaining fields; readers and new snapshots already omit them.
+    _q(app_db, "DELETE FROM approval_form_blocks WHERE form_id = %s AND block_type <> %s",
+       (form_id, blocks_mod.AGENT_DEV_PLAN))
     for b in blocks or []:
         cfg = b.get("config")
         _q(app_db, """
@@ -1561,6 +1571,8 @@ def snapshot_form_blocks(app_db, *, request_id: int, line_id: Optional[int] = No
         SELECT step_index, block_type, label, config, required, sort_order
         FROM approval_form_blocks WHERE form_id = %s ORDER BY step_index, sort_order, id
     """, (form_id,)):
+        if blocks_mod.is_retired(b.get("block_type")):
+            continue
         _q(app_db, """
             INSERT INTO approval_request_blocks
                 (request_id, step_order, block_type, label, config, required, sort_order)
@@ -1597,6 +1609,8 @@ def fill_block(app_db, *, request_id: int, block_id: int, actor_id: int,
     if not rows:
         raise E.ApprovalError("칸을 찾을 수 없습니다")
     row = rows[0]
+    if blocks_mod.is_retired(row.get("block_type")):
+        raise E.ApprovalError("Agent 기획서 기능이 종료되었습니다.")
     if str(row["status"]) != "pending":
         raise E.ApprovalError("이미 끝난 결재입니다")
     step = int(row["step_order"] or 0)

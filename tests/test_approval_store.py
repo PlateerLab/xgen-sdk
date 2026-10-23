@@ -268,7 +268,8 @@ class FakeDB:
                     for l in self.t["approval_lines"] if l.get("form_id") == p[0]]
         if s.startswith("DELETE FROM approval_form_blocks WHERE form_id"):
             self.t["approval_form_blocks"] = [
-                b for b in self.t["approval_form_blocks"] if b["form_id"] != p[0]]
+                b for b in self.t["approval_form_blocks"] if b["form_id"] != p[0]
+                or (len(p) > 1 and b["block_type"] == p[1])]
             return []
         if s.startswith("INSERT INTO approval_form_blocks"):
             self.t["approval_form_blocks"].append({

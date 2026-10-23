@@ -31,27 +31,24 @@ from xgen_sdk.approval import blocks as B
 BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
     {
         "name": "AI Agent 배포 결재",
-        "description": "기안자가 Agent 기획서를 첨부하고, 2차가 AI 위험도를 평가하고, 3차가 최종 결정합니다.",
+        "description": "기안자가 배포를 요청하고, 2차가 AI 위험도를 평가하고, 3차가 최종 결정합니다.",
         "notice": (
-            "■ [Agent 기획서]는 [마이페이지 > Agent 개발 기획서]에서 미리 작성하세요.\n"
             "■ 2차 결재자가 위험도 평가를 모두 채워야 3차로 넘어갑니다.\n"
-            "■ 승인 전에는 배포되지 않습니다. 반려되면 기획서를 고쳐 다시 올리세요.\n"
+            "■ 승인 전에는 배포되지 않습니다. 반려되면 요청 내용을 확인하고 다시 올리세요.\n"
             "■ 누군가 승인한 뒤에는 기안 칸을 수정할 수 없습니다."
         ),
         "steps": [
             {"step_index": 0, "title": "1차 기안",
-             "guide": "배포할 Agent의 기획서를 첨부합니다. 참고 자료가 있으면 함께 올립니다."},
+             "guide": "배포할 Agent를 확인하고 참고 자료가 있으면 첨부합니다."},
             {"step_index": 1, "title": "2차 AI 위험도 심사",
              "guide": (
-                 "기획서와 Agent 구성을 보고 AI 위험도를 평가합니다. "
+                 "Agent 구성을 보고 AI 위험도를 평가합니다. "
                  "항목 점수, 영향 범위, 판단 근거를 모두 채워야 다음으로 넘어갑니다."
              )},
             {"step_index": 2, "title": "3차 최종 결정",
-             "guide": "기획서·Agent 구성·위험도 평가 결과를 보고 승인하거나 반려합니다."},
+             "guide": "Agent 구성·위험도 평가 결과를 보고 승인하거나 반려합니다."},
         ],
         "blocks": [
-            {"step_index": 0, "block_type": B.AGENT_DEV_PLAN, "label": "Agent 기획서",
-             "required": True, "sort_order": 1},
             {"step_index": 0, "block_type": B.ATTACHMENTS, "label": "참고 자료",
              "required": False, "sort_order": 2},
             # 평가지 칸 하나. 이 양식은 기본 제공 [AI 위험도 평가지](ai-risk)로 채점한다.
@@ -132,7 +129,7 @@ LEGACY_TEXTS: Dict[str, Dict[str, Any]] = {
 _V1_62_0: Dict[str, Dict[str, Any]] = {
     "AI Agent 배포 결재": {
         "description": [
-            "기안자가 Agent 기획서를 붙이고, 2차가 기획서와 Agent 구성을 보고 거버넌스 "
+            "기안자가 Agent 기획서를 붙이고, 2차가 Agent 구성을 보고 거버넌스 "
             "[AI 위험도 평가] 와 같은 기준으로 평가하고, 3차가 최종 결정한다. 복사해서 "
             "단계를 더하거나 뺄 수 있다.",
         ],
@@ -179,14 +176,16 @@ _V2_1_0: Dict[str, Dict[str, Any]] = {
     "AI Agent 배포 결재": {
         "guides": {
             1: [
-                "기획서와 Agent 구성을 보고 거버넌스 [AI 위험도 평가]와 같은 기준으로 평가합니다. "
+                "Agent 구성을 보고 거버넌스 [AI 위험도 평가]와 같은 기준으로 평가합니다. "
                 "항목 점수, 영향 범위, 판단 근거를 모두 채워야 다음으로 넘어갑니다.",
             ],
         },
     },
 }
 
-for _name, _old in (*_V1_62_0.items(), *_V2_1_0.items()):
+_V2_20_0 = {'AI Agent 배포 결재': {'description': ['기안자가 Agent 기획서를 첨부하고, 2차가 AI 위험도를 평가하고, 3차가 최종 결정합니다.'], 'notice': ['■ [Agent 기획서]는 [마이페이지 > Agent 개발 기획서]에서 미리 작성하세요.\n■ 2차 결재자가 위험도 평가를 모두 채워야 3차로 넘어갑니다.\n■ 승인 전에는 배포되지 않습니다. 반려되면 기획서를 고쳐 다시 올리세요.\n■ 누군가 승인한 뒤에는 기안 칸을 수정할 수 없습니다.'], 'guides': {0: ['배포할 Agent의 기획서를 첨부합니다. 참고 자료가 있으면 함께 올립니다.'], 1: ['기획서와 Agent 구성을 보고 AI 위험도를 평가합니다. 항목 점수, 영향 범위, 판단 근거를 모두 채워야 다음으로 넘어갑니다.'], 2: ['기획서·Agent 구성·위험도 평가 결과를 보고 승인하거나 반려합니다.']}}}
+
+for _name, _old in (*_V1_62_0.items(), *_V2_1_0.items(), *_V2_20_0.items()):
     _entry = LEGACY_TEXTS.setdefault(_name, {})
     for _field in ("description", "notice"):
         _entry.setdefault(_field, []).extend(_old.get(_field) or [])

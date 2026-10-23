@@ -78,7 +78,6 @@ def test_the_ai_deploy_template_is_the_three_step_procedure(db):
     assert form["approver_steps"] == 2, "기안 + 결재자 2명"
     kinds = [(b["step_index"], b["block_type"], b["required"]) for b in form["blocks"]]
     assert kinds == [
-        (0, blocks.AGENT_DEV_PLAN, True),
         (0, blocks.ATTACHMENTS, False),
         (1, blocks.EVALUATION, True),
     ]
@@ -182,18 +181,19 @@ def test_copy_then_drop_the_evaluation(db):
                for b in store.get_form(db, copy_id)["blocks"])
 
 
-def test_shrink_to_plan_only_and_finish_at_the_second_step(db):
-    """전부 빼고 기획서 하나만 남겨 2차에서 끝낸다 — 지시한 시나리오 그대로."""
-    copy_id = store.copy_form(db, _from_template(db), name="기획서만", owner_id=1)
+def test_shrink_to_text_only_and_finish_at_the_second_step(db):
+    """전부 빼고 기안 내용 하나만 남겨 2차에서 끝낸다 — 지시한 시나리오 그대로."""
+    copy_id = store.copy_form(db, _with_required_text(db), name="기안 내용만", owner_id=1)
     store.update_form(
         db, copy_id,
         steps=[{"step_index": 0, "title": "1차 기안"}, {"step_index": 1, "title": "2차 결재"}],
-        blocks=[{"step_index": 0, "block_type": blocks.AGENT_DEV_PLAN,
-                 "label": "Agent 기획서", "required": True, "sort_order": 1}],
+        blocks=[{"step_index": 0, "block_type": blocks.TEXT,
+                 "label": "Agent 기안 내용", "required": True, "sort_order": 1}],
     )
     form = store.get_form(db, copy_id)
     assert form["approver_steps"] == 1
-    assert [b["block_type"] for b in form["blocks"]] == [blocks.AGENT_DEV_PLAN]
+    assert [b["block_type"] for b in form["blocks"]] == [blocks.TEXT]
+
 
 
 def test_shrinking_steps_while_leaving_a_block_behind_is_refused(db):
@@ -283,7 +283,7 @@ def test_submitting_snapshots_the_form(db):
     store.set_line_form(db, line_id, form_id)
     req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
     assert [(b["step_order"], b["block_type"]) for b in req["blocks"]] == [
-        (0, blocks.AGENT_DEV_PLAN), (0, blocks.ATTACHMENTS), (1, blocks.EVALUATION)]
+        (0, blocks.ATTACHMENTS), (1, blocks.EVALUATION)]
 
 
 def test_editing_the_form_later_does_not_touch_a_live_request(db):
@@ -292,38 +292,40 @@ def test_editing_the_form_later_does_not_touch_a_live_request(db):
     store.set_line_form(db, line_id, form_id)
     req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
     store.update_form(db, form_id, blocks=[])
-    assert len(store.get(db, req["id"])["blocks"]) == 3, "올라간 결재의 칸은 스냅샷이다"
+    assert len(store.get(db, req["id"])["blocks"]) == 2, "올라간 결재의 칸은 스냅샷이다"
 
 
 def test_only_the_drafter_fills_step_one(db):
-    form_id = _from_template(db)
+    form_id = _with_required_text(db)
     line_id = _line(db)
     store.set_line_form(db, line_id, form_id)
     req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
-    plan = next(b for b in req["blocks"] if b["block_type"] == blocks.AGENT_DEV_PLAN)
+    plan = next(b for b in req["blocks"] if b["block_type"] == blocks.TEXT)
     with pytest.raises(E.ApprovalError):
         store.fill_block(db, request_id=req["id"], block_id=plan["id"], actor_id=3,
-                         data={"plan_id": 5})
+                         data={"text": 5})
     store.fill_block(db, request_id=req["id"], block_id=plan["id"], actor_id=1,
-                     data={"plan_id": 5})
+                     data={"text": 5})
+
 
 
 def _submit_with_plan(db, line_id, *, requester_id=1, title="배포"):
     """기획서를 붙여 상신한다 — 기안 칸을 상신과 한 번에 채우는 길."""
     return store.submit(db, requester_id=requester_id, title=title, line_id=line_id,
-                        block_values=[{"sort_order": 1, "data": {"plan_id": 5}}])
+                        block_values=[])
 
 
 def test_the_draft_can_be_filled_in_the_same_breath_as_the_submission(db):
-    """화면이 기획서를 받아 상신까지 한 번에 — 반쯤 빈 결재가 떠 있는 순간이 없다."""
-    form_id = _from_template(db)
+    """화면이 기안 내용를 받아 상신까지 한 번에 — 반쯤 빈 결재가 떠 있는 순간이 없다."""
+    form_id = _with_required_text(db)
     line_id = _line(db)
     store.set_line_form(db, line_id, form_id)
-    req = _submit_with_plan(db, line_id)
-    plan = next(b for b in req["blocks"] if b["block_type"] == blocks.AGENT_DEV_PLAN)
+    req = _submit_with_text(db, line_id)
+    plan = next(b for b in req["blocks"] if b["block_type"] == blocks.TEXT)
     filled = next(b for b in store.get(db, req["id"])["blocks"] if b["id"] == plan["id"])
-    assert blocks.parse_data(filled["data"]) == {"plan_id": 5}
+    assert blocks.parse_data(filled["data"]) == {"text": 5}
     assert filled["filled_by"] == 1
+
 
 
 def test_a_value_for_a_slot_the_form_does_not_have_is_refused(db):
@@ -349,11 +351,11 @@ def test_the_submission_cannot_fill_someone_elses_step(db):
 def test_nobody_can_approve_while_the_draft_is_empty(db):
     """기안 칸은 **아무도 승인하지 않는다** — 제 단계만 보면 그 칸은 영영 안 걸린다.
 
-    2차가 "기획서를 보고 위험도를 평가한다" 는 절차라, 기획서가 비어 있는데
+    2차가 "기안 내용를 보고 위험도를 평가한다" 는 절차라, 기안 내용가 비어 있는데
     승인이 되면 그 절차는 이름만 남는다.
     """
     registry.register_action("generic", lambda *a, **k: None)
-    form_id = _from_template(db)
+    form_id = _with_required_text(db)
     line_id = _line(db)
     store.set_line_form(db, line_id, form_id)
     rid = store.submit(db, requester_id=1, title="배포", line_id=line_id)["id"]
@@ -364,15 +366,16 @@ def test_nobody_can_approve_while_the_draft_is_empty(db):
                      data=_assessed("medium"))
     with pytest.raises(E.ApprovalError) as e:
         store.decide(db, rid, actor_id=3, action="approved")
-    assert "Agent 기획서" in str(e.value)
+    assert "Agent 기안 내용" in str(e.value)
     assert "1차" in str(e.value), "누가 채워야 하는 칸인지 알 수 있어야 한다"
 
     # 기안자가 뒤늦게 붙이면 그대로 이어서 돈다 — 결재가 죽지 않는다.
     plan = next(b for b in store.get(db, rid)["blocks"]
-                if b["block_type"] == blocks.AGENT_DEV_PLAN)
+                if b["block_type"] == blocks.TEXT)
     store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
-                     data={"plan_id": 7})
+                     data={"text": 7})
     store.decide(db, rid, actor_id=3, action="approved")
+
 
 
 def test_the_second_approver_must_assess_before_approving(db):
@@ -661,21 +664,21 @@ def test_a_line_without_a_form_can_be_trimmed_freely(db):
 
 
 def test_the_draft_is_locked_once_someone_has_approved(db):
-    """2차가 기획서 A 를 보고 "저위험" 을 매겼는데 기안자가 B 로 바꿔치기하면,
+    """2차가 기안 내용 A 를 보고 "저위험" 을 매겼는데 기안자가 B 로 바꿔치기하면,
     3차는 B 를 보면서 A 에 대한 승인을 근거로 결정한다 — 2차의 승인이 하지 않은
     말을 하게 된다. 회수를 "아무도 승인하기 전" 으로 묶어 둔 것과 같은 이유다.
     """
     registry.register_action("generic", lambda *a, **k: None)
-    form_id = _from_template(db)
+    form_id = _with_required_text(db)
     line_id = _line(db)
     store.set_line_form(db, line_id, form_id)
-    rid = _submit_with_plan(db, line_id)["id"]
+    rid = _submit_with_text(db, line_id)["id"]
 
     plan = next(b for b in store.get(db, rid)["blocks"]
-                if b["block_type"] == blocks.AGENT_DEV_PLAN)
+                if b["block_type"] == blocks.TEXT)
     # 아무도 승인하기 전에는 고칠 수 있다 — 올린 뒤 붙이는 길이 필요하다.
     store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
-                     data={"plan_id": 9, "title": "고친 기획서"})
+                     data={"text": 9, "title": "고친 기안 내용"})
 
     risk = next(b for b in store.get(db, rid)["blocks"]
                 if b["block_type"] == blocks.EVALUATION)
@@ -685,12 +688,13 @@ def test_the_draft_is_locked_once_someone_has_approved(db):
 
     with pytest.raises(E.ApprovalError) as e:
         store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
-                         data={"plan_id": 99, "title": "슬쩍 바꾼 기획서"})
+                         data={"text": 99, "title": "슬쩍 바꾼 기안 내용"})
     assert "이미 승인한 결재자" in str(e.value)
     assert "다시 올리" in str(e.value), "무엇을 하면 되는지 말해야 한다"
 
     after = next(b for b in store.get(db, rid)["blocks"] if b["id"] == plan["id"])
-    assert blocks.parse_data(after["data"])["plan_id"] == 9, "값이 그대로여야 한다"
+    assert blocks.parse_data(after["data"])["text"] == 9, "값이 그대로여야 한다"
+
 
 
 def test_an_approver_cannot_edit_after_acting(db):
@@ -734,7 +738,7 @@ def test_the_form_survives_when_the_requester_edits_the_approvers(db):
                               {"approver_id": 3, "step_order": 2}])
     assert out["form_name"] == "AI Agent 배포 결재", "양식이 따라와야 한다"
     assert [b["block_type"] for b in out["blocks"]] == [
-        blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.EVALUATION]
+        blocks.ATTACHMENTS, blocks.EVALUATION]
     assert [s["approver_id"] for s in out["steps"]] == [4, 3], "결재자는 고른 대로"
 
 
@@ -972,7 +976,7 @@ def test_submitting_on_a_legacy_form_snapshots_the_new_name(db):
     store.set_line_form(db, line_id, form_id)
     req = store.submit(db, requester_id=1, title="배포", line_id=line_id)
     raw = [b["block_type"] for b in db.t["approval_request_blocks"] if b["request_id"] == req["id"]]
-    assert raw == [blocks.AGENT_DEV_PLAN, blocks.ATTACHMENTS, blocks.EVALUATION]
+    assert raw == [blocks.ATTACHMENTS, blocks.EVALUATION]
 
 
 def test_a_live_request_with_the_old_name_can_still_be_filled_and_approved(db):
@@ -1027,3 +1031,15 @@ def test_an_applier_on_the_new_name_runs_for_a_legacy_row(db):
         assert seen == [(blocks.EVALUATION, {**_assessed("high"), "options": evaluation.FULL_OPTIONS})]
     finally:
         blocks._APPLIERS.pop(blocks.EVALUATION, None)
+
+
+def _with_required_text(db):
+    """Generic draft authorization tests use a supported required text block."""
+    t = templates.by_name("AI Agent 배포 결재")
+    return store.create_form(db, name="필수 기안 내용", owner_id=1, steps=t["steps"],
+        blocks=[{"step_index": 0, "block_type": blocks.TEXT, "label": "Agent 기안 내용",
+                 "required": True, "sort_order": 1}, *t["blocks"]])
+
+def _submit_with_text(db, line_id):
+    return store.submit(db, requester_id=1, title="배포", line_id=line_id,
+        block_values=[{"sort_order": 1, "data": {"text": 5}}])
