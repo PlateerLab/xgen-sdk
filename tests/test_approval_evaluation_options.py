@@ -176,7 +176,7 @@ def _deploy_request(db):
                                        {"approver_id": 4, "step_order": 2}])["id"]
     store.set_line_form(db, line_id, form_id)
     rid = store.submit(db, requester_id=1, title="배포", line_id=line_id,
-                       block_values=[{"sort_order": 1, "data": {"plan_id": 5}}])["id"]
+                       block_values=[{"sort_order": 1, "data": {"attachment_ids": [5]}}])["id"]
     block = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.EVALUATION)
     return rid, block
 
@@ -287,10 +287,10 @@ def test_empty_values_are_left_alone(db):
 
 def test_other_block_types_are_untouched(db):
     rid, _ = _deploy_request(db)
-    plan = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.AGENT_DEV_PLAN)
+    plan = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.ATTACHMENTS)
     store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
-                     data={"plan_id": 7, "options": {"x": 1}})
-    assert _stored(db, plan["id"]) == {"plan_id": 7, "options": {"x": 1}}
+                     data={"attachment_ids": [7], "options": {"x": 1}})
+    assert _stored(db, plan["id"]) == {"attachment_ids": [7], "options": {"x": 1}}
 
 
 def test_the_legacy_block_name_is_covered(db):

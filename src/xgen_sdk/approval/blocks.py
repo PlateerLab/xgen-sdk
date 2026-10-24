@@ -96,10 +96,6 @@ def _has_files(data: Any) -> bool:
     return isinstance(files, list) and len(files) > 0
 
 
-def _has_plan(data: Any) -> bool:
-    if not isinstance(data, dict):
-        return False
-    return data.get("plan_id") is not None
 
 
 def _is_score(value: Any) -> bool:
@@ -199,13 +195,6 @@ REGISTRY: Dict[str, BlockSpec] = {
         is_filled=_has_files,
         default_config={"extensions": [], "max_count": 10, "max_bytes": ATTACHMENT_MAX_BYTES},
     ),
-    AGENT_DEV_PLAN: BlockSpec(
-        AGENT_DEV_PLAN, "Agent 기획서",
-        description="Agent 개발 기획서를 고르거나 새로 작성하는 칸.",
-        is_filled=_has_plan,
-        default_config={"allow_create": True},
-        actor="drafter",
-    ),
     EVALUATION: BlockSpec(
         EVALUATION, "평가지",
         description="평가 양식으로 항목마다 점수를 매기는 칸입니다. 등급은 점수로 정해집니다.",
@@ -214,6 +203,11 @@ REGISTRY: Dict[str, BlockSpec] = {
         actor="approver",
     ),
 }
+
+
+def is_retired(block_type: str) -> bool:
+    """Preserve old rows, but never require or accept new planning data."""
+    return block_type == AGENT_DEV_PLAN
 
 
 def known_types() -> List[str]:
@@ -291,6 +285,8 @@ def parse_data(raw: Any) -> Any:
 
 def is_filled(block: Dict[str, Any]) -> bool:
     """이 칸이 채워졌는가 — 종류가 정한 규칙으로."""
+    if is_retired(block.get("block_type")):
+        return True
     s = spec(block.get("block_type"))
     if s is None:
         # 모르는 종류는 **막지 않는다.** 옛 결재가 새 코드에서 영영 멈추면
@@ -312,6 +308,8 @@ def validate_data(block: Dict[str, Any], data: Any) -> None:
     파일 확장자는 **올리는 문**이 이미 한 번 본다(그쪽이 진짜 관문이다). 여기서
     보는 것은 그 위에 양식이 더 좁힌 조건이라, 값에 실린 이름으로 판단한다.
     """
+    if is_retired(block.get("block_type")) or (isinstance(data, dict) and "plan_id" in data):
+        raise ValueError("Agent 기획서 기능이 종료되었습니다.")
     cfg = parse_data(block.get("config")) or {}
     if not isinstance(cfg, dict):
         return

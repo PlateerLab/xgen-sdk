@@ -43,7 +43,7 @@ def test_each_type_decides_what_filled_means():
     assert blocks.is_filled(_block(1, blocks.TEXT, data='{"text":"검토함"}'))
     assert not blocks.is_filled(_block(0, blocks.ATTACHMENTS, data='{"attachment_ids":[]}'))
     assert blocks.is_filled(_block(0, blocks.ATTACHMENTS, data='{"attachment_ids":[7]}'))
-    assert not blocks.is_filled(_block(0, blocks.AGENT_DEV_PLAN, data='{}'))
+    assert blocks.is_filled(_block(0, blocks.AGENT_DEV_PLAN, data='{}'))  # Retired: never blocks approval.
     assert blocks.is_filled(_block(0, blocks.AGENT_DEV_PLAN, data='{"plan_id":3}'))
 
 
