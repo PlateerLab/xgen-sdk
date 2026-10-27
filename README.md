@@ -279,6 +279,22 @@ only to forward an existing verified proof within the same audience. To call a
 different backend, use `service_principal_headers(..., audience="target-service")`
 with a user profile obtained from trusted server state.
 
+To manage trust keys and receiver permissions independently, explicitly set
+`XGEN_AUTH_CONFIG_MODE=split-v1`, `XGEN_TRUSTED_SERVICE_KEYS`, and
+`XGEN_SERVICE_AUTHORIZATION_POLICY`, and remove `XGEN_TRUSTED_SERVICES`.
+The default remains `legacy`. Split mode requires keyed service assertions and
+an exact receiver policy; a trusted key alone grants no access. Call
+`validate_auth_configuration()` from the application lifespan before serving
+requests. `PrincipalMiddleware` also validates split configuration on ASGI
+lifespan startup. See the [split configuration and migration guide](docs/security/split-service-auth-configuration.md).
+
+신뢰 키와 수신 서비스의 권한을 분리하려면 `XGEN_AUTH_CONFIG_MODE=split-v1`,
+`XGEN_TRUSTED_SERVICE_KEYS`, `XGEN_SERVICE_AUTHORIZATION_POLICY`를 설정하고
+`XGEN_TRUSTED_SERVICES`를 제거합니다. 기본 모드는 `legacy`이며, split 모드에서는
+키만 등록한 발신자는 접근할 수 없습니다. 요청 처리 전에 애플리케이션 lifespan에서
+`validate_auth_configuration()`을 호출합니다. `PrincipalMiddleware`도 split 모드의
+ASGI lifespan 시작 시 설정을 검증합니다. 자세한 예시는 위 가이드를 참고합니다.
+
 Document resource grants use a separate, strict HS256 capability codec. These
 tokens always use issuer and audience `xgen-documents`, type
 `document-capability`, and a lifetime of at most 60 seconds. They bind a

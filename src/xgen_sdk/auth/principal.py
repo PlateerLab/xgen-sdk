@@ -30,6 +30,9 @@ SERVICE_NAME_ENV = "XGEN_SERVICE_NAME"
 SERVICE_SIGNING_KEY_ENV = "XGEN_SERVICE_SIGNING_KEY"
 SERVICE_KEY_ID_ENV = "XGEN_SERVICE_KEY_ID"
 TRUSTED_SERVICES_ENV = "XGEN_TRUSTED_SERVICES"
+AUTH_CONFIG_MODE_ENV = "XGEN_AUTH_CONFIG_MODE"
+TRUSTED_SERVICE_KEYS_ENV = "XGEN_TRUSTED_SERVICE_KEYS"
+SERVICE_AUTHORIZATION_POLICY_ENV = "XGEN_SERVICE_AUTHORIZATION_POLICY"
 
 PROOF_HEADER = "x-xgen-principal"
 IDENTITY_HEADERS = (
@@ -153,14 +156,16 @@ def _not_after(value: Any, *, source: str) -> int:
     return value
 
 
-def _json_config(raw: str | None, *, env_name: str) -> dict[str, Any]:
+def _json_config(
+    raw: str | None, *, env_name: str, allow_empty: bool = False
+) -> dict[str, Any]:
     if not isinstance(raw, str) or not raw:
         raise _misconfigured(f"{env_name} is not configured")
     try:
         parsed = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
     except (json.JSONDecodeError, PrincipalValidationError) as exc:
         raise _misconfigured(f"invalid {env_name}") from exc
-    if not isinstance(parsed, dict) or not parsed:
+    if not isinstance(parsed, dict) or (not parsed and not allow_empty):
         raise _misconfigured(f"invalid {env_name}")
     return parsed
 
@@ -258,8 +263,10 @@ def _split_permissions(value: str) -> frozenset[str]:
 
 def _trusted_services(
     raw: str | None,
+    *,
+    env_name: str = TRUSTED_SERVICES_ENV,
 ) -> dict[str, tuple[dict[str | None, tuple[bytes, int | None]], frozenset[str]]]:
-    parsed = _json_config(raw, env_name=TRUSTED_SERVICES_ENV)
+    parsed = _json_config(raw, env_name=env_name)
     trusted: dict[
         str, tuple[dict[str | None, tuple[bytes, int | None]], frozenset[str]]
     ] = {}
@@ -289,7 +296,7 @@ def _trusted_services(
             keys: dict[str | None, tuple[bytes, int | None]] = {
                 None: (
                     _key_bytes(
-                        config["key"], env_name=f"{TRUSTED_SERVICES_ENV}.{service}.key"
+                        config["key"], env_name=f"{env_name}.{service}.key"
                     ),
                     None,
                 )
@@ -303,7 +310,7 @@ def _trusted_services(
             for raw_kid, key_config in raw_keys.items():
                 kid = _key_id(
                     raw_kid,
-                    source=f"{TRUSTED_SERVICES_ENV}.{service}.keys",
+                    source=f"{env_name}.{service}.keys",
                     configuration=True,
                 )
                 if not isinstance(key_config, dict) or set(key_config) not in (
@@ -316,7 +323,7 @@ def _trusted_services(
                 if "not_after" in key_config:
                     cutoff = _not_after(
                         key_config["not_after"],
-                        source=f"{TRUSTED_SERVICES_ENV}.{service}.keys.{kid}.not_after",
+                        source=f"{env_name}.{service}.keys.{kid}.not_after",
                     )
                 else:
                     cutoff = None
@@ -324,7 +331,7 @@ def _trusted_services(
                 keys[kid] = (
                     _key_bytes(
                         key_config["key"],
-                        env_name=f"{TRUSTED_SERVICES_ENV}.{service}.keys.{kid}.key",
+                        env_name=f"{env_name}.{service}.keys.{kid}.key",
                     ),
                     cutoff,
                 )
@@ -332,6 +339,117 @@ def _trusted_services(
                 raise _misconfigured("trusted service keyrings require exactly one active key")
         trusted[service] = (keys, frozenset(permissions))
     return trusted
+
+
+def _auth_config_mode() -> str:
+    mode = os.getenv(AUTH_CONFIG_MODE_ENV, "legacy")
+    if mode not in {"legacy", "split-v1"}:
+        raise _misconfigured(f"{AUTH_CONFIG_MODE_ENV} must be legacy or split-v1")
+    if mode == "legacy" and (
+        TRUSTED_SERVICE_KEYS_ENV in os.environ or SERVICE_AUTHORIZATION_POLICY_ENV in os.environ
+    ):
+        raise _misconfigured("split auth configuration requires split-v1 mode")
+    return mode
+
+
+def _split_trusted_services(
+) -> dict[str, tuple[dict[str | None, tuple[bytes, int | None]], frozenset[str]]]:
+    if TRUSTED_SERVICES_ENV in os.environ:
+        raise _misconfigured("split-v1 cannot be combined with XGEN_TRUSTED_SERVICES")
+    receiver = _service_name(os.getenv(SERVICE_NAME_ENV), source=SERVICE_NAME_ENV)
+    key_map = _json_config(
+        os.getenv(TRUSTED_SERVICE_KEYS_ENV), env_name=TRUSTED_SERVICE_KEYS_ENV, allow_empty=True
+    )
+    policy = _json_config(
+        os.getenv(SERVICE_AUTHORIZATION_POLICY_ENV), env_name=SERVICE_AUTHORIZATION_POLICY_ENV
+    )
+    if (
+        set(policy) != {"schema_version", "receiver", "grants"}
+        or type(policy["schema_version"]) is not int
+        or policy["schema_version"] != 1
+        or policy["receiver"] != receiver
+        or not isinstance(policy["grants"], dict)
+    ):
+        raise _misconfigured("invalid split-v1 authorization policy schema or receiver")
+    grants = policy["grants"]
+    for issuer, grant in grants.items():
+        _service_name(issuer, source="authorization policy issuer")
+        if not isinstance(grant, dict) or set(grant) != {"permissions"}:
+            raise _misconfigured("authorization grants require only permissions")
+        permissions = grant["permissions"]
+        if (
+            not isinstance(permissions, list)
+            or any(
+                not isinstance(permission, str)
+                or not permission
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in permission)
+                or "*" in permission
+                or "," in permission
+                or unquote(permission) != permission
+                for permission in permissions
+            )
+            or len(set(permissions)) != len(permissions)
+        ):
+            raise _misconfigured("authorization permissions must be unique finite canonical strings")
+        if issuer not in key_map:
+            raise _misconfigured("authorization grant references an issuer without trusted keys")
+
+    # Validate every key entry, including issuers without any authorization grant.
+    # Reuse the legacy keyring parser only after enforcing the split-only schema;
+    # its temporary permission lists never come from the key configuration.
+    combined: dict[str, Any] = {}
+    for issuer, entry in key_map.items():
+        _service_name(issuer, source="trusted key issuer")
+        if not isinstance(entry, dict) or set(entry) != {"keys"}:
+            raise _misconfigured("split-v1 trusted service entries require only keys")
+        combined[issuer] = {"keys": entry["keys"], "permissions": []}
+    validated = _trusted_services(
+        json.dumps(combined), env_name=TRUSTED_SERVICE_KEYS_ENV
+    ) if combined else {}
+    # Omitting a grant denies the issuer even if it declares no permissions.
+    return {
+        issuer: (validated[issuer][0], frozenset(grant["permissions"]))
+        for issuer, grant in grants.items()
+    }
+
+
+def validate_auth_configuration() -> None:
+    """Validate receiving-service authentication configuration at startup.
+
+    Raises ``PrincipalConfigurationError`` without including secret values.
+    Configuration is read afresh, with no network access or mutable cache.
+    Split mode requires Gateway verification and the exact receiving audience.
+    Legacy mode validates configured receiving components and permits standalone
+    local development without any receiving authentication configuration.
+    """
+
+    mode = _auth_config_mode()
+    receiving_envs = (
+        SERVICE_NAME_ENV, GATEWAY_PUBLIC_KEY_ENV, GATEWAY_PUBLIC_KEYS_ENV,
+        GATEWAY_KEY_ID_ENV, TRUSTED_SERVICES_ENV,
+    )
+    if mode == "legacy" and not any(name in os.environ for name in receiving_envs):
+        return
+    _service_name(os.getenv(SERVICE_NAME_ENV), source=SERVICE_NAME_ENV)
+    if mode == "split-v1" or any(
+        name in os.environ
+        for name in (GATEWAY_PUBLIC_KEY_ENV, GATEWAY_PUBLIC_KEYS_ENV, GATEWAY_KEY_ID_ENV)
+    ):
+        gateway_header = dict(_GATEWAY_JWT_HEADER)
+        if os.getenv(GATEWAY_PUBLIC_KEYS_ENV) is not None:
+            gateway_header["kid"] = os.getenv(GATEWAY_KEY_ID_ENV)
+        _gateway_verification_key(gateway_header)
+    if mode == "split-v1":
+        _split_trusted_services()
+    elif TRUSTED_SERVICES_ENV in os.environ:
+        _trusted_services(os.getenv(TRUSTED_SERVICES_ENV))
+
+
+def _incoming_trusted_services(
+) -> dict[str, tuple[dict[str | None, tuple[bytes, int | None]], frozenset[str]]]:
+    if _auth_config_mode() == "split-v1":
+        return _split_trusted_services()
+    return _trusted_services(os.getenv(TRUSTED_SERVICES_ENV))
 
 
 def _raw_principal_headers(scope: Mapping[str, Any]) -> tuple[dict[str, str] | None, str | None]:
@@ -393,7 +511,7 @@ def _verify_assertion(
         gateway_key, key_not_after = _gateway_verification_key(header)
         service_key = None
     elif principal_type == "service" and isinstance(issuer, str):
-        service = _trusted_services(os.getenv(TRUSTED_SERVICES_ENV)).get(issuer)
+        service = _incoming_trusted_services().get(issuer)
         if service is None:
             raise _invalid("untrusted service issuer")
         service_keys, service_permissions = service
@@ -474,6 +592,8 @@ def verified_identity_headers(scope: Mapping[str, Any], *, now: int | None = Non
     raises :class:`PrincipalValidationError`.
     """
 
+    if _auth_config_mode() == "split-v1":
+        _split_trusted_services()
     identity, proof = _raw_principal_headers(scope)
     if identity is None:
         return None
@@ -591,6 +711,28 @@ class PrincipalMiddleware:
         self.app = app
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "lifespan":
+            startup = await receive()
+            try:
+                if _auth_config_mode() == "split-v1":
+                    validate_auth_configuration()
+            except PrincipalConfigurationError:
+                # Explicit failure prevents ASGI servers in automatic lifespan
+                # mode from treating this exception as unsupported lifespan.
+                await send({"type": "lifespan.startup.failed", "message": "Invalid XGen authentication configuration"})
+                raise
+
+            pending_startup = True
+
+            async def replay_receive() -> Any:
+                nonlocal pending_startup
+                if pending_startup:
+                    pending_startup = False
+                    return startup
+                return await receive()
+
+            await self.app(scope, replay_receive, send)
+            return
         if scope.get("type") not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
@@ -642,6 +784,9 @@ __all__ = [
     "GATEWAY_PUBLIC_KEY_ENV",
     "GATEWAY_PUBLIC_KEYS_ENV",
     "GATEWAY_KEY_ID_ENV",
+    "AUTH_CONFIG_MODE_ENV",
+    "TRUSTED_SERVICE_KEYS_ENV",
+    "SERVICE_AUTHORIZATION_POLICY_ENV",
     "IDENTITY_HEADERS",
     "PROOF_HEADER",
     "PrincipalMiddleware",
@@ -655,4 +800,5 @@ __all__ = [
     "service_principal_headers",
     "sign_principal_for_service",
     "verified_identity_headers",
+    "validate_auth_configuration",
 ]
