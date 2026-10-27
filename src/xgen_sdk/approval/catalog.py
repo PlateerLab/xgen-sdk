@@ -87,6 +87,20 @@ AGENT_DEPLOY = "agent.deploy"
 #: 승인될 때까지 **옛 정의가 계속 돈다.** 갱신 결재가 서비스를 내리면 아무도 누르지 않는다.
 AGENT_REDEPLOY = "agent.redeploy"
 
+#: 앱 API 배포 — 에이전트가 만든 **앱을 키로 부르는 API 로 바깥에 처음 여는** 것.
+#:
+#: 누르는 순간 앱 폴더를 봉인하고 키를 발급한다(결재자가 보는 것과 열리는 것이 같아야 한다).
+#: **여는 것만** 승인 뒤로 미룬다 — 승인 전에는 그 버전 주소가 "결재 진행 중" 이라고 답한다.
+#: 반려되면 봉인본을 지운다. 적용은 앱 배포를 가진 workflow 가 한다.
+APP_API_DEPLOY = "app.api_deploy"
+
+#: 앱 API 재배포 — **이미 열린 앱 API 를 새 버전으로 바꾸는** 것.
+#:
+#: 에이전트 배포와 같은 이유로 나눈다: 처음 여는 것과 열린 것을 바꾸는 것은 위험이 달라
+#: 조직이 한쪽만 결재로 태우거나 결재선을 따로 세울 수 있어야 한다.
+#: 승인될 때까지 **옛 버전이 계속 답한다** — 갱신 결재가 바깥 호출자를 끊으면 안 된다.
+APP_API_REDEPLOY = "app.api_redeploy"
+
 #: 파일 저장소 업로드 — 올린 파일은 **결재가 끝나야** 쓸 수 있다.
 #:
 #: 업로드 자체는 끝난다(바이트는 저장소에 들어간다). 그 파일은 승인 전까지 목록에
@@ -117,6 +131,16 @@ CATALOG: Tuple[ActionSpec, ...] = (
         AGENT_REDEPLOY, "에이전트 재배포",
         "이미 배포된 에이전트를 지금 정의로 갱신하는 것",
         OWNER_CORE, DOMAIN_DEPLOY,
+    ),
+    ActionSpec(
+        APP_API_DEPLOY, "앱 API 배포",
+        "에이전트가 만든 앱을 키로 부르는 API로 바깥에 처음 여는 것",
+        OWNER_WORKFLOW, DOMAIN_DEPLOY,
+    ),
+    ActionSpec(
+        APP_API_REDEPLOY, "앱 API 재배포",
+        "이미 열린 앱 API를 새 버전으로 바꾸는 것",
+        OWNER_WORKFLOW, DOMAIN_DEPLOY,
     ),
 
     # ── 지식 ──
