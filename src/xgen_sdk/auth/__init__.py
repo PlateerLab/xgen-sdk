@@ -35,6 +35,7 @@ from xgen_sdk.auth.principal import (
     get_verified_principal_headers,
     service_principal_headers,
     sign_principal_for_service,
+    validate_auth_configuration,
 )
 from xgen_sdk.auth.document_capability import (
     DOCUMENT_CAPABILITY_AUDIENCE,
@@ -97,6 +98,7 @@ __all__ = [
     "get_verified_principal_headers",
     "service_principal_headers",
     "sign_principal_for_service",
+    "validate_auth_configuration",
     "DOCUMENT_CAPABILITY_AUDIENCE",
     "DOCUMENT_CAPABILITY_ISSUER",
     "DOCUMENT_CAPABILITY_KEYS_ENV",

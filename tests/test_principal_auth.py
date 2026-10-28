@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -16,11 +17,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from xgen_sdk.auth import (
     PrincipalMiddleware,
+    PrincipalConfigurationError,
     PrincipalValidationError,
     get_user_info_by_gateway,
     get_verified_principal_headers,
     service_principal_headers,
     sign_principal_for_service,
+    validate_auth_configuration,
 )
 
 
@@ -42,6 +45,10 @@ CANONICAL = {
 
 @pytest.fixture(autouse=True)
 def _principal_env(monkeypatch: pytest.MonkeyPatch):
+    for name in (
+        "XGEN_AUTH_CONFIG_MODE", "XGEN_TRUSTED_SERVICE_KEYS", "XGEN_SERVICE_AUTHORIZATION_POLICY"
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("XGEN_GATEWAY_PUBLIC_KEYS", raising=False)
     monkeypatch.delenv("XGEN_GATEWAY_KEY_ID", raising=False)
     monkeypatch.delenv("XGEN_SERVICE_KEY_ID", raising=False)
@@ -472,3 +479,235 @@ def test_middleware_allows_verified_websocket():
         "/ws", headers=dict(_signed_request().headers)
     ) as websocket:
         assert websocket.receive_text() == "ok"
+
+
+@pytest.fixture
+def split_auth(monkeypatch: pytest.MonkeyPatch):
+    keys = {"workflow-service": {"keys": {"current": {"key": SERVICE_KEY}}}}
+    policy = {
+        "schema_version": 1,
+        "receiver": "xgen-workflow",
+        "grants": {"workflow-service": {"permissions": ["document:read"]}},
+    }
+
+    def configure(*, key_map=None, authorization=None):
+        monkeypatch.setenv("XGEN_AUTH_CONFIG_MODE", "split-v1")
+        monkeypatch.delenv("XGEN_TRUSTED_SERVICES", raising=False)
+        monkeypatch.setenv("XGEN_TRUSTED_SERVICE_KEYS", json.dumps(keys if key_map is None else key_map))
+        monkeypatch.setenv(
+            "XGEN_SERVICE_AUTHORIZATION_POLICY",
+            json.dumps(policy if authorization is None else authorization),
+        )
+
+    configure()
+    return configure, keys, policy
+
+
+def _split_service_headers(**kwargs):
+    return service_principal_headers(
+        {"X-User-ID": "7", "X-User-Name": "worker", "X-User-Permissions": "document:read"},
+        audience=kwargs.pop("audience", "xgen-workflow"),
+        service_name="workflow-service",
+        signing_key=kwargs.pop("signing_key", SERVICE_KEY),
+        key_id=kwargs.pop("key_id", "current"),
+        **kwargs,
+    )
+
+
+def test_split_mode_preserves_gateway_and_keyed_service_wire_contract(split_auth):
+    validate_auth_configuration()
+    assert get_user_info_by_gateway(_signed_request())["user_id"] == 42
+    assert get_user_info_by_gateway(_request(_split_service_headers()))["permissions"] == {"document:read"}
+    with TestClient(_middleware_app()) as client:
+        assert client.get("/", headers=_split_service_headers()).json() == {"verified": True}
+
+
+@pytest.mark.parametrize("permissions", [[], ["workflow:execute"]])
+def test_split_grants_bound_the_declared_permissions(split_auth, permissions):
+    configure, _, policy = split_auth
+    policy["grants"]["workflow-service"]["permissions"] = permissions
+    configure(authorization=policy)
+    validate_auth_configuration()
+    with pytest.raises(HTTPException) as exc:
+        get_user_info_by_gateway(_request(_split_service_headers()))
+    assert exc.value.status_code == 401
+
+
+def test_split_key_without_grant_is_denied_even_for_empty_permission_profile(split_auth):
+    configure, _, policy = split_auth
+    policy["grants"] = {}
+    configure(authorization=policy)
+    validate_auth_configuration()
+    headers = service_principal_headers(
+        {"X-User-ID": "7", "X-User-Name": "worker"},
+        audience="xgen-workflow", service_name="workflow-service",
+        signing_key=SERVICE_KEY, key_id="current",
+    )
+    with pytest.raises(HTTPException) as exc:
+        get_user_info_by_gateway(_request(headers))
+    assert exc.value.status_code == 401
+
+
+def test_split_empty_maps_allow_no_incoming_service_callers(split_auth):
+    configure, _, policy = split_auth
+    policy["grants"] = {}
+    configure(key_map={}, authorization=policy)
+    validate_auth_configuration()
+    assert get_user_info_by_gateway(_signed_request())["user_id"] == 42
+    with pytest.raises(HTTPException) as exc:
+        get_user_info_by_gateway(_request(_split_service_headers()))
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.parametrize("kind", ["audience", "header", "signature", "kid", "unkeyed"])
+def test_split_service_rejects_tampering_and_wrong_audience(split_auth, monkeypatch, kind):
+    options = {"audience": "xgen-documents"} if kind == "audience" else {}
+    if kind == "kid":
+        options["key_id"] = "unknown"
+    if kind == "unkeyed":
+        monkeypatch.delenv("XGEN_SERVICE_KEY_ID", raising=False)
+        options["key_id"] = None
+    if kind == "signature":
+        options["signing_key"] = PREVIOUS_SERVICE_KEY
+    headers = _split_service_headers(**options)
+    if kind == "header":
+        headers["X-User-Permissions"] = "workflow:execute"
+    with pytest.raises(HTTPException) as exc:
+        get_user_info_by_gateway(_request(headers))
+    assert exc.value.status_code == 401
+
+
+def test_split_retirement_and_key_revocation_are_effective_without_restart(split_auth):
+    configure, keys, _ = split_auth
+    now = int(time.time())
+    keys["workflow-service"]["keys"]["previous"] = {
+        "key": PREVIOUS_SERVICE_KEY, "not_after": now + 30,
+    }
+    configure(key_map=keys)
+    validate_auth_configuration()
+    bounded = _split_service_headers(signing_key=PREVIOUS_SERVICE_KEY, key_id="previous", now=now, ttl_seconds=20)
+    overlap = _split_service_headers(signing_key=PREVIOUS_SERVICE_KEY, key_id="previous", now=now, ttl_seconds=60)
+    assert get_user_info_by_gateway(_request(bounded))["user_id"] == 7
+    with pytest.raises(HTTPException) as exc:
+        get_user_info_by_gateway(_request(overlap))
+    assert exc.value.status_code == 401
+    del keys["workflow-service"]["keys"]["previous"]
+    configure(key_map=keys)
+    with pytest.raises(HTTPException) as exc:
+        get_user_info_by_gateway(_request(bounded))
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", True), ("schema_version", 2), ("receiver", "xgen-documents"),
+    ("grants", []), ("unexpected", "field"),
+    ("grants", {"missing-service": {"permissions": []}}),
+    ("grants", {"workflow-service": {"permissions": ["document:read", "document:read"]}}),
+    ("grants", {"workflow-service": {"permissions": ["document:*"]}}),
+    ("grants", {"workflow-service": {"permissions": ["document:%2A"]}}),
+    ("grants", {"workflow-service": {"permissions": ["document:read,workflow:execute"]}}),
+    ("grants", {"workflow-service": {"permissions": [" "]}}),
+    ("grants", {"workflow-service": {"permissions": [1]}}),
+    ("grants", {"workflow-service": {"permissions": [], "key": SERVICE_KEY}}),
+])
+def test_split_invalid_policy_fails_at_startup(split_auth, field, value):
+    configure, _, policy = split_auth
+    policy[field] = value
+    configure(authorization=policy)
+    with pytest.raises(PrincipalConfigurationError):
+        validate_auth_configuration()
+
+
+@pytest.mark.parametrize("entry", [
+    {"key": SERVICE_KEY},
+    {"keys": {}},
+    {"keys": {"current": {"key": SERVICE_KEY}}, "permissions": []},
+    {"keys": {"current": {"key": "short"}}},
+    {"keys": {"current": {"key": SERVICE_KEY, "not_after": True}}},
+    {"keys": {"current": {"key": SERVICE_KEY, "not_after": -1}}},
+    {"keys": {"current": {"key": SERVICE_KEY, "not_after": 123}}},
+    {"keys": {"one": {"key": SERVICE_KEY}, "two": {"key": PREVIOUS_SERVICE_KEY}}},
+    {"keys": {"current": {"key": SERVICE_KEY, "extra": True}}},
+])
+def test_split_invalid_keys_fail_even_without_an_issuer_grant(split_auth, entry):
+    configure, _, policy = split_auth
+    policy["grants"] = {}
+    configure(key_map={"workflow-service": entry}, authorization=policy)
+    with pytest.raises(PrincipalConfigurationError):
+        validate_auth_configuration()
+
+
+@pytest.mark.parametrize("name,raw", [
+    ("XGEN_TRUSTED_SERVICE_KEYS", None),
+    ("XGEN_SERVICE_AUTHORIZATION_POLICY", None),
+    ("XGEN_TRUSTED_SERVICE_KEYS", ""),
+    ("XGEN_SERVICE_AUTHORIZATION_POLICY", "{}"),
+    ("XGEN_TRUSTED_SERVICE_KEYS", '{"workflow-service":{},"workflow-service":{}}'),
+    ("XGEN_SERVICE_AUTHORIZATION_POLICY", '{"schema_version":NaN}'),
+    ("XGEN_SERVICE_AUTHORIZATION_POLICY", "[]"),
+    ("XGEN_TRUSTED_SERVICES", "{}"),
+    ("XGEN_GATEWAY_PUBLIC_KEY_PEM", "invalid"),
+    ("XGEN_GATEWAY_PUBLIC_KEY_PEM", None),
+    ("XGEN_SERVICE_NAME", None),
+    ("XGEN_AUTH_CONFIG_MODE", "split-v2"),
+    ("XGEN_AUTH_CONFIG_MODE", "legacy"),
+])
+def test_split_invalid_environment_fails_before_first_request(split_auth, monkeypatch, name, raw):
+    if raw is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, raw)
+    with pytest.raises(PrincipalConfigurationError) as exc:
+        validate_auth_configuration()
+    assert SERVICE_KEY not in str(exc.value)
+    with pytest.raises(PrincipalConfigurationError):
+        with TestClient(_middleware_app()):
+            pass
+
+
+def test_split_broken_policy_prevents_anonymous_and_gateway_requests(split_auth, monkeypatch):
+    monkeypatch.delenv("XGEN_SERVICE_AUTHORIZATION_POLICY")
+    client = TestClient(_middleware_app())
+    assert client.get("/").status_code == 503
+    assert client.get("/", headers=dict(_signed_request().headers)).status_code == 503
+
+
+def test_split_bad_startup_emits_explicit_asgi_failure(split_auth, monkeypatch):
+    monkeypatch.delenv("XGEN_SERVICE_AUTHORIZATION_POLICY")
+    messages = []
+
+    async def receive():
+        return {"type": "lifespan.startup"}
+
+    async def send(message):
+        messages.append(message)
+
+    async def app(scope, receive, send):
+        pytest.fail("an invalid auth configuration must not enter the application")
+
+    with pytest.raises(PrincipalConfigurationError):
+        asyncio.run(PrincipalMiddleware(app)({"type": "lifespan"}, receive, send))
+    assert messages == [{
+        "type": "lifespan.startup.failed", "message": "Invalid XGen authentication configuration",
+    }]
+
+
+def test_startup_validator_checks_complete_gateway_ring(monkeypatch):
+    monkeypatch.setenv("XGEN_GATEWAY_KEY_ID", "current")
+    monkeypatch.setenv("XGEN_GATEWAY_PUBLIC_KEYS", json.dumps({
+        "current": {"key": PUBLIC_KEY_PEM},
+        "previous": {"key": "invalid", "not_after": int(time.time()) + 30},
+    }))
+    with pytest.raises(PrincipalConfigurationError):
+        validate_auth_configuration()
+
+
+def test_startup_validator_preserves_legacy_and_unconfigured_local_development(monkeypatch):
+    validate_auth_configuration()
+    assert get_user_info_by_gateway(_request(service_principal_headers(
+        {"X-User-ID": "7", "X-User-Name": "worker", "X-User-Permissions": "document:read"},
+        audience="xgen-workflow", service_name="workflow-service", signing_key=SERVICE_KEY,
+    )))["user_id"] == 7
+    for name in ("XGEN_GATEWAY_PUBLIC_KEY_PEM", "XGEN_SERVICE_NAME", "XGEN_TRUSTED_SERVICES"):
+        monkeypatch.delenv(name)
+    validate_auth_configuration()
