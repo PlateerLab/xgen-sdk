@@ -43,6 +43,7 @@ DOMAIN_DEPLOY = "배포"
 DOMAIN_KNOWLEDGE = "지식"
 DOMAIN_DB = "DB"
 DOMAIN_TOOL = "도구"
+DOMAIN_AGENT = "에이전트"
 DOMAIN_FREE = "일반"
 
 
@@ -100,6 +101,13 @@ APP_API_DEPLOY = "app.api_deploy"
 #: 조직이 한쪽만 결재로 태우거나 결재선을 따로 세울 수 있어야 한다.
 #: 승인될 때까지 **옛 버전이 계속 답한다** — 갱신 결재가 바깥 호출자를 끊으면 안 된다.
 APP_API_REDEPLOY = "app.api_redeploy"
+
+#: 에이전트 공유: XGEN 안의 **사용자나 역할에게 에이전트를 열거나 권한을 올리는** 것(2026-10-28).
+#:
+#: **넓히는 변경에만** 걸린다(새 대상, 읽기 → 읽기 · 쓰기). 빼기와 권한 내림은 곧바로 반영한다.
+#: 닫는 쪽을 결재로 붙잡으면 문제가 생긴 공유를 바로 끊을 수 없다. 결재 중에는 넓히는 부분만
+#: 기다리고 나머지는 그대로 쓴다. 적용은 공유를 가진 workflow 가 한다(``db.share`` 와 같은 모양).
+AGENT_SHARE = "agent.share"
 
 #: 파일 저장소 업로드 — 올린 파일은 **결재가 끝나야** 쓸 수 있다.
 #:
@@ -187,6 +195,13 @@ CATALOG: Tuple[ActionSpec, ...] = (
         "tool.publish", "도구 스토어 게시",
         "에이전트가 만든 도구를 전체 사용자에게 게시하는 것",
         OWNER_WORKFLOW, DOMAIN_TOOL,
+    ),
+
+    # ── 에이전트 ──
+    ActionSpec(
+        AGENT_SHARE, "에이전트 공유",
+        "에이전트를 다른 사용자나 역할에게 열거나 공유 권한을 올리는 것",
+        OWNER_WORKFLOW, DOMAIN_AGENT,
     ),
 )
 
