@@ -46,7 +46,7 @@ def test_every_catalogued_action_is_registered():
 def test_the_gated_set_is_what_xgen_actually_gates_today():
     """지금 XGEN 이 실제로 승인을 받는 행위 전부 — 전수 조사(2026-09-11)의 결론.
 
-    에이전트 배포 2(처음·갱신) + 앱 API 배포 2(처음·갱신) + 지식·파일 저장소 5 + DB 2 + 도구 1
+    에이전트 배포 2(처음·갱신) + 앱 API 배포 2(처음·갱신) + 앱 공유 1 + 지식·파일 저장소 5 + DB 2 + 도구 1
     + 에이전트 공유 1(2026-10-28).
     여기서 무엇이 빠지면 그 행위는
     결재로 옮겨지지 못한 채 옛 게이트에 남거나, 아무 통제 없이 열린다. 클라우드 6종은
@@ -54,7 +54,7 @@ def test_the_gated_set_is_what_xgen_actually_gates_today():
     """
     assert {s.action_type for s in catalog.gated_specs()} == {
         "agent.deploy", "agent.redeploy",
-        "app.api_deploy", "app.api_redeploy",
+        "app.api_deploy", "app.api_redeploy", "app.share",
         "collection.create", "collection.upload", "collection.update",
         "filestore.upload", "filestore.embed",
         "db.create", "db.share",
