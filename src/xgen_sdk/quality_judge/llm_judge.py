@@ -179,6 +179,21 @@ def _build_prompt(
     )
 
 
+def _post_judge_request(url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    """평가 LLM 호출. 모델이 ``temperature`` 를 거부하면 빼고 한 번 더 보낸다.
+
+    GPT-5 계열은 기본값(1) 외의 값을, 최근 Claude 는 필드 자체를 400 으로 거부한다.
+    어떤 모델이 거부하는지는 계속 바뀌므로 이름으로 가르지 않고 응답으로 판단한다.
+    """
+    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        if resp.status_code == 400 and "temperature" in resp.text:
+            without = {k: v for k, v in payload.items() if k != "temperature"}
+            resp = client.post(url, json=without, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _call_openai_compatible(
     provider: str,
     model: str,
@@ -204,10 +219,7 @@ def _call_openai_compatible(
     if provider in ("openai", "gemini"):
         payload["response_format"] = {"type": "json_object"}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    data = _post_judge_request(url, payload, headers)
     content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
     parsed = _safe_parse_json(content)
     if not parsed or "raw_score" not in parsed:
@@ -246,10 +258,7 @@ def _call_anthropic(
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
-    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    data = _post_judge_request(url, payload, headers)
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
     parsed = _safe_parse_json(text)
@@ -513,10 +522,7 @@ def _preset_call_openai_compatible(
     if provider in ("openai", "gemini"):
         payload["response_format"] = {"type": "json_object"}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    data = _post_judge_request(url, payload, headers)
     content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
     return _parse_preset_response(content, preset_name, scoring_method, provider, actual_answer)
 
@@ -544,10 +550,7 @@ def _preset_call_anthropic(
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
-    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    data = _post_judge_request(url, payload, headers)
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
     return _parse_preset_response(text, preset_name, scoring_method, "anthropic", actual_answer)
