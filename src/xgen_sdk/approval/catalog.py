@@ -126,6 +126,13 @@ AGENT_SHARE = "agent.share"
 #: 한다(workflow 의 적용 워커가 documents 내부 API 로 넘긴다 — filestore.embed 와 같은 길).
 FILESTORE_UPLOAD = "filestore.upload"
 
+#: 에이전트 자원 용량 변경 — 작업 공간 · 샌드박스 한도를 늘리거나 줄인다.
+#:
+#: 용량은 서버 저장소와 디스크를 나눠 쓰는 일이라 조직이 결재로 묶을 수 있다. 켜져 있으면
+#: 승인될 때까지 한도는 그대로이고, 꺼져 있으면 저장하는 즉시 바뀐다. 적용은 한도 표를
+#: 다루는 workflow 가 한다. 올린 뒤 한도가 바뀌었으면 쓰지 않는다.
+AGENT_RESOURCES = "agent.resources"
+
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
@@ -214,6 +221,11 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         AGENT_SHARE, "에이전트 공유",
         "에이전트를 다른 사용자나 역할에게 열거나 공유 권한을 올리는 것",
+        OWNER_WORKFLOW, DOMAIN_AGENT,
+    ),
+    ActionSpec(
+        AGENT_RESOURCES, "에이전트 자원 용량 변경",
+        "에이전트의 작업 공간 · 샌드박스 용량 한도를 늘리거나 줄이는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
     ),
 )
