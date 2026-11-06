@@ -59,7 +59,7 @@ def test_the_gated_set_is_what_xgen_actually_gates_today():
         "filestore.upload", "filestore.embed",
         "db.create", "db.share",
         "tool.publish",
-        "agent.share",
+        "agent.share", "agent.resources",
     }
 
 
