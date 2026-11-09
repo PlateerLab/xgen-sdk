@@ -30,6 +30,15 @@ from typing import List, Dict, Any, Optional, Type, Callable, TypeVar
 from xgen_sdk.db.pool_manager import DatabaseManagerPsycopg3
 from xgen_sdk.db.base_model import BaseModel
 from xgen_sdk.db.config_serializer import safe_serialize
+from xgen_sdk.db.sql_identifiers import (
+    UnsafeSqlIdentifierError,
+    split_condition_key,
+    validate_column_list,
+    validate_identifier,
+    validate_orderby,
+    validate_qualified_identifier,
+    validate_table_name,
+)
 from pydantic import create_model
 
 logger = logging.getLogger("app-database-psycopg3")
@@ -107,6 +116,37 @@ class XgenDB:
         """
         return {k: self._serialize_value(v) for k, v in data.items()}
 
+    # ========== SQL 식별자 검증 헬퍼 (SEC-12) ==========
+    # 값(value)은 드라이버 파라미터로 바인딩되지만 테이블명·컬럼명·정렬 키는
+    # 쿼리 문자열에 직접 삽입되므로, 조립 전에 화이트리스트 검증을 거친다.
+
+    @staticmethod
+    def _safe_table(table_name: str) -> str:
+        return validate_table_name(table_name)
+
+    @staticmethod
+    def _safe_columns(columns: Optional[List[str]], kind: str = "column") -> Optional[List[str]]:
+        return validate_column_list(columns, kind=kind)
+
+    @staticmethod
+    def _safe_orderby(orderby: str, alias: Optional[str] = None) -> str:
+        """ORDER BY 식 검증. alias 가 주어지면 접두사 없는 컬럼에 alias. 를 붙인다."""
+        normalized = validate_orderby(orderby)
+        if not alias:
+            return normalized
+        parts = []
+        for part in normalized.split(", "):
+            if "." in part.split(" ")[0]:
+                parts.append(part)
+            else:
+                parts.append(f"{alias}.{part}")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _safe_assignment_keys(data: Dict[str, Any], kind: str = "column") -> None:
+        for key in data.keys():
+            validate_qualified_identifier(key, kind=kind)
+
     def _ensure_connection(self) -> bool:
         """
         연결 상태 확인 및 필요시 복구
@@ -156,6 +196,9 @@ class XgenDB:
 
                 return operation()
 
+            except (UnsafeSqlIdentifierError, ValueError):
+                # 입력 검증 실패는 재시도해도 결과가 같다 → 즉시 전파 (fail-closed)
+                raise
             except Exception as e:
                 last_exception = e
                 error_str = str(e).lower()
@@ -314,6 +357,9 @@ class XgenDB:
                 # 모델에 정의된 인덱스 자동 생성
                 for idx_name, columns in instance.get_indexes():
                     try:
+                        validate_identifier(idx_name, kind="index name")
+                        for col in str(columns).split(","):
+                            validate_qualified_identifier(col.strip(), kind="index column")
                         idx_query = f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name}({columns})"
                         self.config_db_manager.execute_query(idx_query)
                         self.logger.info("Created index %s for table: %s", idx_name, table_name)
@@ -491,7 +537,7 @@ class XgenDB:
     def delete(self, model_class: Type[BaseModel], record_id: int) -> bool:
         """ID로 레코드 삭제"""
         try:
-            table_name = model_class().get_table_name()
+            table_name = self._safe_table(model_class().get_table_name())
             db_type = self.config_db_manager.db_type
 
             if db_type == "postgresql":
@@ -508,46 +554,34 @@ class XgenDB:
             return False
 
     def delete_by_condition(self, model_class: Type[BaseModel], conditions: Dict[str, Any]) -> bool:
-        """조건으로 레코드 삭제"""
+        """조건으로 레코드 삭제 (조건 키는 식별자 검증 후 _build_where_clause 로 조립)"""
         try:
-            table_name = model_class().get_table_name()
-            db_type = self.config_db_manager.db_type
-
-            where_clauses = []
-            values = []
-
-            for key, value in conditions.items():
-                if key.endswith("__like__"):
-                    actual_key = key[:-8]
-                    if db_type == "postgresql":
-                        where_clauses.append(f"{actual_key} LIKE %s")
-                    else:
-                        where_clauses.append(f"{actual_key} LIKE ?")
-                    values.append(f"%{value}%")
-                elif key.endswith("__not__"):
-                    actual_key = key[:-7]
-                    if db_type == "postgresql":
-                        where_clauses.append(f"{actual_key} != %s")
-                    else:
-                        where_clauses.append(f"{actual_key} != ?")
-                    values.append(value)
-                else:
-                    if db_type == "postgresql":
-                        where_clauses.append(f"{key} = %s")
-                    else:
-                        where_clauses.append(f"{key} = ?")
-                    values.append(value)
-
             if not conditions:
                 self.logger.warning("No conditions provided for delete_by_condition. Aborting.")
                 return False
 
-            where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+            table_name = self._safe_table(model_class().get_table_name())
+            db_type = self.config_db_manager.db_type
+
+            where_clauses: List[str] = []
+            values: List[Any] = []
+            for key, value in conditions.items():
+                self._build_where_clause(key, value, where_clauses, values, db_type)
+
+            if not where_clauses:
+                # 예: 빈 리스트의 __in__ 만 전달된 경우 → 전체 삭제 방지
+                self.logger.warning("delete_by_condition produced no WHERE clause. Aborting.")
+                return False
+
+            where_clause = " AND ".join(where_clauses)
             query = f"DELETE FROM {table_name} WHERE {where_clause}"
 
             affected_rows = self.config_db_manager.execute_update_delete(query, tuple(values))
             return affected_rows is not None and affected_rows > 0
 
+        except UnsafeSqlIdentifierError as e:
+            self.logger.error("Rejected delete_by_condition for %s: %s", model_class.__name__, e)
+            return False
         except Exception as e:
             self.logger.error("Failed to delete %s by condition: %s", model_class.__name__, e)
             return False
@@ -556,8 +590,10 @@ class XgenDB:
                    select_columns: List[str] = None, ignore_columns: List[str] = None) -> Optional[BaseModel]:
         """ID로 레코드 조회"""
         try:
-            table_name = model_class().get_table_name()
+            table_name = self._safe_table(model_class().get_table_name())
             db_type = self.config_db_manager.db_type
+            select_columns = self._safe_columns(select_columns)
+            ignore_columns = self._safe_columns(ignore_columns, kind="ignore column")
 
             if select_columns:
                 columns_str = ", ".join(select_columns)
@@ -589,8 +625,10 @@ class XgenDB:
                  join_user: bool = False) -> List[BaseModel]:
         """모든 레코드 조회 (페이징 지원)"""
         try:
-            table_name = model_class().get_table_name()
+            table_name = self._safe_table(model_class().get_table_name())
             db_type = self.config_db_manager.db_type
+            select_columns = self._safe_columns(select_columns)
+            ignore_columns = self._safe_columns(ignore_columns, kind="ignore column")
 
             if join_user:
                 if select_columns:
@@ -635,25 +673,21 @@ class XgenDB:
                          select_columns: List[str] = None,
                          ignore_columns: List[str] = None,
                          join_user: bool = False) -> List[BaseModel]:
-        """조건으로 레코드 조회 - 자동 복구 포함"""
+        """조건으로 레코드 조회 - 자동 복구 포함 (식별자 검증 포함)"""
         def _do_find():
-            table_name = model_class().get_table_name()
+            table_name = self._safe_table(model_class().get_table_name())
             db_type = self.config_db_manager.db_type
+            safe_select = self._safe_columns(select_columns)
+            safe_ignore = self._safe_columns(ignore_columns, kind="ignore column")
 
             where_clauses = []
             values = []
 
             for key, value in conditions.items():
                 if join_user:
-                    # 연산자 분리 후 t. 접두사 추가
-                    base_key = key
-                    suffix = ""
-                    for op in ['__like__', '__notlike__', '__not__', '__gte__', '__lte__', '__gt__', '__lt__', '__in__', '__notin__', '__isnull__']:
-                        if key.endswith(op):
-                            base_key = key[:-len(op)]
-                            suffix = op
-                            break
-                    prefixed_key = f"t.{base_key}{suffix}"
+                    # 연산자 분리 후 t. 접두사 추가 (컬럼명은 split_condition_key 에서 검증)
+                    base_key, suffix = split_condition_key(key)
+                    prefixed_key = f"t.{base_key}{suffix}" if "." not in base_key else key
                     self._build_where_clause(prefixed_key, value, where_clauses, values, db_type)
                 else:
                     self._build_where_clause(key, value, where_clauses, values, db_type)
@@ -665,40 +699,32 @@ class XgenDB:
             else:
                 limit_clause = "LIMIT ? OFFSET ?"
 
-            values.extend([limit, offset])
+            values.extend([int(limit), int(offset)])
             orderby_type = "ASC" if orderby_asc else "DESC"
 
             if join_user:
-                if select_columns:
-                    columns_str = ", ".join([f"t.{col}" for col in select_columns])
+                if safe_select:
+                    columns_str = ", ".join([f"t.{col}" for col in safe_select])
                 else:
                     columns_str = "t.*"
                 columns_str += ", u.username, u.full_name"
                 from_clause = f"FROM {table_name} t LEFT JOIN users u ON t.user_id = u.id"
-                orderby_field = f"t.{orderby}"
+                orderby_field = self._safe_orderby(orderby, alias="t")
             else:
-                if select_columns:
-                    columns_str = ", ".join(select_columns)
-                elif ignore_columns:
+                if safe_select:
+                    columns_str = ", ".join(safe_select)
+                elif safe_ignore:
                     all_columns = ['id', 'created_at', 'updated_at'] + model_class().get_column_names()
-                    filtered_columns = [col for col in all_columns if col not in ignore_columns]
+                    filtered_columns = [col for col in all_columns if col not in safe_ignore]
                     columns_str = ", ".join(filtered_columns) if filtered_columns else "*"
                 else:
                     columns_str = "*"
                 from_clause = f"FROM {table_name}"
-                orderby_field = orderby
+                orderby_field = self._safe_orderby(orderby)
 
-            # 다중 컬럼 정렬 지원: 각 컬럼에 ASC/DESC 적용
-            # 이미 ASC/DESC가 포함된 경우 중복 방지
-            orderby_parts = [col.strip() for col in orderby_field.split(",")]
-            cleaned_parts = []
-            for col in orderby_parts:
-                upper = col.upper()
-                if upper.endswith(" DESC") or upper.endswith(" ASC"):
-                    cleaned_parts.append(col)
-                else:
-                    cleaned_parts.append(f"{col} {orderby_type}")
-            orderby_clause = ", ".join(cleaned_parts)
+            # 다중 컬럼 정렬 지원: 방향이 없는 컬럼에만 기본 방향 적용
+            # (_safe_orderby 가 "col", "col ASC|DESC" 형식만 통과시킴)
+            orderby_clause = self._apply_default_direction(orderby_field, orderby_type)
 
             query = f"SELECT {columns_str} {from_clause} WHERE {where_clause} ORDER BY {orderby_clause} {limit_clause}"
 
@@ -711,74 +737,80 @@ class XgenDB:
 
         try:
             return self._with_auto_recovery(_do_find, "find_by_condition")
+        except UnsafeSqlIdentifierError as e:
+            self.logger.error("Rejected find_by_condition for %s: %s", model_class.__name__, e)
+            return []
         except Exception as e:
             self.logger.error("Failed to find %s by condition: %s", model_class.__name__, e)
             return []
 
     def _build_where_clause(self, key: str, value: Any, where_clauses: List[str],
                            values: List[Any], db_type: str):
-        """WHERE 절 조건 빌드 헬퍼"""
-        placeholder = "%s" if db_type == "postgresql" else "?"
+        """
+        WHERE 절 조건 빌드 헬퍼
 
-        if key.endswith("__like__"):
-            actual_key = key[:-8]
+        키(컬럼명 + 연산자 접미사)는 split_condition_key 로 화이트리스트 검증한다.
+        검증 실패 시 UnsafeSqlIdentifierError 가 발생하며 쿼리는 실행되지 않는다.
+        값은 항상 드라이버 파라미터로 바인딩된다.
+        """
+        placeholder = "%s" if db_type == "postgresql" else "?"
+        actual_key, op = split_condition_key(key)
+
+        if op == "__like__":
             where_clauses.append(f"{actual_key} LIKE {placeholder}")
             values.append(f"%{value}%")
-        elif key.endswith("__notlike__"):
-            actual_key = key[:-11]
+        elif op == "__notlike__":
             where_clauses.append(f"{actual_key} NOT LIKE {placeholder}")
             values.append(f"%{value}%")
-        elif key.endswith("__not__"):
-            actual_key = key[:-7]
+        elif op == "__not__":
             where_clauses.append(f"{actual_key} != {placeholder}")
             values.append(value)
-        elif key.endswith("__gte__"):
-            actual_key = key[:-7]
+        elif op == "__gte__":
             where_clauses.append(f"{actual_key} >= {placeholder}")
             values.append(value)
-        elif key.endswith("__lte__"):
-            actual_key = key[:-7]
+        elif op == "__lte__":
             where_clauses.append(f"{actual_key} <= {placeholder}")
             values.append(value)
-        elif key.endswith("__gt__"):
-            actual_key = key[:-6]
+        elif op == "__gt__":
             where_clauses.append(f"{actual_key} > {placeholder}")
             values.append(value)
-        elif key.endswith("__lt__"):
-            actual_key = key[:-6]
+        elif op == "__lt__":
             where_clauses.append(f"{actual_key} < {placeholder}")
             values.append(value)
-        elif key.endswith("__in__"):
-            actual_key = key[:-6]
+        elif op == "__in__":
             if isinstance(value, (list, tuple)) and len(value) > 0:
                 placeholders = ", ".join([placeholder] * len(value))
                 where_clauses.append(f"{actual_key} IN ({placeholders})")
                 values.extend(value)
-        elif key.endswith("__notin__"):
-            actual_key = key[:-9]
+        elif op == "__notin__":
             if isinstance(value, (list, tuple)) and len(value) > 0:
                 placeholders = ", ".join([placeholder] * len(value))
                 where_clauses.append(f"{actual_key} NOT IN ({placeholders})")
                 values.extend(value)
-        elif key.endswith("__isnull__"):
+        elif op == "__isnull__":
             # value=True → IS NULL, value=False → IS NOT NULL.
             # placeholder 사용 안 함 — SQL NULL 비교는 = NULL 이 항상 false 라 IS 키워드 필수.
-            actual_key = key[:-len("__isnull__")]
             if value:
                 where_clauses.append(f"{actual_key} IS NULL")
             else:
                 where_clauses.append(f"{actual_key} IS NOT NULL")
         else:
-            where_clauses.append(f"{key} = {placeholder}")
+            where_clauses.append(f"{actual_key} = {placeholder}")
             values.append(value)
 
     def update_list_columns(self, model_class: Type[BaseModel],
                            updates: Dict[str, Any], conditions: Dict[str, Any]) -> bool:
         """리스트 컬럼을 포함한 모델 업데이트"""
         try:
-            table_name = model_class().get_table_name()
+            if not updates or not conditions:
+                self.logger.warning("update_list_columns requires non-empty updates and conditions. Aborting.")
+                return False
+
+            table_name = self._safe_table(model_class().get_table_name())
             db_type = self.config_db_manager.db_type
             placeholder = "%s" if db_type == "postgresql" else "?"
+            self._safe_assignment_keys(updates, kind="update column")
+            self._safe_assignment_keys(conditions, kind="condition column")
 
             set_clauses = []
             values = []
@@ -864,7 +896,7 @@ class XgenDB:
                 """
                 results = self.config_db_manager.execute_query(query, (table_name,))
             else:
-                query = f"PRAGMA table_info({table_name})"
+                query = f"PRAGMA table_info({self._safe_table(table_name)})"
                 results = self.config_db_manager.execute_query(query)
 
             return results if results else []
@@ -991,17 +1023,21 @@ class XgenDB:
         """
         def _do_insert():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
             # dict/list 타입 직렬화
             serialized_data = self._serialize_data(data)
+            self._safe_assignment_keys(serialized_data, kind="insert column")
             columns = list(serialized_data.keys())
             values = list(serialized_data.values())
+            if not columns:
+                raise ValueError("insert_record requires at least one column")
 
             if db_type == "postgresql":
                 placeholders = ", ".join(["%s"] * len(columns))
-                query = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders}) RETURNING id"
+                query = f"INSERT INTO {safe_table} ({', '.join(columns)}) VALUES ({placeholders}) RETURNING id"
             else:
                 placeholders = ", ".join(["?"] * len(columns))
-                query = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+                query = f"INSERT INTO {safe_table} ({', '.join(columns)}) VALUES ({placeholders})"
 
             insert_id = self.config_db_manager.execute_insert(query, tuple(values))
             return {"success": True, "id": insert_id}
@@ -1026,15 +1062,19 @@ class XgenDB:
         """
         def _do_update():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
             # dict/list 타입 직렬화
             serialized_data = self._serialize_data(data)
+            self._safe_assignment_keys(serialized_data, kind="update column")
+            if not serialized_data:
+                raise ValueError("update_record requires at least one column")
 
             if db_type == "postgresql":
                 set_clause = ", ".join([f"{k} = %s" for k in serialized_data.keys()])
-                query = f"UPDATE {table_name} SET {set_clause} WHERE id = %s"
+                query = f"UPDATE {safe_table} SET {set_clause} WHERE id = %s"
             else:
                 set_clause = ", ".join([f"{k} = ?" for k in serialized_data.keys()])
-                query = f"UPDATE {table_name} SET {set_clause} WHERE id = ?"
+                query = f"UPDATE {safe_table} SET {set_clause} WHERE id = ?"
 
             values = list(serialized_data.values()) + [record_id]
             affected_rows = self.config_db_manager.execute_update_delete(query, tuple(values))
@@ -1072,23 +1112,30 @@ class XgenDB:
         """
         def _do_update():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
             # dict/list 타입 직렬화
             serialized_updates = self._serialize_data(updates)
+            self._safe_assignment_keys(serialized_updates, kind="update column")
+            if not serialized_updates:
+                raise ValueError("update_records_by_condition requires at least one update column")
 
             if db_type == "postgresql":
                 set_clause = ", ".join([f"{k} = %s" for k in serialized_updates.keys()])
             else:
                 set_clause = ", ".join([f"{k} = ?" for k in serialized_updates.keys()])
 
-            # WHERE 절 빌드 (연산자 지원)
+            # WHERE 절 빌드 (연산자 지원, 조건 키 검증 포함)
             where_clauses = []
             where_values = []
             for key, value in conditions.items():
                 self._build_where_clause(key, value, where_clauses, where_values, db_type)
 
-            where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+            if not where_clauses:
+                # 조건 없는 전체 UPDATE 방지 (fail-closed)
+                raise ValueError("update_records_by_condition requires at least one WHERE condition")
+            where_clause = " AND ".join(where_clauses)
 
-            query = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+            query = f"UPDATE {safe_table} SET {set_clause} WHERE {where_clause}"
             values = list(serialized_updates.values()) + where_values
             affected_rows = self.config_db_manager.execute_update_delete(query, tuple(values))
             return {"success": True, "affected_rows": affected_rows or 0}
@@ -1112,11 +1159,12 @@ class XgenDB:
         """
         def _do_delete():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
 
             if db_type == "postgresql":
-                query = f"DELETE FROM {table_name} WHERE id = %s"
+                query = f"DELETE FROM {safe_table} WHERE id = %s"
             else:
-                query = f"DELETE FROM {table_name} WHERE id = ?"
+                query = f"DELETE FROM {safe_table} WHERE id = ?"
 
             affected_rows = self.config_db_manager.execute_update_delete(query, (record_id,))
             return {"success": True, "affected_rows": affected_rows or 0}
@@ -1151,16 +1199,20 @@ class XgenDB:
         """
         def _do_delete():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
 
-            # WHERE 절 빌드 (연산자 지원)
+            # WHERE 절 빌드 (연산자 지원, 조건 키 검증 포함)
             where_clauses = []
             values = []
             for key, value in conditions.items():
                 self._build_where_clause(key, value, where_clauses, values, db_type)
 
-            where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+            if not where_clauses:
+                # 조건 없는 전체 DELETE 방지 (fail-closed)
+                raise ValueError("delete_records_by_condition requires at least one WHERE condition")
+            where_clause = " AND ".join(where_clauses)
 
-            query = f"DELETE FROM {table_name} WHERE {where_clause}"
+            query = f"DELETE FROM {safe_table} WHERE {where_clause}"
             affected_rows = self.config_db_manager.execute_update_delete(query, tuple(values))
             return {"success": True, "affected_rows": affected_rows or 0}
 
@@ -1185,12 +1237,14 @@ class XgenDB:
         """
         def _do_find():
             db_type = self.config_db_manager.db_type
-            columns_str = ", ".join(select_columns) if select_columns else "*"
+            safe_table = self._safe_table(table_name)
+            safe_select = self._safe_columns(select_columns)
+            columns_str = ", ".join(safe_select) if safe_select else "*"
 
             if db_type == "postgresql":
-                query = f"SELECT {columns_str} FROM {table_name} WHERE id = %s"
+                query = f"SELECT {columns_str} FROM {safe_table} WHERE id = %s"
             else:
-                query = f"SELECT {columns_str} FROM {table_name} WHERE id = ?"
+                query = f"SELECT {columns_str} FROM {safe_table} WHERE id = ?"
 
             result = self.config_db_manager.execute_query_one(query, (record_id,))
             return {"success": True, "data": dict(result) if result else None}
@@ -1200,6 +1254,32 @@ class XgenDB:
         except Exception as e:
             self.logger.error("Failed to find record in %s: %s", table_name, e)
             return {"success": False, "data": None, "error": str(e)}
+
+    def _build_select_columns(self, table_name: str, select_columns: Optional[List[str]],
+                              ignore_columns: Optional[List[str]], join_user: bool) -> str:
+        """테이블명 기반 조회용 SELECT 컬럼 문자열 조립 (식별자 검증 포함)."""
+        safe_select = self._safe_columns(select_columns)
+        safe_ignore = self._safe_columns(ignore_columns, kind="ignore column")
+
+        if join_user:
+            if safe_select:
+                columns_str = ", ".join([col if "." in col else f"t.{col}" for col in safe_select])
+            else:
+                columns_str = "t.*"
+            return columns_str + ", u.username, u.full_name"
+
+        if safe_select:
+            return ", ".join(safe_select)
+        if safe_ignore:
+            # ignore_columns가 있으면 테이블 스키마에서 해당 컬럼 제외
+            schema = self.get_table_schema(table_name)
+            if schema:
+                all_columns = [col.get('column_name') or col.get('name') for col in schema]
+                filtered_columns = [col for col in all_columns if col and col not in safe_ignore]
+                # 스키마에서 온 컬럼명도 동일하게 검증 (방어적)
+                filtered_columns = self._safe_columns(filtered_columns) or []
+                return ", ".join(filtered_columns) if filtered_columns else "*"
+        return "*"
 
     def find_records(self, table_name: str, limit: int = 500, offset: int = 0,
                      select_columns: List[str] = None, ignore_columns: List[str] = None,
@@ -1215,7 +1295,7 @@ class XgenDB:
             offset: 시작 오프셋
             select_columns: 조회할 컬럼 목록 (None이면 전체)
             ignore_columns: 제외할 컬럼 목록
-            orderby: 정렬 컬럼
+            orderby: 정렬 컬럼 ("col", "col DESC", "a ASC, b DESC" 형식만 허용)
             orderby_asc: 오름차순 정렬 여부
             join_user: users 테이블을 JOIN하여 username, full_name 조회 여부
 
@@ -1224,55 +1304,49 @@ class XgenDB:
         """
         def _do_find():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
             orderby_type = "ASC" if orderby_asc else "DESC"
 
-            # find_all과 동일한 컬럼 처리 로직
+            columns_str = self._build_select_columns(safe_table, select_columns, ignore_columns, join_user)
             if join_user:
-                if select_columns:
-                    columns_str = ", ".join([f"t.{col}" for col in select_columns])
-                else:
-                    columns_str = "t.*"
-                columns_str += ", u.username, u.full_name"
-                from_clause = f"{table_name} t LEFT JOIN users u ON t.user_id = u.id"
-                orderby_field = f"t.{orderby}"
+                from_clause = f"{safe_table} t LEFT JOIN users u ON t.user_id = u.id"
+                orderby_field = self._safe_orderby(orderby, alias="t")
             else:
-                if select_columns:
-                    columns_str = ", ".join(select_columns)
-                elif ignore_columns:
-                    # ignore_columns가 있으면 테이블 스키마에서 해당 컬럼 제외
-                    schema = self.get_table_schema(table_name)
-                    if schema:
-                        all_columns = [col['column_name'] for col in schema]
-                        filtered_columns = [col for col in all_columns if col not in ignore_columns]
-                        columns_str = ", ".join(filtered_columns) if filtered_columns else "*"
-                    else:
-                        columns_str = "*"
-                else:
-                    columns_str = "*"
-                from_clause = table_name
-                orderby_field = orderby
+                from_clause = safe_table
+                orderby_field = self._safe_orderby(orderby)
 
-            # 이미 ASC/DESC가 포함된 경우 중복 방지
-            upper_orderby = orderby_field.upper().strip()
-            if upper_orderby.endswith(" DESC") or upper_orderby.endswith(" ASC"):
-                effective_orderby = orderby_field
-            else:
-                effective_orderby = f"{orderby_field} {orderby_type}"
+            effective_orderby = self._apply_default_direction(orderby_field, orderby_type)
 
             if db_type == "postgresql":
                 query = f"SELECT {columns_str} FROM {from_clause} ORDER BY {effective_orderby} LIMIT %s OFFSET %s"
             else:
                 query = f"SELECT {columns_str} FROM {from_clause} ORDER BY {effective_orderby} LIMIT ? OFFSET ?"
 
-            results = self.config_db_manager.execute_query(query, (limit, offset))
+            results = self.config_db_manager.execute_query(query, (int(limit), int(offset)))
             data = [dict(row) for row in results] if results else []
             return {"success": True, "data": data, "row_count": len(data)}
 
         try:
             return self._with_auto_recovery(_do_find, "find_records")
+        except UnsafeSqlIdentifierError as e:
+            self.logger.error("Rejected find_records in %s: %s", table_name, e)
+            return {"success": False, "data": [], "row_count": 0, "error": str(e)}
         except Exception as e:
             self.logger.error("Failed to find records in %s: %s", table_name, e)
             return {"success": False, "data": [], "row_count": 0, "error": str(e)}
+
+    @staticmethod
+    def _apply_default_direction(orderby_field: str, orderby_type: str) -> str:
+        """검증·정규화된 ORDER BY 식의 각 컬럼에 방향이 없으면 기본 방향을 붙인다."""
+        parts = []
+        for col in orderby_field.split(", "):
+            tokens = col.split(" ")
+            if len(tokens) > 1 and tokens[1] in ("ASC", "DESC"):
+                parts.append(col)
+            else:
+                # "col" 또는 "col NULLS LAST" → 방향을 컬럼 바로 뒤에 삽입
+                parts.append(" ".join([tokens[0], orderby_type] + tokens[1:]))
+        return ", ".join(parts)
 
     def find_records_by_condition(self, table_name: str, conditions: Dict[str, Any],
                                    limit: int = 500, offset: int = 0,
@@ -1286,6 +1360,7 @@ class XgenDB:
         지원하는 조건 연산자:
         - key: 동등 비교 (=)
         - key__like__: LIKE 검색
+        - key__notlike__: NOT LIKE 검색
         - key__not__: 부정 (!=)
         - key__gte__: 크거나 같음 (>=)
         - key__lte__: 작거나 같음 (<=)
@@ -1293,13 +1368,19 @@ class XgenDB:
         - key__lt__: 작음 (<)
         - key__in__: IN 조건
         - key__notin__: NOT IN 조건
+        - key__isnull__: IS NULL / IS NOT NULL
+
+        보안(SEC-12): 테이블명·조건 키·정렬 키·컬럼 목록은 식별자 화이트리스트
+        (영문/숫자/밑줄, 선택적 alias. 접두사)만 허용한다. 그 외 입력은
+        UnsafeSqlIdentifierError 로 거부되며 쿼리는 실행되지 않는다. 값은 항상
+        드라이버 파라미터로 바인딩된다.
 
         Args:
             table_name: 테이블 이름
             conditions: WHERE 조건 딕셔너리
             limit: 최대 조회 수
             offset: 시작 오프셋
-            orderby: 정렬 컬럼
+            orderby: 정렬 컬럼 ("col", "col DESC", "a ASC, b DESC" 형식만 허용)
             orderby_asc: 오름차순 정렬 여부
             select_columns: 조회할 컬럼 목록 (None이면 전체)
             ignore_columns: 제외할 컬럼 목록
@@ -1310,62 +1391,33 @@ class XgenDB:
         """
         def _do_find():
             db_type = self.config_db_manager.db_type
+            safe_table = self._safe_table(table_name)
             orderby_type = "ASC" if orderby_asc else "DESC"
 
-            # find_by_condition과 동일한 컬럼 처리 로직
+            columns_str = self._build_select_columns(safe_table, select_columns, ignore_columns, join_user)
             if join_user:
-                if select_columns:
-                    columns_str = ", ".join([f"t.{col}" for col in select_columns])
-                else:
-                    columns_str = "t.*"
-                columns_str += ", u.username, u.full_name"
-                from_clause = f"{table_name} t LEFT JOIN users u ON t.user_id = u.id"
-                orderby_field = f"t.{orderby}"
+                from_clause = f"{safe_table} t LEFT JOIN users u ON t.user_id = u.id"
+                orderby_field = self._safe_orderby(orderby, alias="t")
             else:
-                if select_columns:
-                    columns_str = ", ".join(select_columns)
-                elif ignore_columns:
-                    # ignore_columns가 있으면 테이블 스키마에서 해당 컬럼 제외
-                    schema = self.get_table_schema(table_name)
-                    if schema:
-                        all_columns = [col['column_name'] for col in schema]
-                        filtered_columns = [col for col in all_columns if col not in ignore_columns]
-                        columns_str = ", ".join(filtered_columns) if filtered_columns else "*"
-                    else:
-                        columns_str = "*"
-                else:
-                    columns_str = "*"
-                from_clause = table_name
-                orderby_field = orderby
+                from_clause = safe_table
+                orderby_field = self._safe_orderby(orderby)
 
-            # WHERE 절 빌드
+            # WHERE 절 빌드 (조건 키는 _build_where_clause → split_condition_key 에서 검증)
             where_clauses = []
             values = []
 
             for key, value in conditions.items():
                 if join_user:
-                    # 연산자 분리 후 t. 접두사 추가
-                    base_key = key
-                    suffix = ""
-                    for op in ['__like__', '__notlike__', '__not__', '__gte__', '__lte__', '__gt__', '__lt__', '__in__', '__notin__', '__isnull__']:
-                        if key.endswith(op):
-                            base_key = key[:-len(op)]
-                            suffix = op
-                            break
-                    prefixed_key = f"t.{base_key}{suffix}"
+                    base_key, suffix = split_condition_key(key)
+                    prefixed_key = f"t.{base_key}{suffix}" if "." not in base_key else key
                     self._build_where_clause(prefixed_key, value, where_clauses, values, db_type)
                 else:
                     self._build_where_clause(key, value, where_clauses, values, db_type)
 
             where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
-            values.extend([limit, offset])
+            values.extend([int(limit), int(offset)])
 
-            # 이미 ASC/DESC가 포함된 경우 중복 방지
-            upper_orderby = orderby_field.upper().strip()
-            if upper_orderby.endswith(" DESC") or upper_orderby.endswith(" ASC"):
-                effective_orderby = orderby_field
-            else:
-                effective_orderby = f"{orderby_field} {orderby_type}"
+            effective_orderby = self._apply_default_direction(orderby_field, orderby_type)
 
             if db_type == "postgresql":
                 query = f"SELECT {columns_str} FROM {from_clause} WHERE {where_clause} ORDER BY {effective_orderby} LIMIT %s OFFSET %s"
@@ -1378,6 +1430,9 @@ class XgenDB:
 
         try:
             return self._with_auto_recovery(_do_find, "find_records_by_condition")
+        except UnsafeSqlIdentifierError as e:
+            self.logger.error("Rejected find_records_by_condition in %s: %s", table_name, e)
+            raise
         except Exception as e:
             self.logger.error("Failed to find records in %s: %s", table_name, e)
             raise
