@@ -53,12 +53,12 @@ def test_old_requests_keep_history_and_require_other_blocks_and_approvers(db, da
         store.fill_block(db, request_id=rid, block_id=row["id"], actor_id=1, data={"plan_id": 43})
     with pytest.raises(engine.ApprovalError):
         store.decide(db, rid, actor_id=5, action="approved")
-    with pytest.raises(engine.ApprovalError, match="AI 위험도 평가"):
-        store.decide(db, rid, actor_id=3, action="approved")
-    evaluation = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.EVALUATION)
-    store.fill_block(db, request_id=rid, block_id=evaluation["id"], actor_id=3, data=_assessed("low"))
-    registry.register_action("generic", lambda *args, **kwargs: None)
     store.decide(db, rid, actor_id=3, action="approved")
+    with pytest.raises(engine.ApprovalError, match="AI 위험도 평가"):
+        store.decide(db, rid, actor_id=4, action="approved")
+    evaluation = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.EVALUATION)
+    store.fill_block(db, request_id=rid, block_id=evaluation["id"], actor_id=4, data=_assessed("low"))
+    registry.register_action("generic", lambda *args, **kwargs: None)
     assert store.get(db, rid)["status"] == "pending"
     store.decide(db, rid, actor_id=4, action="approved")
     assert store.get(db, rid)["status"] == "approved"

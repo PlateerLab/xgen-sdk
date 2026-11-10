@@ -166,8 +166,8 @@ def _assessed(**extra):
     return value
 
 
-def _deploy_request(db):
-    """[AI Agent 배포 결재] — 2차에 평가지 칸(설정 ``template_id: ai-risk``)."""
+def _deploy_request(db, *, reviewed=True):
+    """[AI Agent 배포 결재] — 3차에 평가지 칸(설정 ``template_id: ai-risk``)."""
     t = templates.by_name("AI Agent 배포 결재")
     form_id = store.create_form(db, name=t["name"], description=t["description"], owner_id=None,
                                 steps=t["steps"], blocks=t["blocks"], is_builtin=True)
@@ -177,6 +177,8 @@ def _deploy_request(db):
     store.set_line_form(db, line_id, form_id)
     rid = store.submit(db, requester_id=1, title="배포", line_id=line_id,
                        block_values=[{"sort_order": 1, "data": {"attachment_ids": [5]}}])["id"]
+    if reviewed:
+        store.decide(db, rid, actor_id=3, action="approved")
     block = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.EVALUATION)
     return rid, block
 
@@ -199,23 +201,23 @@ def test_forged_options_cannot_skip_the_required_impact_scope(db):
     rid, block = _deploy_request(db)
     forged = _assessed(impact_scope="", policy_id=db.full_v1,
                        options={"impact_scope": False, "agent_risk_grade": False})
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3, data=forged)
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4, data=forged)
 
     stored = _stored(db, block["id"])
     assert stored["options"] == FULL_OPTIONS
     assert blocks.evaluation_gaps(stored) == ["영향 범위"]
     with pytest.raises(E.ApprovalError):
-        store.decide(db, rid, actor_id=3, action="approved")
+        store.decide(db, rid, actor_id=4, action="approved")
 
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                      data=_assessed(policy_id=db.full_v1, options={"impact_scope": False}))
-    store.decide(db, rid, actor_id=3, action="approved")
+    store.decide(db, rid, actor_id=4, action="approved")
 
 
 def test_agent_risk_grade_is_forced_by_the_active_version_without_policy_id(db):
     """``policy_id`` 없이 ``agent_risk_grade=false`` 를 보내도 AI 위험도 평가지면 원장에 남는다."""
     rid, block = _deploy_request(db)
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                      data=_assessed(options={"agent_risk_grade": False, "mitigation": False}))
     stored = _stored(db, block["id"])
     assert stored["options"]["agent_risk_grade"] is True
@@ -224,7 +226,7 @@ def test_agent_risk_grade_is_forced_by_the_active_version_without_policy_id(db):
 
 def test_client_options_are_added_when_missing(db):
     rid, block = _deploy_request(db)
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3, data=_assessed())
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4, data=_assessed())
     assert _stored(db, block["id"]) == _assessed(options=FULL_OPTIONS)
 
 
@@ -233,20 +235,20 @@ def test_a_version_that_turns_options_off_is_honoured(db):
     registry.register_action("generic", lambda *a, **k: None)
     rid, block = _deploy_request(db)
     _set_block_config(db, block["id"], {"template_id": "lite"})
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                      data=_assessed(impact_scope="", policy_id=str(db.lite_v1), options=FULL_OPTIONS))
     stored = _stored(db, block["id"])
     assert stored["options"]["agent_risk_grade"] is False
     assert stored["options"]["impact_scope"] == {"enabled": False,
                                                  "choices": evaluation.IMPACT_SCOPE_CHOICES}
     assert blocks.evaluation_gaps(stored) == []
-    store.decide(db, rid, actor_id=3, action="approved")
+    store.decide(db, rid, actor_id=4, action="approved")
 
 
 def test_a_version_of_another_form_is_refused(db):
     rid, block = _deploy_request(db)
     with pytest.raises(E.EvaluationVersionMismatch) as e:
-        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                          data=_assessed(policy_id=db.lite_v1))
     assert isinstance(e.value, E.ApprovalError)
     assert str(e.value) == "이 칸에 지정된 평가 양식이 아니니 평가지를 다시 열어 평가해 주세요."
@@ -258,7 +260,7 @@ def test_a_version_of_another_form_is_refused(db):
 def test_a_missing_version_is_refused(db, policy_id):
     rid, block = _deploy_request(db)
     with pytest.raises(E.EvaluationVersionNotFound) as e:
-        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                          data=_assessed(policy_id=policy_id))
     assert isinstance(e.value, E.ApprovalError)
     assert str(e.value) == "평가한 양식 버전을 찾을 수 없으니 평가지를 다시 열어 평가해 주세요."
@@ -271,7 +273,7 @@ def test_a_read_failure_falls_back_to_full_and_warns(db, caplog):
     rid, block = _deploy_request(db)
     db.broken = True
     with caplog.at_level(logging.WARNING, logger="approval-evaluation"):
-        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                          data=_assessed(policy_id=999, options=LITE_OPTIONS))
     assert _stored(db, block["id"])["options"] == FULL_OPTIONS
     assert any("전부 켠 한 벌" in r.getMessage() for r in caplog.records)
@@ -280,13 +282,13 @@ def test_a_read_failure_falls_back_to_full_and_warns(db, caplog):
 def test_empty_values_are_left_alone(db):
     rid, block = _deploy_request(db)
     for empty in (None, {}):
-        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3, data=empty)
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4, data=empty)
         assert _stored(db, block["id"]) == empty, "빈 값에 선택 항목을 덧붙이지 않는다"
     assert db.reads == [], "빈 값에는 양식을 읽을 일이 없다"
 
 
 def test_other_block_types_are_untouched(db):
-    rid, _ = _deploy_request(db)
+    rid, _ = _deploy_request(db, reviewed=False)
     plan = next(b for b in store.get(db, rid)["blocks"] if b["block_type"] == blocks.ATTACHMENTS)
     store.fill_block(db, request_id=rid, block_id=plan["id"], actor_id=1,
                      data={"attachment_ids": [7], "options": {"x": 1}})
@@ -298,11 +300,11 @@ def test_the_legacy_block_name_is_covered(db):
     rid, block = _deploy_request(db)
     row = next(r for r in db.t["approval_request_blocks"] if r["id"] == block["id"])
     row["block_type"] = "risk_assessment"
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                      data=_assessed(options={"agent_risk_grade": False}))
     assert _stored(db, block["id"])["options"] == FULL_OPTIONS
     with pytest.raises(E.EvaluationVersionMismatch):
-        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                          data=_assessed(policy_id=db.lite_v1))
 
 
@@ -442,17 +444,17 @@ def test_fill_block_on_an_unfixed_block_takes_the_picked_form(db):
     rid, block = _deploy_request(db)
     _set_block_config(db, block["id"], {"template_id": None})
     with pytest.raises(E.EvaluationVersionNotFound):
-        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                          data=_assessed(policy_id=999, template_id="lite"))
     assert _stored(db, block["id"]) is None
 
-    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=3,
+    store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
                      data=_assessed(impact_scope="", policy_id=db.lite_v1, template_id="lite",
                                     options=FULL_OPTIONS))
     stored = _stored(db, block["id"])
     assert stored["options"] == normalize_options({"options": LITE_OPTIONS})
     assert stored["options"]["agent_risk_grade"] is False
-    store.decide(db, rid, actor_id=3, action="approved")
+    store.decide(db, rid, actor_id=4, action="approved")
 
 
 def test_submit_on_an_unfixed_draft_block_takes_the_saved_values_form(db):
