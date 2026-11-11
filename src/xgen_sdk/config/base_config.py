@@ -46,30 +46,8 @@ logger = logging.getLogger("xgen-sdk.config-base")
 # 1회만 두드리도록.
 # ============================================================== #
 
-#: 값을 로그에 그대로 남기면 안 되는 config 이름 조각.
-#: config 로더는 부팅/refresh 마다 값을 INFO 로 남기는데, 여기에 API 키·
-#: 비밀번호가 평문으로 찍히면 로그 수집기(Loki 등)에 그대로 적재된다.
-_SENSITIVE_NAME_PARTS = (
-    "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL",
-    "PRIVATE", "SALT", "CERT", "DSN",
-)
-
-
-def _mask_config_value(env_name: str, value: Any) -> Any:
-    """민감한 이름의 config 값을 로그용으로 마스킹.
-
-    값의 존재/길이는 남긴다 — 운영에서 "값이 비어 있어서 생긴 문제" 를
-    진단하려면 그 정도는 필요하고, 그 이상은 유출이다.
-    """
-    name = (env_name or "").upper()
-    if not any(part in name for part in _SENSITIVE_NAME_PARTS):
-        return value
-    if value is None:
-        return "<unset>"
-    text = str(value)
-    if not text:
-        return "<empty>"
-    return f"<redacted len={len(text)}>"
+# 로그 마스킹은 redis_config · local_config 도 쓰므로 순환 import 없는 모듈에 둔다.
+from xgen_sdk.config.log_mask import _SENSITIVE_NAME_PARTS, _mask_config_value  # noqa: E402,F401
 
 
 _VERSION_CACHE_TTL_S: float = 0.05  # 50ms — 사용자 체감 지연 < 1 frame

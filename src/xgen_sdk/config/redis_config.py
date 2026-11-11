@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from xgen_sdk.config.log_mask import _mask_config_value
+
 logger = logging.getLogger(__name__)
 
 #: get_all_configs 의 MGET 배치 크기. 너무 크면 한 번의 왕복이 무거워지고,
@@ -1239,7 +1241,7 @@ class RedisConfigManager:
                     category=config_data.get('category'),
                     env_name=config_data.get('env_name')
                 )
-                logger.info(f"Config 업데이트 완료: {config_name} = {new_value}")
+                logger.info(f"Config 업데이트 완료: {config_name} = {_mask_config_value(config_name, new_value)}")
                 return
 
             # 1-b. Redis 에 없으면 **DB 메타**로 쓴다 (1.41.2).
@@ -1257,7 +1259,7 @@ class RedisConfigManager:
                     category=config_path.split('.')[0] if '.' in config_path else None,
                     env_name=row.get("env_name") or config_name,
                 )
-                logger.info(f"Config 업데이트 완료(DB 메타): {config_name} = {new_value}")
+                logger.info(f"Config 업데이트 완료(DB 메타): {config_name} = {_mask_config_value(config_name, new_value)}")
                 return
 
             # 2. 모든 config에서 검색하여 업데이트
@@ -1271,7 +1273,7 @@ class RedisConfigManager:
                         category=config['category'],
                         env_name=config.get('env_name')
                     )
-                    logger.info(f"Config 업데이트 완료: {config_name} = {new_value}")
+                    logger.info(f"Config 업데이트 완료: {config_name} = {_mask_config_value(config_name, new_value)}")
                     return
 
                 # path의 마지막 부분이 config_name과 일치하는 경우
@@ -1284,7 +1286,7 @@ class RedisConfigManager:
                         category=config['category'],
                         env_name=config.get('env_name')
                     )
-                    logger.info(f"Config 업데이트 완료: {config['path']} = {new_value}")
+                    logger.info(f"Config 업데이트 완료: {config['path']} = {_mask_config_value(config_name, new_value)}")
                     return
 
             raise KeyError(f"Configuration '{config_name}' not found")
@@ -1391,7 +1393,7 @@ class RedisConfigManager:
             # 설정 업데이트
             self.update_config_by_name(config_name, new_value)
 
-            logger.info(f"Config 업데이트 성공: {config_name}: {old_value} -> {new_value}")
+            logger.info(f"Config 업데이트 성공: {config_name}: {_mask_config_value(config_name, old_value)} -> {_mask_config_value(config_name, new_value)}")
 
             return {
                 "config_name": config_name,
