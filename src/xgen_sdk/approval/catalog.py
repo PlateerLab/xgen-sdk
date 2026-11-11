@@ -102,6 +102,20 @@ APP_API_DEPLOY = "app.api_deploy"
 #: 승인될 때까지 **옛 버전이 계속 답한다** — 갱신 결재가 바깥 호출자를 끊으면 안 된다.
 APP_API_REDEPLOY = "app.api_redeploy"
 
+#: 앱 서버 배포 — 에이전트가 만든 **앱을 배포 서버(DevStudio 실행기)에 처음 올리는** 것(2026-11-11).
+#:
+#: 앱 주인이 [서버 배포 요청]을 누르는 순간 그때의 소스를 묶어 고정한다(결재자가 보는 것과 나가는 것이
+#: 같아야 한다). 결재는 **그 소스 버전**을 승인한다. 승인되면 요청이 "배포 대기"가 되고, 슈퍼유저가
+#: [관리 > APP 서버 배포]에서 서버·자원을 골라 고정한 소스로 배포한다. 반려되면 고정한 소스를 지운다.
+#: 슈퍼유저가 요청 없이 바로 배포할 때도 같은 판정을 따른다(슈퍼유저 면제가 꺼져 있으면 결재를 올린다).
+#: 적용은 서버 배포를 가진 workflow 가 한다.
+APP_SERVER_DEPLOY = "app.server_deploy"
+#: 앱 서버 재배포 — **이미 서버에 올린 적이 있는 앱을 새 소스로 바꾸는** 것.
+#:
+#: 다른 배포 행위와 같은 이유로 나눈다(처음 올리는 것과 바꾸는 것은 위험이 다르다). 승인되고 배포될
+#: 때까지 서버에서는 **옛 버전이 계속 돈다.**
+APP_SERVER_REDEPLOY = "app.server_redeploy"
+
 #: 앱 공유: 에이전트가 만든 **앱의 공유 링크를 만들거나 공개 범위를 넓히는** 것(2026-10-28).
 #:
 #: 링크를 만들면 그 앱 화면과 데이터가 링크를 아는 사람에게 열리고 [앱 스토어]에도 나온다.
@@ -163,6 +177,16 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         APP_API_REDEPLOY, "앱 API 재배포",
         "이미 열린 앱 API를 새 버전으로 바꾸는 것",
+        OWNER_WORKFLOW, DOMAIN_DEPLOY,
+    ),
+    ActionSpec(
+        APP_SERVER_DEPLOY, "앱 서버 배포",
+        "에이전트가 만든 앱을 배포 서버에 처음 올리는 것",
+        OWNER_WORKFLOW, DOMAIN_DEPLOY,
+    ),
+    ActionSpec(
+        APP_SERVER_REDEPLOY, "앱 서버 재배포",
+        "이미 서버에 올린 앱을 새 소스로 바꾸는 것",
         OWNER_WORKFLOW, DOMAIN_DEPLOY,
     ),
     ActionSpec(
