@@ -46,15 +46,15 @@ def test_every_catalogued_action_is_registered():
 def test_the_gated_set_is_what_xgen_actually_gates_today():
     """지금 XGEN 이 실제로 승인을 받는 행위 전부 — 전수 조사(2026-09-11)의 결론.
 
-    에이전트 배포 2(처음·갱신) + 앱 API 배포 2(처음·갱신) + 앱 공유 1 + 지식·파일 저장소 5 + DB 2 + 도구 1
-    + 에이전트 공유 1(2026-10-28).
+    에이전트 배포 2(처음·갱신) + 앱 API 배포 2(처음·갱신) + 앱 서버 배포 2(처음·갱신, 2026-11-11)
+    + 앱 공유 1 + 지식·파일 저장소 5 + DB 2 + 도구 1 + 에이전트 공유 1(2026-10-28) + 에이전트 자원 용량 1.
     여기서 무엇이 빠지면 그 행위는
     결재로 옮겨지지 못한 채 옛 게이트에 남거나, 아무 통제 없이 열린다. 클라우드 6종은
     2026-09-30 [파일 클라우드]와 함께 거뒀다(RETIRED).
     """
     assert {s.action_type for s in catalog.gated_specs()} == {
         "agent.deploy", "agent.redeploy",
-        "app.api_deploy", "app.api_redeploy", "app.share",
+        "app.api_deploy", "app.api_redeploy", "app.server_deploy", "app.server_redeploy", "app.share",
         "collection.create", "collection.upload", "collection.update",
         "filestore.upload", "filestore.embed",
         "db.create", "db.share",
@@ -172,3 +172,19 @@ def test_app_api_deploy_and_redeploy_are_workflow_actions_in_the_deploy_group():
         assert registry.is_registered(sp.action_type)
     assert {"app.api_deploy", "app.api_redeploy"} <= set(catalog.owned_by(catalog.OWNER_WORKFLOW))
 
+
+def test_app_server_deploy_and_redeploy_are_workflow_actions_in_the_deploy_group():
+    """앱 서버 배포도 같은 규칙 — 처음 올리는 것과 바꾸는 것을 나누고 배포 갈래에 선다.
+
+    적용(승인 = 고정한 소스를 배포 대기로, 반려 = 고정한 소스를 지움)은 서버 배포를 가진 workflow 가 한다.
+    """
+    first = catalog.spec(catalog.APP_SERVER_DEPLOY)
+    again = catalog.spec(catalog.APP_SERVER_REDEPLOY)
+    assert first is not None and again is not None
+    assert (first.action_type, again.action_type) == ("app.server_deploy", "app.server_redeploy")
+    for sp in (first, again):
+        assert sp.gated and not sp.user_submittable
+        assert sp.owner == catalog.OWNER_WORKFLOW
+        assert sp.domain == catalog.DOMAIN_DEPLOY
+        assert registry.is_registered(sp.action_type)
+    assert {"app.server_deploy", "app.server_redeploy"} <= set(catalog.owned_by(catalog.OWNER_WORKFLOW))
