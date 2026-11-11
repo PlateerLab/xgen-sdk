@@ -12,6 +12,8 @@ RedisConfigManager와 동일한 인터페이스를 제공하여 완벽하게 대
 import logging
 from typing import Dict, Any, Optional, List
 
+from xgen_sdk.config.log_mask import _mask_config_value
+
 logger = logging.getLogger(__name__)
 
 
@@ -196,7 +198,7 @@ class LocalConfigManager:
                 except Exception as db_error:
                     logger.error(f"DB 저장 실패: {config_path} - {db_error}")
 
-            logger.debug(f"[Local] Config 저장 완료: {final_env_name} = {config_value}")
+            logger.debug(f"[Local] Config 저장 완료: {final_env_name} = {_mask_config_value(f'{final_env_name} {config_path}', config_value)}")
             return True
 
         except Exception as e:
@@ -522,7 +524,7 @@ class LocalConfigManager:
                 category=config_data.get('category'),
                 env_name=config_data.get('env_name')
             )
-            logger.info(f"Config 업데이트 완료: {config_name} = {new_value}")
+            logger.info(f"Config 업데이트 완료: {config_name} = {_mask_config_value(config_name, new_value)}")
             return
 
         # 2. 모든 config에서 검색하여 업데이트
@@ -535,7 +537,7 @@ class LocalConfigManager:
                     category=config['category'],
                     env_name=config.get('env_name')
                 )
-                logger.info(f"Config 업데이트 완료: {config_name} = {new_value}")
+                logger.info(f"Config 업데이트 완료: {config_name} = {_mask_config_value(config_name, new_value)}")
                 return
 
             path_parts = config['path'].split('.')
@@ -547,7 +549,7 @@ class LocalConfigManager:
                     category=config['category'],
                     env_name=config.get('env_name')
                 )
-                logger.info(f"Config 업데이트 완료: {config['path']} = {new_value}")
+                logger.info(f"Config 업데이트 완료: {config['path']} = {_mask_config_value(config_name, new_value)}")
                 return
 
         raise KeyError(f"Configuration '{config_name}' not found")
