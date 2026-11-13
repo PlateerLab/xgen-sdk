@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from xgen_sdk.db.pool_manager import DatabaseManagerPsycopg3
     from xgen_sdk.db.app_db import XgenDB
 
+from xgen_sdk.config.log_mask import _mask_config_value
+
 logger = logging.getLogger(__name__)
 
 
@@ -259,7 +261,7 @@ def set_db_config(db_manager, config_path: str,
             """
 
         actual_manager.execute_query(query, (config_path, value_str, config_type, env_name))
-        logger.debug(f"Saved config to DB: {config_path} (env_name: {env_name}) = {config_value}")
+        logger.debug(f"Saved config to DB: {config_path} (env_name: {env_name}) = {_mask_config_value(f'{env_name} {config_path}', config_value)}")
         return True
 
     except Exception as e:
