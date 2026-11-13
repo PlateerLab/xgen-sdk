@@ -517,7 +517,7 @@ def test_the_result_is_a_fresh_copy(db):
     again["traits"]["choices"].clear()
     assert FULL_OPTIONS == copy.deepcopy(evaluation.FULL_OPTIONS)
     assert len(evaluation.FULL_OPTIONS["impact_scope"]["choices"]) == 4
-    assert len(evaluation.FULL_OPTIONS["traits"]["choices"]) == 2
+    assert len(evaluation.FULL_OPTIONS["traits"]["choices"]) == 3
 
 
 def test_public_names_are_exported():

@@ -66,6 +66,7 @@ IMPACT_SCOPE_CHOICES: List[Dict[str, str]] = [
 TRAIT_CHOICES: List[Dict[str, str]] = [
     {"code": "PERSONAL_DATA", "label": "개인정보 처리"},
     {"code": "HIGH_IMPACT_AI", "label": "고영향 AI 해당"},
+    {"code": "EXTERNAL_SYSTEM_INTEGRATION", "label": "외부 시스템 연동(API 연동 포함)"},
 ]
 
 #: 전부 켠 한 벌 = AI 위험도 평가지. 선택 항목이 생기기 전의 양식은 모두 이것이었다.
