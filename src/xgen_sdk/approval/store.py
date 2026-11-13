@@ -1570,7 +1570,18 @@ def _with_server_options(app_db, block: Dict[str, Any], data: Any) -> Any:
         return data
     if not isinstance(data, dict) or not data:
         return data
-    return {**data, "options": evaluation.resolve_options(app_db, block, data)}
+    options = evaluation.resolve_options(app_db, block, data)
+    result = {**data, "options": options}
+    if "custom_fields" in options:
+        from xgen_sdk.approval.fields import evaluation_value_errors
+        from xgen_sdk.approval.formula import computed_values
+        definitions = options["custom_fields"]
+        values = data.get("custom_values")
+        errors = evaluation_value_errors(definitions, values, required=False)
+        if errors:
+            raise E.ApprovalError("; ".join(errors))
+        result["custom_values"], _ = computed_values(definitions, values or {})
+    return result
 
 
 def _check_block_value(block: Dict[str, Any], data: Any) -> None:

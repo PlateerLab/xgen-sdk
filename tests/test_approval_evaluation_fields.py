@@ -25,7 +25,7 @@ def test_versioned_sections_and_inputs_cannot_be_bypassed():
     assert data['options']['custom_fields'] == DEFINITIONS
     assert blocks.evaluation_gaps(data) == ['평가 목적']
 
-@pytest.mark.parametrize('defs', [[dict(DEFINITIONS[0], type='number')], DEFINITIONS + [DEFINITIONS[0]], [dict(DEFINITIONS[0], label='')], [dict(DEFINITIONS[0], config={'max_length': 0})]])
+@pytest.mark.parametrize('defs', [[dict(DEFINITIONS[0], type='unsupported')], DEFINITIONS + [DEFINITIONS[0]], [dict(DEFINITIONS[0], label='')], [dict(DEFINITIONS[0], config={'max_length': 0})]])
 def test_invalid_definition(defs):
     with pytest.raises(ValueError): evaluation.normalize_options({'options': dict(OPTIONS, custom_fields=defs)})
 

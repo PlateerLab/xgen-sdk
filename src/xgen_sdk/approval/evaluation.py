@@ -148,6 +148,12 @@ def normalize_options(policy_data: Any) -> Dict[str, Any]:
             raise ValueError("등급 구간을 사용하려면 평가항목도 추가하세요.")
         if out["agent_risk_grade"] and not (out["sections"]["scores"] and out["sections"]["grades"]):
             raise ValueError("Agent 위험 등급 기록에는 평가항목과 등급 구간이 필요합니다.")
+    if "section_order" in raw:
+        order = raw["section_order"]
+        allowed = ("data", "scores", "grades", "extras", "rationale")
+        if not isinstance(order, list) or any(not isinstance(key, str) or key not in allowed for key in order) or len(set(order)) != len(order):
+            raise ValueError("평가 구성 요소의 순서를 확인하세요.")
+        out["section_order"] = list(order) + [key for key in allowed if key not in order]
     return out
 
 
