@@ -27,6 +27,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from xgen_sdk.approval import blocks as blocks_mod
+from xgen_sdk.approval.fields import evaluation_fields
 from xgen_sdk.approval.engine import (
     EVALUATION_VERSION_MISMATCH_MESSAGE,
     EVALUATION_VERSION_NOT_FOUND_MESSAGE,
@@ -65,6 +66,7 @@ IMPACT_SCOPE_CHOICES: List[Dict[str, str]] = [
 TRAIT_CHOICES: List[Dict[str, str]] = [
     {"code": "PERSONAL_DATA", "label": "개인정보 처리"},
     {"code": "HIGH_IMPACT_AI", "label": "고영향 AI 해당"},
+    {"code": "EXTERNAL_SYSTEM_INTEGRATION", "label": "외부 시스템 연동(API 연동 포함)"},
 ]
 
 #: 전부 켠 한 벌 = AI 위험도 평가지. 선택 항목이 생기기 전의 양식은 모두 이것이었다.
@@ -136,6 +138,23 @@ def normalize_options(policy_data: Any) -> Dict[str, Any]:
             }
         else:
             out[key] = {"enabled": bool(value), "choices": copy.deepcopy(default["choices"])}
+    if "custom_fields" in raw:
+        out["custom_fields"] = copy.deepcopy(evaluation_fields(raw["custom_fields"]))
+    if "sections" in raw:
+        sections = raw["sections"]
+        if not isinstance(sections, dict) or any(type(v) is not bool for v in sections.values()):
+            raise ValueError("평가 양식 구성 요소의 사용 여부를 확인하세요.")
+        out["sections"] = {key: sections.get(key, True) for key in ("scores", "grades", "rationale", "extras")}
+        if out["sections"]["grades"] and not out["sections"]["scores"]:
+            raise ValueError("등급 구간을 사용하려면 평가항목도 추가하세요.")
+        if out["agent_risk_grade"] and not (out["sections"]["scores"] and out["sections"]["grades"]):
+            raise ValueError("Agent 위험 등급 기록에는 평가항목과 등급 구간이 필요합니다.")
+    if "section_order" in raw:
+        order = raw["section_order"]
+        allowed = ("data", "scores", "grades", "extras", "rationale")
+        if not isinstance(order, list) or any(not isinstance(key, str) or key not in allowed for key in order) or len(set(order)) != len(order):
+            raise ValueError("평가 구성 요소의 순서를 확인하세요.")
+        out["section_order"] = list(order) + [key for key in allowed if key not in order]
     return out
 
 

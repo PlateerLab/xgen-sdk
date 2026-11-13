@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from copy import deepcopy
 import pytest
 
 from xgen_sdk.approval import engine as E, registry, store
@@ -30,6 +32,41 @@ class FakeDB:
 
     def add_user(self, uid, username, full_name=None):
         self.t["users"].append({"id": uid, "username": username, "full_name": full_name})
+
+    @contextmanager
+    def get_connection(self):
+        db = self
+
+        class Connection:
+            @contextmanager
+            def transaction(self):
+                before = deepcopy(db.t)
+                try:
+                    yield
+                except BaseException:
+                    db.t = before
+                    raise
+
+            @contextmanager
+            def cursor(self):
+                class Cursor:
+                    description = None
+
+                    def execute(self, sql, params):
+                        normalized = " ".join(sql.split())
+                        if normalized.startswith(("LOCK TABLE", "SELECT pg_advisory_xact_lock")):
+                            self.data = []
+                        else:
+                            result = db.execute_raw_query(sql, params or ())
+                            if result.get("error"):
+                                raise RuntimeError(result["error"])
+                            self.data = result["data"]
+                        self.description = [(key,) for key in self.data[0]] if self.data else None
+
+                    def fetchall(self):
+                        return self.data
+                yield Cursor()
+        yield Connection()
 
     def _next(self, table):
         self._seq[table] += 1
