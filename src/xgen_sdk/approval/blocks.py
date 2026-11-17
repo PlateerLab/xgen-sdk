@@ -179,7 +179,12 @@ def evaluation_gaps(data: Any) -> List[str]:
         gaps.append("영향 범위")
     options = data.get("options") or {}
     if isinstance(options, dict):
-        gaps.extend(fields.evaluation_value_errors(options.get("custom_fields", []), data.get("custom_values")))
+        try:
+            gaps.extend(fields.evaluation_value_errors(options.get("custom_fields", []), data.get("custom_values")))
+        except ValueError as exc:
+            # 저장된 데이터 항목 정의가 틀렸다 — 채움 판정이 던지면 승인이 500 으로 끝난다.
+            # 채우지 못한 것으로 보아 승인을 막는다(엔진이 ApprovalError 로 알린다).
+            gaps.append(f"데이터 항목 설정({exc})")
     return gaps
 
 

@@ -517,7 +517,7 @@ def test_the_result_is_a_fresh_copy(db):
     again["traits"]["choices"].clear()
     assert FULL_OPTIONS == copy.deepcopy(evaluation.FULL_OPTIONS)
     assert len(evaluation.FULL_OPTIONS["impact_scope"]["choices"]) == 4
-    assert len(evaluation.FULL_OPTIONS["traits"]["choices"]) == 3
+    assert len(evaluation.FULL_OPTIONS["traits"]["choices"]) == 2
 
 
 def test_public_names_are_exported():
@@ -526,6 +526,83 @@ def test_public_names_are_exported():
     assert approval.EvaluationVersionNotFound is E.EvaluationVersionNotFound
     assert approval.EvaluationVersionMismatch is E.EvaluationVersionMismatch
     assert evaluation.EvaluationVersionNotFound is E.EvaluationVersionNotFound
-    for name in ("IMPACT_SCOPE_CHOICES", "TRAIT_CHOICES", "FULL_OPTIONS", "FLAG_OPTIONS",
+    for name in ("IMPACT_SCOPE_CHOICES", "TRAIT_CHOICES", "LEGACY_TRAIT_CHOICES", "FULL_OPTIONS", "FLAG_OPTIONS",
                  "CHOICE_OPTIONS", "normalize_options", "resolve_options"):
         assert hasattr(evaluation, name), name
+
+
+# ── 기본 특성 추가(2.26.0)가 옛 버전에 끼어들지 않는다 ─────────────────
+
+EXTERNAL = {"code": "EXTERNAL_SYSTEM_INTEGRATION", "label": "외부 시스템 연동(API 연동 포함)"}
+
+
+@pytest.mark.parametrize("policy_data", [{}, {"options": None}, {"options": {}},
+                                         {"options": {"traits": True}},
+                                         {"options": {"traits": {"enabled": True}}},
+                                         {"options": {"traits": {"enabled": True, "choices": []}}}])
+def test_stored_versions_without_trait_choices_keep_the_legacy_two(policy_data):
+    assert normalize_options(policy_data)["traits"]["choices"] == evaluation.LEGACY_TRAIT_CHOICES
+    assert EXTERNAL not in normalize_options(policy_data)["traits"]["choices"]
+    # 새로 저장하는 버전만 지금 기본값을 받는다.
+    assert normalize_options(policy_data, new_version=True)["traits"]["choices"] == evaluation.TRAIT_CHOICES
+
+
+def test_explicit_trait_choices_are_kept_in_both_modes():
+    mine = [{"code": "MINE", "label": "우리 특성"}]
+    data = {"options": {"traits": {"enabled": True, "choices": mine}}}
+    assert normalize_options(data)["traits"]["choices"] == mine
+    assert normalize_options(data, new_version=True)["traits"]["choices"] == mine
+
+
+def test_new_default_trait_is_the_legacy_two_plus_external():
+    assert evaluation.TRAIT_CHOICES == evaluation.LEGACY_TRAIT_CHOICES + [EXTERNAL]
+    out = normalize_options({}, new_version=True)
+    out["traits"]["choices"].clear()
+    assert len(evaluation.TRAIT_CHOICES) == 3 and len(FULL_OPTIONS["traits"]["choices"]) == 2
+
+
+def test_an_old_version_without_options_resolves_to_legacy_traits(db):
+    old = db.add_policy("ai-risk", 0, None, is_active=False)
+    out = resolve_options(db, _block({"template_id": "ai-risk"}), {"policy_id": old})
+    assert out["traits"]["choices"] == evaluation.LEGACY_TRAIT_CHOICES
+
+
+# ── 저장된 버전이 틀렸으면 500 이 아니라 결재 오류 ─────────────────────
+
+BAD_STORED = [
+    {"custom_fields": [{"id": "x", "type": "unsupported", "label": "x", "required": True, "config": {}}]},
+    {"custom_fields": "nope"},
+    {"sections": {"scores": "yes"}},
+    {"sections": {"scores": False, "grades": True, "rationale": True, "extras": True},
+     "agent_risk_grade": False},
+    {"section_order": ["unknown"]},
+]
+
+
+@pytest.mark.parametrize("bad", BAD_STORED)
+def test_a_broken_stored_version_is_an_approval_error(db, bad):
+    pid = db.add_policy("lite", 5, dict(LITE_OPTIONS, **bad))
+    with pytest.raises(E.ApprovalError, match="평가 양식 버전의 설정"):
+        resolve_options(db, _block({"template_id": "lite"}), {"policy_id": pid})
+
+
+def test_fill_with_a_broken_stored_version_is_an_approval_error(db):
+    rid, block = _deploy_request(db)
+    _set_block_config(db, block["id"], {"template_id": "lite"})
+    pid = db.add_policy("lite", 5, dict(LITE_OPTIONS, **BAD_STORED[0]))
+    with pytest.raises(E.ApprovalError):
+        store.fill_block(db, request_id=rid, block_id=block["id"], actor_id=4,
+                         data=_assessed(policy_id=pid))
+    assert _stored(db, block["id"]) is None
+
+
+def test_approving_over_a_broken_stored_evaluation_is_an_approval_error(db):
+    """저장된 값의 데이터 항목 정의가 틀려도 채움 판정이 던지지 않고 승인을 막는다."""
+    rid, block = _deploy_request(db)
+    row = next(r for r in db.t["approval_request_blocks"] if r["id"] == block["id"])
+    broken = _assessed(options=dict(LITE_OPTIONS, **BAD_STORED[0]))
+    row["data"] = json.dumps(broken, ensure_ascii=False)
+    gaps = blocks.evaluation_gaps(broken)
+    assert len(gaps) == 1 and gaps[0].startswith("데이터 항목 설정(")
+    with pytest.raises(E.ApprovalError, match="아직 채우지 않은 칸"):
+        store.decide(db, rid, actor_id=4, action="approved")

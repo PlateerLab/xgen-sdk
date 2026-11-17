@@ -42,6 +42,14 @@ def evaluation_fields(raw):
 
 
 def evaluation_value_errors(definitions, values, *, required=True):
+    """Errors in typed evaluation values.
+
+    ``required=False`` checks a draft (fill/save): types and ranges are enforced, but
+    missing required values and calculation errors (e.g. dividing by a zero the user
+    entered) are not, so an unfinished evaluation can still be saved. The server still
+    recomputes formulas on save. ``required=True`` is the final check (approval), which
+    also requires required checkboxes to be checked and formulas to calculate.
+    """
     evaluation_fields(definitions)
     if values is None:
         values = {}
@@ -53,9 +61,13 @@ def evaluation_value_errors(definitions, values, *, required=True):
         value = values.get(field["id"])
         kind = field["type"]
         if field["id"] in formula_errors:
-            errors.append(f"{field['label']}: {formula_errors[field['id']]}")
+            if required:
+                errors.append(f"{field['label']}: {formula_errors[field['id']]}")
         elif kind == "checkbox" and type(value) is not bool:
             errors.append(f"{field['label']}: 체크 여부를 확인하세요.")
+        elif kind == "checkbox":
+            if required and field["required"] and value is not True:
+                errors.append(field["label"])
         elif value is None or value == "" or (isinstance(value, str) and not value.strip()):
             if required and field["required"]:
                 errors.append(field["label"])

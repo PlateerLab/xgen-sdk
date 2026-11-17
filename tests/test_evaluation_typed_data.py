@@ -15,7 +15,7 @@ FIELDS = [field('a', 'number'), field('b', 'number'), field('day', 'date'),
           field('choice', 'select', choices=[dict(code='yes', label='예')]),
           field('check', 'checkbox'), field('sum', 'formula', expression='([a] + [b]) * 2'),
           field('chain', 'formula', expression='[sum] / 2 + -1.5')]
-VALUES = dict(a=2.5, b=3, day='2024-02-29', choice='yes', check=False, sum=999, chain=-999)
+VALUES = dict(a=2.5, b=3, day='2024-02-29', choice='yes', check=True, sum=999, chain=-999)
 
 
 def test_section_order_is_preserved_and_missing_sections_are_appended():
@@ -103,3 +103,48 @@ def test_server_uses_persisted_version_and_ignores_forged_result():
     assert data['custom_values']['sum'] == 11
     assert data['custom_values']['chain'] == 4
     assert data['options']['custom_fields'] == FIELDS
+
+
+def test_required_checkbox_must_be_checked_on_final_check_only():
+    defs = [field('agree', 'checkbox'), dict(field('optional', 'checkbox'), required=False)]
+    assert evaluation_value_errors(defs, {'agree': False}) == ['agree']
+    assert evaluation_value_errors(defs, {}) == ['agree']
+    assert evaluation_value_errors(defs, {'agree': True}) == []
+    assert evaluation_value_errors(defs, {'agree': True, 'optional': False}) == []
+    # A draft may leave the box unchecked.
+    assert evaluation_value_errors(defs, {'agree': False}, required=False) == []
+    assert evaluation_value_errors(defs, {'agree': 'yes'}, required=False)
+
+
+def test_required_checkbox_blocks_the_gap_check():
+    from xgen_sdk.approval import blocks
+    defs = [field('agree', 'checkbox')]
+    options = dict(mitigation=False, impact_scope=False, traits=False, attachments=False, agent_risk_grade=False,
+                   custom_fields=defs, sections=dict(scores=False, grades=False, rationale=False, extras=False))
+    assert blocks.evaluation_gaps(dict(options=options, custom_values={'agree': False})) == ['agree']
+    assert blocks.evaluation_gaps(dict(options=options, custom_values={'agree': True})) == []
+
+
+DIVIDE = [field('a', 'number'), field('b', 'number'), field('ratio', 'formula', expression='[a] / [b]')]
+
+
+def test_division_by_an_entered_zero_saves_as_draft_but_blocks_the_final_check():
+    assert evaluation_value_errors(DIVIDE, {'a': 1, 'b': 0}, required=False) == []
+    assert evaluation_value_errors(DIVIDE, {'a': 1, 'b': 0}) == ['ratio: 0으로 나눌 수 없습니다.']
+    # Types are still enforced on drafts.
+    assert evaluation_value_errors(DIVIDE, {'a': 1, 'b': 'x'}, required=False)
+
+
+def test_draft_with_division_by_zero_is_saved_with_a_recomputed_null():
+    from xgen_sdk.approval import blocks
+    db = EvalDB(); db.add_template('typed', is_default=True)
+    options = dict(mitigation=False, impact_scope=False, traits=False, attachments=False, agent_risk_grade=False,
+                   custom_fields=DIVIDE, sections=dict(scores=False, grades=False, rationale=False, extras=False))
+    policy = db.add_policy('typed', 1, options)
+    block = {'block_type': 'evaluation'}
+    data = store._with_server_options(db, block, {'policy_id': policy, 'custom_values': {'a': 1, 'b': 0, 'ratio': 42}})
+    blocks.validate_data(block, data)
+    assert data['custom_values']['ratio'] is None, 'the server recomputes and ignores the forged result'
+    assert blocks.evaluation_gaps(data) == ['ratio: 0으로 나눌 수 없습니다.']
+    data = store._with_server_options(db, block, {'policy_id': policy, 'custom_values': {'a': 1, 'b': 4}})
+    assert data['custom_values']['ratio'] == 0.25 and blocks.evaluation_gaps(data) == []
