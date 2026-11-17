@@ -26,6 +26,7 @@
 """
 
 from __future__ import annotations
+from xgen_sdk.approval import fields
 
 import json
 from typing import Any, Callable, Dict, List, Optional
@@ -162,18 +163,28 @@ def evaluation_gaps(data: Any) -> List[str]:
         for it in (cat.get("items") if isinstance(cat.get("items"), list) else [])
         if isinstance(it, dict)
     ]
-    if not items:
+    if not fields.section_on(data.get("options"), "scores"):
+        pass
+    elif not items:
         gaps.append("항목 점수")
     else:
         empty = sum(1 for it in items if not _is_score(it.get("score")))
         if empty:
             gaps.append(f"항목 점수 {empty}개")
-    if not _has_text(data.get("rationale")):
+    if fields.section_on(data.get("options"), "rationale") and not _has_text(data.get("rationale")):
         gaps.append("판단 근거")
-    if not _has_text(data.get("risk_level")):
+    if fields.section_on(data.get("options"), "grades") and not _has_text(data.get("risk_level")):
         gaps.append("등급")
     if _option_on(data.get("options"), "impact_scope") and not _has_text(data.get("impact_scope")):
         gaps.append("영향 범위")
+    options = data.get("options") or {}
+    if isinstance(options, dict):
+        try:
+            gaps.extend(fields.evaluation_value_errors(options.get("custom_fields", []), data.get("custom_values")))
+        except ValueError as exc:
+            # 저장된 데이터 항목 정의가 틀렸다 — 채움 판정이 던지면 승인이 500 으로 끝난다.
+            # 채우지 못한 것으로 보아 승인을 막는다(엔진이 ApprovalError 로 알린다).
+            gaps.append(f"데이터 항목 설정({exc})")
     return gaps
 
 
@@ -311,6 +322,11 @@ def validate_data(block: Dict[str, Any], data: Any) -> None:
     if is_retired(block.get("block_type")) or (isinstance(data, dict) and "plan_id" in data):
         raise ValueError("Agent 기획서 기능이 종료되었습니다.")
     cfg = parse_data(block.get("config")) or {}
+    if normalize_block_type(block.get("block_type")) == EVALUATION and isinstance(data, dict):
+        errors = fields.evaluation_value_errors((data.get("options") or {}).get("custom_fields", []), data.get("custom_values"), required=False)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return
     if not isinstance(cfg, dict):
         return
     if normalize_block_type(block.get("block_type")) != ATTACHMENTS:

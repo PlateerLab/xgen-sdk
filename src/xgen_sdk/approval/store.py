@@ -1318,12 +1318,11 @@ def delete_form(app_db, form_id: int) -> None:
 
 
 def seed_builtin_forms(app_db) -> List[str]:
-    """XGEN 이 제공하는 템플릿을 **없는 것만** 심는다. 심은 이름들을 돌려준다.
+    """XGEN 기본 양식을 심고 명시적인 기본 절차 개정을 적용한다.
 
-    이미 있는 것은 **손대지 않는다.** 같은 이름을 덮어쓰면, 그 양식을 쓰던
-    결재선이 어느 날 배포만으로 요구 서류가 달라진다 — 조직이 고쳐 쓰라고 준
-    것을 우리가 도로 바꾸는 셈이다. 템플릿 내용이 달라지면 **새 이름**으로
-    항목을 하나 더 둔다(옛 이름을 쓰던 조직은 그대로 간다).
+    사용자 양식과 복사본은 그대로 둔다. AI Agent 배포 결재의 3차 평가 개정은
+    새 양식 행으로 만들고 결재선만 옮긴다. 기존 요청은 이전 양식 행과 자신의
+    칸 스냅샷을 계속 읽으므로 진행 중인 문서의 절차와 안내가 바뀌지 않는다.
 
     기동 때마다 부를 수 있게 멱등이다.
     """
@@ -1333,6 +1332,9 @@ def seed_builtin_forms(app_db) -> List[str]:
     for t in templates.BUILTIN_TEMPLATES:
         row = have.get(t["name"])
         if row is not None:
+            if _upgrade_deploy_template(app_db, row, t):
+                made.append(t["name"])
+                continue
             _backfill_builtin_notice(app_db, row, t)
             _refresh_builtin_texts(app_db, row, t)
             continue
@@ -1343,6 +1345,29 @@ def seed_builtin_forms(app_db) -> List[str]:
     if made:
         logger.info("내장 결재 양식 %d벌 심음: %s", len(made), ", ".join(made))
     return made
+
+
+def _upgrade_deploy_template(app_db, row, template):
+    """Retain the old form for submitted documents; switch lines to its successor.
+
+    Documents read step titles and notice from their form_id, so changing that
+    form in place would mislabel old second-step evaluations as third-step work.
+    Custom copies and all request rows remain untouched.
+    """
+    if row.get("name") != "AI Agent 배포 결재" or not row.get("is_builtin"):
+        return False
+    with followup.locked_configuration(app_db) as tx:
+        old = get_form(tx, row["id"])
+        if not old or old["name"] != template["name"] or not old["is_active"]:
+            return False
+        evaluations = [b for b in old["blocks"] if b["block_type"] == blocks_mod.EVALUATION]
+        if len(old["steps"]) != 3 or len(evaluations) != 1 or evaluations[0]["step_index"] != 1:
+            return False
+        new_id = create_form(tx, **template, is_builtin=True)
+        _q(tx, "UPDATE approval_lines SET form_id = %s WHERE form_id = %s", (new_id, old["id"]))
+        _q(tx, "UPDATE approval_forms SET name = %s, is_active = FALSE, updated_at = %s WHERE id = %s",
+           ("AI Agent 배포 결재 (이전 절차)", _now(), old["id"]))
+        return True
 
 
 def raise_legacy_attachment_limits(app_db) -> int:
@@ -1545,7 +1570,18 @@ def _with_server_options(app_db, block: Dict[str, Any], data: Any) -> Any:
         return data
     if not isinstance(data, dict) or not data:
         return data
-    return {**data, "options": evaluation.resolve_options(app_db, block, data)}
+    options = evaluation.resolve_options(app_db, block, data)
+    result = {**data, "options": options}
+    if "custom_fields" in options:
+        from xgen_sdk.approval.fields import evaluation_value_errors
+        from xgen_sdk.approval.formula import computed_values
+        definitions = options["custom_fields"]
+        values = data.get("custom_values")
+        errors = evaluation_value_errors(definitions, values, required=False)
+        if errors:
+            raise E.ApprovalError("; ".join(errors))
+        result["custom_values"], _ = computed_values(definitions, values or {})
+    return result
 
 
 def _check_block_value(block: Dict[str, Any], data: Any) -> None:

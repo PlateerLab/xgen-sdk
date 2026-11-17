@@ -31,28 +31,25 @@ from xgen_sdk.approval import blocks as B
 BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
     {
         "name": "AI Agent 배포 결재",
-        "description": "기안자가 배포를 요청하고, 2차가 AI 위험도를 평가하고, 3차가 최종 결정합니다.",
+        "description": "기안자가 배포를 요청하고, 2차가 검토하고, 3차가 AI 위험도를 평가한 뒤 최종 결정합니다.",
         "notice": (
-            "■ 2차 결재자가 위험도 평가를 모두 채워야 3차로 넘어갑니다.\n"
+            "■ 3차 결재자가 위험도 평가를 모두 작성해야 최종 승인할 수 있습니다.\n"
             "■ 승인 전에는 배포되지 않습니다. 반려되면 요청 내용을 확인하고 다시 올리세요.\n"
             "■ 누군가 승인한 뒤에는 기안 칸을 수정할 수 없습니다."
         ),
         "steps": [
             {"step_index": 0, "title": "1차 기안",
              "guide": "배포할 Agent를 확인하고 참고 자료가 있으면 첨부합니다."},
-            {"step_index": 1, "title": "2차 AI 위험도 심사",
-             "guide": (
-                 "Agent 구성을 보고 AI 위험도를 평가합니다. "
-                 "항목 점수, 영향 범위, 판단 근거를 모두 채워야 다음으로 넘어갑니다."
-             )},
-            {"step_index": 2, "title": "3차 최종 결정",
-             "guide": "Agent 구성·위험도 평가 결과를 보고 승인하거나 반려합니다."},
+            {"step_index": 1, "title": "2차 검토",
+             "guide": "Agent 구성과 참고 자료를 검토하고 승인하거나 반려합니다."},
+            {"step_index": 2, "title": "3차 위험도 평가 및 최종 결정",
+             "guide": "Agent 구성을 보고 위험도 평가의 항목 점수, 영향 범위, 판단 근거를 작성한 뒤 최종 승인하거나 반려합니다."},
         ],
         "blocks": [
             {"step_index": 0, "block_type": B.ATTACHMENTS, "label": "참고 자료",
              "required": False, "sort_order": 2},
             # 평가지 칸 하나. 이 양식은 기본 제공 [AI 위험도 평가지](ai-risk)로 채점한다.
-            {"step_index": 1, "block_type": B.EVALUATION, "label": "AI 위험도 평가",
+            {"step_index": 2, "block_type": B.EVALUATION, "label": "AI 위험도 평가",
              "config": {"template_id": "ai-risk"},
              "required": True, "sort_order": 1},
         ],

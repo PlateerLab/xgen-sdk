@@ -27,7 +27,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from xgen_sdk.approval import blocks as blocks_mod
+from xgen_sdk.approval.fields import evaluation_fields
 from xgen_sdk.approval.engine import (
+    ApprovalError,
     EVALUATION_VERSION_MISMATCH_MESSAGE,
     EVALUATION_VERSION_NOT_FOUND_MESSAGE,
     EvaluationVersionMismatch,
@@ -38,7 +40,7 @@ from xgen_sdk.approval.sql import q as _q
 logger = logging.getLogger("approval-evaluation")
 
 __all__ = [
-    "IMPACT_SCOPE_CHOICES", "TRAIT_CHOICES", "FULL_OPTIONS", "FLAG_OPTIONS", "CHOICE_OPTIONS",
+    "IMPACT_SCOPE_CHOICES", "TRAIT_CHOICES", "LEGACY_TRAIT_CHOICES", "FULL_OPTIONS", "FLAG_OPTIONS", "CHOICE_OPTIONS",
     "BUILTIN_TEMPLATE_ID", "LEGACY_TEMPLATE_ID",
     "normalize_options", "resolve_options",
     "EvaluationVersionNotFound", "EvaluationVersionMismatch",
@@ -61,20 +63,34 @@ IMPACT_SCOPE_CHOICES: List[Dict[str, str]] = [
     {"code": "PERSONAL", "label": "개인"},
 ]
 
-#: 특성 체크 선택지 — 화면 문구(evalRiskTraitPersonalData / evalRiskTraitHighImpactAi)와 같다.
-TRAIT_CHOICES: List[Dict[str, str]] = [
+#: 특성 선택지를 **적지 않은 옛 버전**이 따르는 선택지(2.26.0 전 기본값).
+#: 저장된 버전은 바뀌지 않아야 하므로, 선택지가 빠진 버전을 읽을 때는 늘 이것이다.
+LEGACY_TRAIT_CHOICES: List[Dict[str, str]] = [
     {"code": "PERSONAL_DATA", "label": "개인정보 처리"},
     {"code": "HIGH_IMPACT_AI", "label": "고영향 AI 해당"},
 ]
 
+#: 특성 체크 선택지 — **새로 저장하는 버전**의 기본값(:func:`normalize_options` 의
+#: ``new_version=True``). 화면 문구(evalRiskTraitPersonalData / evalRiskTraitHighImpactAi)와 같다.
+TRAIT_CHOICES: List[Dict[str, str]] = LEGACY_TRAIT_CHOICES + [
+    {"code": "EXTERNAL_SYSTEM_INTEGRATION", "label": "외부 시스템 연동(API 연동 포함)"},
+]
+
 #: 전부 켠 한 벌 = AI 위험도 평가지. 선택 항목이 생기기 전의 양식은 모두 이것이었다.
-#: 가장 엄격한 한 벌이기도 하다 — 양식을 읽지 못하면 이것으로 본다.
+#: 가장 엄격한 한 벌이기도 하다 — 양식을 읽지 못하면 이것으로 본다. 옛 버전을 읽는
+#: 한 벌이라 특성 선택지는 :data:`LEGACY_TRAIT_CHOICES` 다.
 FULL_OPTIONS: Dict[str, Any] = {
     "mitigation": True,
     "impact_scope": {"enabled": True, "choices": IMPACT_SCOPE_CHOICES},
-    "traits": {"enabled": True, "choices": TRAIT_CHOICES},
+    "traits": {"enabled": True, "choices": LEGACY_TRAIT_CHOICES},
     "attachments": True,
     "agent_risk_grade": True,
+}
+
+#: 새로 저장하는 버전의 전부 켠 한 벌 — 특성 선택지만 지금 기본값(:data:`TRAIT_CHOICES`)이다.
+_NEW_VERSION_FULL_OPTIONS: Dict[str, Any] = {
+    **FULL_OPTIONS,
+    "traits": {"enabled": True, "choices": TRAIT_CHOICES},
 }
 
 #: 켜고 끄기만 하는 선택 항목.
@@ -100,7 +116,7 @@ def _choices(raw: Any, default: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return out or copy.deepcopy(default)
 
 
-def normalize_options(policy_data: Any) -> Dict[str, Any]:
+def normalize_options(policy_data: Any, *, new_version: bool = False) -> Dict[str, Any]:
     """양식 버전의 선택 항목을 **빠짐없는 모양**으로.
 
     ``blocks._option_on`` 과 같은 답을 낸다(프론트도 이것을 따른다):
@@ -112,19 +128,27 @@ def normalize_options(policy_data: Any) -> Dict[str, Any]:
     * ``impact_scope`` / ``traits`` 는 ``true``/``false`` 로 와도 ``{enabled, choices}`` 로 편다.
       선택지가 비었거나 모양이 틀리면 기본 선택지다 — 켜 놓고 고를 것이 없으면 아무도 그
       칸을 채울 수 없다.
+    * 기본 선택지는 **저장된 버전을 읽을 때**(기본) 옛 기본값이다 — 특성 선택지를 적지 않은
+      옛 버전에 나중에 생긴 기본 특성이 끼어들지 않는다(이전 버전은 바뀌지 않는다).
+      ``new_version=True`` 는 **새로 저장할 버전**을 만들 때 쓰며, 빠진 선택지를 지금
+      기본값(:data:`TRAIT_CHOICES`)으로 채워 버전에 함께 남긴다.
+
+    양식 데이터 항목(``custom_fields``) · 구성 요소(``sections`` · ``section_order``)가
+    틀렸으면 :class:`ValueError` 다.
     """
+    full = _NEW_VERSION_FULL_OPTIONS if new_version else FULL_OPTIONS
     raw = policy_data.get("options") if isinstance(policy_data, dict) else None
     if not isinstance(raw, dict):
-        return copy.deepcopy(FULL_OPTIONS)
+        return copy.deepcopy(full)
     out: Dict[str, Any] = {}
     for key in FLAG_OPTIONS:
         if key not in raw:
-            out[key] = FULL_OPTIONS[key]
+            out[key] = full[key]
             continue
         value = raw[key]
         out[key] = bool(value.get("enabled", True)) if isinstance(value, dict) else bool(value)
     for key in CHOICE_OPTIONS:
-        default = FULL_OPTIONS[key]
+        default = full[key]
         if key not in raw:
             out[key] = copy.deepcopy(default)
             continue
@@ -136,6 +160,23 @@ def normalize_options(policy_data: Any) -> Dict[str, Any]:
             }
         else:
             out[key] = {"enabled": bool(value), "choices": copy.deepcopy(default["choices"])}
+    if "custom_fields" in raw:
+        out["custom_fields"] = copy.deepcopy(evaluation_fields(raw["custom_fields"]))
+    if "sections" in raw:
+        sections = raw["sections"]
+        if not isinstance(sections, dict) or any(type(v) is not bool for v in sections.values()):
+            raise ValueError("평가 양식 구성 요소의 사용 여부를 확인하세요.")
+        out["sections"] = {key: sections.get(key, True) for key in ("scores", "grades", "rationale", "extras")}
+        if out["sections"]["grades"] and not out["sections"]["scores"]:
+            raise ValueError("등급 구간을 사용하려면 평가항목도 추가하세요.")
+        if out["agent_risk_grade"] and not (out["sections"]["scores"] and out["sections"]["grades"]):
+            raise ValueError("Agent 위험 등급 기록에는 평가항목과 등급 구간이 필요합니다.")
+    if "section_order" in raw:
+        order = raw["section_order"]
+        allowed = ("data", "scores", "grades", "extras", "rationale")
+        if not isinstance(order, list) or any(not isinstance(key, str) or key not in allowed for key in order) or len(set(order)) != len(order):
+            raise ValueError("평가 구성 요소의 순서를 확인하세요.")
+        out["section_order"] = list(order) + [key for key in allowed if key not in order]
     return out
 
 
@@ -245,7 +286,8 @@ def resolve_options(app_db, block: Dict[str, Any], data: Any) -> Dict[str, Any]:
 
     어느 쪽이든 **읽기 자체가 실패**하면(표 없음 · DB 오류) 전부 켠 한 벌을 돌려주고 경고만
     남긴다. 가장 엄격한 한 벌이라 아무것도 건너뛸 수 없고, 읽기 오류로 결재를 막지도 않는다.
-    위의 두 오류는 읽기가 성공했을 때만 난다.
+    위의 두 오류는 읽기가 성공했을 때만 난다. 읽은 버전의 데이터 항목 · 구성이 틀렸으면
+    (:func:`normalize_options` 의 :class:`ValueError`) :class:`ApprovalError` 다.
 
     돌려주는 dict 는 새로 만든 것이라 부르는 쪽이 고쳐도 된다.
     """
@@ -272,4 +314,8 @@ def resolve_options(app_db, block: Dict[str, Any], data: Any) -> Dict[str, Any]:
             raise EvaluationVersionMismatch()
     if row is None:
         return copy.deepcopy(FULL_OPTIONS)
-    return normalize_options(_parse_policy_data(row.get("policy_data")))
+    try:
+        return normalize_options(_parse_policy_data(row.get("policy_data")))
+    except ValueError as exc:
+        # 저장된 버전의 데이터 항목 · 구성이 틀렸다 — 서버 오류(500)가 아니라 결재 오류(400)로.
+        raise ApprovalError(f"평가 양식 버전의 설정이 올바르지 않습니다: {exc}") from None
