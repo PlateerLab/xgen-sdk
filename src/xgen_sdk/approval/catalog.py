@@ -168,6 +168,16 @@ AGENT_RESOURCES = "agent.resources"
 #: 적용은 컴퓨터를 다루는 workflow 가 한다.
 AGENT_COMPUTER_SPEC = "agent.computer_spec"
 
+#: 에이전트 나가는 통신 허용 — 관리자가 아닌 주인이 에이전트 컴퓨터(VM)가 바깥의 특정 대상(도메인 · 포트)에
+#: 나갈 수 있게 열어 달라고 **요청하는** 것(2026-11-26).
+#:
+#: 나가는 통신은 회사 밖으로 데이터가 나가는 길이라 관리자가 바로 정하고, 주인은 사유를 붙여 결재로 올린다.
+#: 요청에는 지금 정책과 더할 대상이 실린다(결재 문서의 「요청 내용」 표). 승인되면 그 대상을 허용 목록에 더하고
+#: 지금 컴퓨터에 바로 적용한다. 올린 뒤 관리자가 정책을 바꿨으면 쓰지 않는다. 사양 변경과 행위를 나눈 것은
+#: 결재선을 따로 둘 수 있게 하기 위해서다 — 예컨대 나가는 통신은 보안 담당에게만 가게 고정한다.
+#: 적용은 정책을 다루는 workflow 가 한다.
+AGENT_NETWORK = "agent.network"
+
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
@@ -281,6 +291,11 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         AGENT_COMPUTER_SPEC, "에이전트 컴퓨터 사양 변경",
         "관리자가 아닌 주인이 에이전트 컴퓨터의 템플릿 · vCPU · RAM · 디스크를 바꿔 달라고 요청하는 것",
+        OWNER_WORKFLOW, DOMAIN_AGENT,
+    ),
+    ActionSpec(
+        AGENT_NETWORK, "에이전트 나가는 통신 허용",
+        "관리자가 아닌 주인이 에이전트 컴퓨터가 바깥의 특정 대상에 나갈 수 있게 열어 달라고 요청하는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
     ),
 )

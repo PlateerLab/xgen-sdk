@@ -48,7 +48,7 @@ def test_the_gated_set_is_what_xgen_actually_gates_today():
 
     에이전트 배포 2(처음·갱신) + 앱 API 배포 2(처음·갱신) + 앱 서버 배포 2(처음·갱신, 2026-11-11)
     + 앱 버전 배포 1(2026-11-25) + 앱 공유 1 + 지식·파일 저장소 5 + DB 2 + 도구 1 + 에이전트 공유 1(2026-10-28) + 에이전트 자원 용량 1
-    + 에이전트 컴퓨터 사양 1(2026-11-26).
+    + 에이전트 컴퓨터 사양 1(2026-11-26) + 에이전트 나가는 통신 1(2026-11-26).
     여기서 무엇이 빠지면 그 행위는
     결재로 옮겨지지 못한 채 옛 게이트에 남거나, 아무 통제 없이 열린다. 클라우드 6종은
     2026-09-30 [파일 클라우드]와 함께 거뒀다(RETIRED).
@@ -60,7 +60,7 @@ def test_the_gated_set_is_what_xgen_actually_gates_today():
         "filestore.upload", "filestore.embed",
         "db.create", "db.share",
         "tool.publish",
-        "agent.share", "agent.resources", "agent.computer_spec",
+        "agent.share", "agent.resources", "agent.computer_spec", "agent.network",
     }
 
 
@@ -228,3 +228,29 @@ def test_agent_computer_spec_is_a_workflow_action_in_the_agent_group():
     assert sp.action_type != resources.action_type
     assert sp.label != resources.label
     assert sp.domain == resources.domain
+
+
+def test_agent_network_is_a_workflow_action_in_the_agent_group():
+    """에이전트 나가는 통신 허용(관리자가 아닌 주인이 컴퓨터가 바깥의 특정 대상에 나갈 수 있게 열어 달라고 요청) —
+    에이전트 갈래, 적용은 workflow.
+
+    적용(승인 = 그 대상을 허용 목록에 더하고 지금 컴퓨터에 적용)은 정책을 다루는 workflow 가 한다. 용량 변경
+    (``agent.resources``) · 사양 변경(``agent.computer_spec``)과 다른 행위라 결재선을 따로 둘 수 있다 — 예컨대
+    보안 담당에게만 가게 고정한다. 사람이 마이페이지에서 직접 올리는 행위가 아니다(남의 컴퓨터를 바깥에 여는
+    길이 된다).
+    """
+    sp = catalog.spec(catalog.AGENT_NETWORK)
+    assert sp is not None and sp.action_type == "agent.network"
+    assert sp.label == "에이전트 나가는 통신 허용"
+    assert sp.gated and not sp.user_submittable
+    assert sp.owner == catalog.OWNER_WORKFLOW
+    assert sp.domain == catalog.DOMAIN_AGENT
+    assert registry.is_registered(sp.action_type)
+    assert "agent.network" in catalog.owned_by(catalog.OWNER_WORKFLOW)
+
+    for other_key in (catalog.AGENT_RESOURCES, catalog.AGENT_COMPUTER_SPEC):
+        other = catalog.spec(other_key)
+        assert other is not None
+        assert sp.action_type != other.action_type
+        assert sp.label != other.label
+        assert sp.domain == other.domain
