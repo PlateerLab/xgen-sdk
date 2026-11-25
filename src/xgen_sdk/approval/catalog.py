@@ -157,6 +157,17 @@ FILESTORE_UPLOAD = "filestore.upload"
 #: 다루는 workflow 가 한다. 올린 뒤 한도가 바뀌었으면 쓰지 않는다.
 AGENT_RESOURCES = "agent.resources"
 
+#: 에이전트 컴퓨터 사양 변경 — 관리자가 아닌 주인이 에이전트 컴퓨터(VM) · 앱 서빙 컴퓨터의 템플릿 · vCPU ·
+#: RAM · 디스크를 바꿔 달라고 **요청하는** 것(2026-11-26).
+#:
+#: 사양은 서버의 메모리 예산을 나눠 쓰는 일이라 관리자가 바로 바꾸고, 주인은 사유를 붙여 결재로 올린다.
+#: 요청에는 에이전트의 지금 사양과 바꿀 사양이 실린다(결재 문서의 「요청 내용」 표). 승인되면 그 사양을
+#: 저장하고 지금 컴퓨터에 적용한다 — 켜져 있으면 다시 시작하고, 템플릿이 다르면 컴퓨터를 지우고 다음 실행 때
+#: 새로 만든다. 올린 뒤 관리자가 그 자리의 사양을 바꿨으면 쓰지 않는다. 용량 변경(``agent.resources``)과
+#: 행위를 나눈 것은 결재선을 따로 둘 수 있게 하기 위해서다 — 예컨대 사양은 인프라 관리자에게만 가게 고정한다.
+#: 적용은 컴퓨터를 다루는 workflow 가 한다.
+AGENT_COMPUTER_SPEC = "agent.computer_spec"
+
 CATALOG: Tuple[ActionSpec, ...] = (
     # ── 자유 결재 — 게이트가 아니다 ──
     ActionSpec(
@@ -265,6 +276,11 @@ CATALOG: Tuple[ActionSpec, ...] = (
     ActionSpec(
         AGENT_RESOURCES, "에이전트 자원 용량 변경",
         "에이전트의 작업 공간 · 샌드박스 용량 한도를 늘리거나 줄이는 것",
+        OWNER_WORKFLOW, DOMAIN_AGENT,
+    ),
+    ActionSpec(
+        AGENT_COMPUTER_SPEC, "에이전트 컴퓨터 사양 변경",
+        "관리자가 아닌 주인이 에이전트 컴퓨터의 템플릿 · vCPU · RAM · 디스크를 바꿔 달라고 요청하는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
     ),
 )
