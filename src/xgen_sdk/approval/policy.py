@@ -621,6 +621,9 @@ def describe_rule(action_type: str, rule: Mapping[str, Any]) -> str:
     out = _OUTCOME_TEXT.get(str(rule.get("outcome")), str(rule.get("outcome")))
     if rule.get("outcome") == OUTCOME_LINE:
         out = f"결재선 #{rule.get('line_id')}"
+    if rule.get("auto_blocked_reason"):
+        # :func:`match_for_action` 이 자동 승인을 막아 바꾼 결과 — 원장 · 감사에서 까닭이 보여야 한다.
+        out = f"{out} ({rule['auto_blocked_reason']})"
     return f"{' 그리고 '.join(parts)} → {out}"
 
 
@@ -687,13 +690,60 @@ def match_rule(rules: Sequence[Mapping[str, Any]],
     return None
 
 
+def auto_blocked_reason(action_type: str, metrics: Optional[Mapping[str, Any]]) -> str:
+    """이 요청을 자동 승인하지 않는 까닭(화면에 그대로 보일 문장) — 막히지 않으면 빈 문장.
+
+    카탈로그의 :class:`catalog.NoAutoSpec` 선언을 본다. 선언된 값이 요청에 아예 없거나 종류가 다르면(부르는 쪽이
+    싣지 않음 · 잘못 실음) 막힌 것으로 본다 — 모르는 채로 자동 승인되지 않게. 선언이 없는 행위는 늘 빈 문장이다.
+    """
+    sp = catalog.spec(action_type)
+    if not sp or not sp.no_auto:
+        return ""
+    values = metrics if isinstance(metrics, Mapping) else {}
+    for n in sp.no_auto:
+        if n.metric not in values or not _comparable(values[n.metric], n.value):
+            # 값이 없거나 종류가 다르면(예: "true" 문자열) 그 값을 모르는 것이다.
+            m = sp.metric(n.metric)
+            name = m.label if m else n.metric
+            return f"{name} 값을 알 수 없는 요청은 자동 승인하지 않습니다"
+        if _same(values[n.metric], n.value):
+            return f"{n.label}은 자동 승인하지 않습니다"
+    return ""
+
+
+def match_for_action(action_type: str, rules: Sequence[Mapping[str, Any]],
+                     metrics: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """그 행위의 규칙 맞추기 — :func:`match_rule` 에 카탈로그의 「자동 승인하지 않는 값」 을 더한 것(2.30.0).
+
+    행위를 아는 길(:func:`evaluate` · :func:`resolve_line` · ``store.submit`` · :func:`preview`)은 모두 이것을 지난다.
+
+    처음 맞는 규칙이 ``auto_approve`` 인데 요청이 막혀 있으면(:func:`auto_blocked_reason`) 자동 승인 규칙을 **없는
+    것으로 보고** 나머지 규칙을 순서대로 맞춘다(결재선 · 결재 필요 규칙은 그대로 따른다 — 번호는 원래 자리 그대로).
+    그래도 맞는 것이 없으면 막힌 그 규칙을 ``require``(결재 필요)로 돌려준다 — 정책이 꺼진 행위에서 지금 정책으로
+    넘기면 관리자가 원장에 남기려 한 요청이 결재 없이 열리기 때문이다. 이렇게 바뀐 결과에는
+    ``auto_blocked: True`` · ``auto_blocked_reason`` 이 실린다.
+    """
+    hit = match_rule(rules, metrics)
+    if not hit or hit["outcome"] != OUTCOME_AUTO:
+        return hit
+    reason = auto_blocked_reason(action_type, metrics)
+    if not reason:
+        return hit
+    # 조건 없는 규칙은 match_rule 이 건너뛴다 — 자동 승인 규칙만 지우고 번호는 그대로 둔다.
+    masked = [dict(r, conditions=[]) if r.get("outcome") == OUTCOME_AUTO else r for r in rules]
+    alt = match_rule(masked, metrics)
+    if not alt:
+        alt = {**hit, "outcome": OUTCOME_REQUIRE, "line_id": None}
+    return {**alt, "auto_blocked": True, "auto_blocked_reason": reason}
+
+
 def evaluate(app_db, action_type: str,
              metrics: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """저장된 규칙으로 :func:`match_rule`. ``metrics`` 가 없으면 규칙을 읽지도 않는다."""
+    """저장된 규칙으로 :func:`match_for_action`. ``metrics`` 가 없으면 규칙을 읽지도 않는다."""
     if not isinstance(metrics, Mapping):
         return None
     rules = get_rules(app_db, action_type)
-    return match_rule(rules, metrics) if rules else None
+    return match_for_action(action_type, rules, metrics) if rules else None
 
 
 def clean_metrics(action_type: str, metrics: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -714,7 +764,8 @@ def clean_metrics(action_type: str, metrics: Optional[Mapping[str, Any]]) -> Dic
 
 
 def preview(app_db, action_type: str,
-            metrics: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+            metrics: Optional[Mapping[str, Any]] = None, *,
+            rules: Optional[Sequence[Mapping[str, Any]]] = None) -> Dict[str, Any]:
     """「이 값으로 요청하면 어떻게 되는가」 — 요청 화면의 안내와 설정 화면의 미리 보기용. 아무것도 쓰지 않는다.
 
     돌려주는 것::
@@ -725,15 +776,25 @@ def preview(app_db, action_type: str,
          "required": bool,          # 사람의 결재를 받는다
          "rule": int | None, "rule_label": str,
          "line_id": int | None,     # 쓰일(또는 미리 채워질) 결재선
-         "line_locked": bool}       # 요청자가 결재선을 바꿀 수 없다
+         "line_locked": bool,       # 요청자가 결재선을 바꿀 수 없다
+         "auto_blocked": bool,      # 자동 승인 규칙이 맞았지만 카탈로그 선언(내부망 대상 등)으로 막혔다
+         "auto_blocked_reason": str}  # 그 까닭 — 화면에 그대로 보일 문장. 막히지 않으면 빈 문장
+
+    ``rules`` 를 주면 저장된 규칙 대신 그 규칙으로 본다 — 관리 화면이 저장 전의 규칙으로 미리 볼 때. 정책(켜짐 ·
+    기본 결재선 · 고정)은 저장된 것을 쓴다. 규칙 검증은 하지 않으므로 :func:`validate_rules` 를 지난 것을 준다.
 
     슈퍼유저 면제는 보지 않는다(요청자를 모른다) — 호출부가 면제면 결재 없이 진행하는 것은 지금과 같다.
     """
     pol = get(app_db, action_type)
-    hit = evaluate(app_db, action_type, metrics)
+    if rules is None:
+        hit = evaluate(app_db, action_type, metrics)
+    else:
+        hit = match_for_action(action_type, rules, metrics) if isinstance(metrics, Mapping) else None
     base = {"action_type": action_type, "rules_supported": True,
             "rule": hit["rule"] if hit else None,
-            "rule_label": hit["label"] if hit else ""}
+            "rule_label": hit["label"] if hit else "",
+            "auto_blocked": bool(hit and hit.get("auto_blocked")),
+            "auto_blocked_reason": (hit or {}).get("auto_blocked_reason") or ""}
     if hit and hit["outcome"] == OUTCOME_AUTO:
         return {**base, "outcome": OUTCOME_AUTO, "auto_approve": True, "required": False,
                 "line_id": None, "line_locked": False}

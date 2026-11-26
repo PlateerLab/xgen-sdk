@@ -72,6 +72,26 @@ class MetricSpec:
 
 
 @dataclass(frozen=True)
+class NoAutoSpec:
+    """「이 값이면 조건 규칙이 자동 승인으로 정해도 자동 승인하지 않는다」 — 행위의 성질 하나(2.30.0).
+
+    관리자가 「대상 3개 이하면 자동 승인」 처럼 규칙을 쓸 때 ``internal`` 을 조건에 넣지 않았다는 이유만으로
+    사설망이 결재 없이 열리면 안 된다. 그런 값은 규칙이 아니라 카탈로그가 선언하고, :mod:`xgen_sdk.approval.policy`
+    가 한 곳에서 지킨다(부르는 쪽이 빠뜨릴 수 없게). 요청에 ``metric`` 값이 아예 없으면(부르는 쪽이 싣지 않음)
+    막힌 것으로 본다 — 모르는 채로 자동 승인되지 않게.
+
+    ``label`` 은 「…요청」 꼴의 명사구다 — 화면 문장은 ``{label}은 자동 승인하지 않습니다`` 로 짓는다.
+    """
+
+    metric: str
+    value: object
+    label: str
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"metric": self.metric, "value": self.value, "label": self.label}
+
+
+@dataclass(frozen=True)
 class ActionSpec:
     """결재를 태울 수 있는 행위 하나."""
 
@@ -86,6 +106,8 @@ class ActionSpec:
     user_submittable: bool = False
     #: 요청이 실어 보낼 수 있는 값들 — 조건 규칙은 이 이름에만 걸 수 있다. 비어 있으면 조건 규칙이 없는 행위다.
     metrics: Tuple[MetricSpec, ...] = ()
+    #: 이 값이면 자동 승인하지 않는다(:class:`NoAutoSpec`) — ``metric`` 은 ``metrics`` 에 선언된 이름이어야 한다.
+    no_auto: Tuple[NoAutoSpec, ...] = ()
 
     def metric(self, name: str) -> Optional[MetricSpec]:
         return next((m for m in self.metrics if m.name == name), None)
@@ -100,6 +122,7 @@ class ActionSpec:
             "gated": self.gated,
             "user_submittable": self.user_submittable,
             "metrics": [m.to_dict() for m in self.metrics],
+            "no_auto": [n.to_dict() for n in self.no_auto],
         }
 
 
@@ -339,6 +362,8 @@ CATALOG: Tuple[ActionSpec, ...] = (
             MetricSpec("targets", "대상 수", METRIC_NUMBER, "개"),
             MetricSpec("internal", "내부망 대상 포함", METRIC_BOOL),
         ),
+        # 사설망 · 내부 주소로 나가는 길은 규칙이 자동 승인으로 정해도 사람이 본다.
+        no_auto=(NoAutoSpec("internal", True, "내부망 대상이 있는 요청"),),
     ),
 )
 
@@ -379,6 +404,12 @@ def metrics_of(action_type: str) -> List[Dict[str, object]]:
     """그 행위가 요청에 실어 보낼 수 있는 값들(화면의 조건 칸) — 모르는 행위면 빈 목록."""
     sp = _BY_TYPE.get(str(action_type or ""))
     return [m.to_dict() for m in sp.metrics] if sp else []
+
+
+def no_auto_of(action_type: str) -> List[Dict[str, object]]:
+    """그 행위가 자동 승인하지 않는 값들(:class:`NoAutoSpec`) — 없거나 모르는 행위면 빈 목록."""
+    sp = _BY_TYPE.get(str(action_type or ""))
+    return [n.to_dict() for n in sp.no_auto] if sp else []
 
 
 def gated_specs() -> Tuple[ActionSpec, ...]:

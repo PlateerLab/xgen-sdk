@@ -516,3 +516,147 @@ def test_a_line_used_by_a_rule_is_not_dropped_quietly(db):
     assert rules[0]["outcome"] == "require" and rules[0]["line_id"] is None, \
         "줄을 잃은 규칙이 사라지면 더 가벼운 규칙이 대신 맞는다"
     assert rules[1]["outcome"] == "auto_approve"
+
+
+# ── 자동 승인하지 않는 값(카탈로그 선언) ──────────────────────────────
+
+NET_AUTO = [{"conditions": [_cond("targets", "<=", 3)], "outcome": "auto_approve", "label": "적은 대상"}]
+INTERNAL = {"targets": 1, "internal": True}
+PUBLIC = {"targets": 1, "internal": False}
+BLOCKED = "내부망 대상이 있는 요청은 자동 승인하지 않습니다"
+
+
+def test_the_catalog_declares_what_is_never_auto_approved(db):
+    assert catalog.no_auto_of(NET) == [{"metric": "internal", "value": True, "label": "내부망 대상이 있는 요청"}]
+    assert catalog.spec(NET).to_dict()["no_auto"] == catalog.no_auto_of(NET)
+    assert catalog.no_auto_of(SPEC) == [] and catalog.no_auto_of("no.such") == []
+    for sp in catalog.CATALOG:
+        for n in sp.no_auto:
+            assert sp.metric(n.metric), f"{sp.action_type} 의 no_auto 가 선언하지 않은 값 {n.metric} 을 본다"
+    rows = {r["action_type"]: r for r in policy.list_all(db)}
+    assert rows[NET]["no_auto"] == catalog.no_auto_of(NET)
+    assert rows[SPEC]["no_auto"] == [] and rows["agent.deploy"]["no_auto"] == []
+
+
+def test_match_rule_stays_pure_and_the_action_path_applies_the_guard():
+    assert policy.match_rule(NET_AUTO, INTERNAL)["outcome"] == "auto_approve", "순수 함수는 행위를 모른다"
+    hit = policy.match_for_action(NET, NET_AUTO, INTERNAL)
+    assert hit["outcome"] == "require" and hit["rule"] == 1
+    assert hit["auto_blocked"] is True and hit["auto_blocked_reason"] == BLOCKED
+    assert policy.match_for_action(NET, NET_AUTO, PUBLIC)["outcome"] == "auto_approve"
+    assert "auto_blocked" not in policy.match_for_action(NET, NET_AUTO, PUBLIC)
+
+
+def test_internal_targets_skip_the_auto_rule_and_take_the_next_line_rule(db):
+    light = _line(db, 3, name="팀장")
+    sec = _line(db, 3, 5, name="보안")
+    policy.set_policy(db, NET, actor_id=7, required=True, default_line_id=light)
+    policy.set_rules(db, NET, NET_AUTO + [
+        {"conditions": [_cond("internal", "==", True)], "outcome": "line", "line_id": sec},
+    ], actor_id=7)
+    assert policy.resolve_line(db, NET, metrics=INTERNAL) == (sec, None)
+    assert policy.resolve_line(db, NET, metrics=PUBLIC) == (None, None)
+    hit = policy.evaluate(db, NET, INTERNAL)
+    assert hit["rule"] == 2 and hit["outcome"] == "line" and hit["auto_blocked"] is True
+    with pytest.raises(E.ApprovalError, match="조건 규칙 #2"):
+        policy.resolve_line(db, NET, line_id=light, metrics=INTERNAL)
+
+
+def test_internal_targets_skip_the_auto_rule_and_take_the_next_require_rule(db):
+    lid = _line(db, 3)
+    policy.set_policy(db, NET, actor_id=7, required=False, default_line_id=lid)
+    policy.set_rules(db, NET, NET_AUTO + [
+        {"conditions": [_cond("targets", ">=", 1)], "outcome": "require"},
+    ], actor_id=7)
+    hit = policy.evaluate(db, NET, INTERNAL)
+    assert hit["rule"] == 2 and hit["outcome"] == "require"
+    assert policy.is_required(db, NET, INTERNAL) is True
+    assert policy.resolve_line(db, NET, metrics=INTERNAL) == (lid, None)
+
+
+def test_a_blocked_auto_rule_with_nothing_after_it_still_needs_people(db):
+    """맞는 것이 없으면 정책대로 — 단, 정책이 꺼져 있어도 결재 없이 열리지 않는다(자동 승인보다 가벼워지지 않게)."""
+    lid = _line(db, 3)
+    policy.set_policy(db, NET, actor_id=7, required=False, default_line_id=lid)
+    policy.set_rules(db, NET, NET_AUTO, actor_id=7)
+    assert policy.is_required(db, NET, INTERNAL) is True
+    assert policy.resolve_line(db, NET, metrics=INTERNAL) == (lid, None)
+    hit = policy.evaluate(db, NET, INTERNAL)
+    assert hit["rule"] == 1 and hit["outcome"] == "require" and hit["line_id"] is None
+    assert BLOCKED in policy.describe_rule(NET, hit)
+    # 켜진 정책 · 고정 결재선이면 그 줄 그대로
+    policy.set_policy(db, NET, actor_id=7, required=True, default_line_id=lid, line_locked=True)
+    assert policy.resolve_line(db, NET, metrics=INTERNAL) == (lid, None)
+
+
+def test_a_request_that_does_not_carry_the_declared_value_is_blocked(db):
+    policy.set_rules(db, NET, NET_AUTO, actor_id=7)
+    for m in ({"targets": 1}, {"targets": 1, "internal": "true"}, {"targets": 1, "internal": None}):
+        hit = policy.evaluate(db, NET, m)
+        assert hit["outcome"] == "require" and hit["auto_blocked"] is True, m
+        assert "내부망 대상 포함 값을 알 수 없는 요청" in hit["auto_blocked_reason"]
+    assert policy.resolve_line(db, NET, metrics=PUBLIC) == (None, None)
+
+
+def test_submit_does_not_auto_approve_an_internal_target(db):
+    lid = _line(db, 3, 4)
+    calls = []
+    registry.register_action(NET, lambda p, r: calls.append(p), label="통신")
+    policy.set_policy(db, NET, actor_id=7, required=True, default_line_id=lid)
+    policy.set_rules(db, NET, NET_AUTO, actor_id=7)
+    line, steps = policy.resolve_line(db, NET, metrics=INTERNAL)
+    out = store.submit(db, requester_id=1, title="통신 허용", action_type=NET, payload={"add": ["10.0.0.5"]},
+                       line_id=line, steps=steps, target_ref="wf:1", metrics=INTERNAL)
+    assert out["status"] == E.PENDING and not store.is_auto_approved(out)
+    assert [s["approver_id"] for s in out["steps"]] == [3, 4]
+    assert calls == [], "사람이 보기 전에 적용됐다"
+    d = store.rule_decision(db, out["id"])
+    assert d["outcome"] == "require" and d["auto_blocked"] is True and BLOCKED in d["text"]
+    # 부르는 쪽이 resolve_line 을 건너뛰고 line_id 없이 올려도 자동 승인되지 않는다
+    with pytest.raises(E.ApprovalError):
+        store.submit(db, requester_id=1, title="통신 허용", action_type=NET, target_ref="wf:2",
+                     metrics=INTERNAL)
+    assert calls == [] and all(r["status"] != E.APPROVED for r in db.t["approval_requests"])
+    # 공인 대상만이면 지금처럼 자동 승인
+    pub = store.submit(db, requester_id=1, title="통신 허용", action_type=NET, payload={"add": ["example.com"]},
+                       target_ref="wf:3", metrics=PUBLIC)
+    assert pub["status"] == E.APPROVED and store.is_auto_approved(pub) and calls == [{"add": ["example.com"]}]
+
+
+def test_actions_without_the_declaration_auto_approve_as_before(db, auto):
+    registry.register_action(SPEC, lambda p, r: None, label="사양")
+    assert policy.auto_blocked_reason(SPEC, {}) == ""
+    out = store.submit(db, requester_id=1, title="사양 변경", action_type=SPEC, metrics=SMALL)
+    assert out["status"] == E.APPROVED
+    pv = policy.preview(db, SPEC, SMALL)
+    assert pv["auto_blocked"] is False and pv["auto_blocked_reason"] == ""
+
+
+def test_preview_tells_why_it_is_not_automatic(db):
+    lid = _line(db, 3)
+    policy.set_policy(db, NET, actor_id=7, required=True, default_line_id=lid)
+    policy.set_rules(db, NET, NET_AUTO, actor_id=7)
+    pv = policy.preview(db, NET, INTERNAL)
+    assert pv["outcome"] == "require" and pv["required"] is True and pv["auto_approve"] is False
+    assert pv["auto_blocked"] is True and pv["auto_blocked_reason"] == BLOCKED
+    assert pv["rule"] == 1 and pv["line_id"] == lid
+    pub = policy.preview(db, NET, PUBLIC)
+    assert pub["outcome"] == "auto_approve" and pub["auto_blocked"] is False and pub["auto_blocked_reason"] == ""
+    # 자동 승인 규칙이 맞지 않으면 막을 것도 없다
+    assert policy.preview(db, NET, {"targets": 9, "internal": True})["auto_blocked"] is False
+    assert policy.preview(db, NET)["auto_blocked"] is False
+
+
+def test_preview_with_unsaved_rules(db):
+    lid = _line(db, 3)
+    policy.set_policy(db, NET, actor_id=7, required=True, default_line_id=lid)
+    assert policy.get_rules(db, NET) == []
+    pv = policy.preview(db, NET, PUBLIC, rules=NET_AUTO)
+    assert pv["outcome"] == "auto_approve" and pv["rule_label"] == "적은 대상"
+    pv = policy.preview(db, NET, INTERNAL, rules=NET_AUTO)
+    assert pv["outcome"] == "require" and pv["auto_blocked"] is True
+    assert policy.preview(db, NET, PUBLIC, rules=[])["outcome"] == "policy", "빈 목록은 「규칙 없음」 으로 본다"
+    assert policy.get_rules(db, NET) == [], "미리 보기가 규칙을 저장했다"
+    # 저장된 규칙이 있어도 rules= 가 이긴다
+    policy.set_rules(db, NET, NET_AUTO, actor_id=7)
+    assert policy.preview(db, NET, PUBLIC, rules=[])["outcome"] == "policy"

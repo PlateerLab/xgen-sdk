@@ -313,6 +313,9 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         기안자에게 「자동 승인」 알림(:data:`notifier.TEMPLATE_AUTO_APPROVED`)을 보낸다. 적용이 실패하면
         지금처럼 ``apply_error`` 와 「적용 실패」 알림이다. ``line_id`` · ``steps`` · ``block_values`` 는 쓰지 않는다.
 
+        카탈로그가 「자동 승인하지 않는 값」 을 선언한 행위(예: ``agent.network`` 의 ``internal == True``)는
+        그 값이면 자동 승인 규칙이 맞아도 자동 승인하지 않는다(:func:`policy.match_for_action` — 결재 필요로 올라간다).
+
         다른 규칙(결재선 · 결재 필요)이 맞으면 평소처럼 올리고 무엇이 맞았는지만 ``rule_decision`` 에 적는다
         (결재선은 호출부가 같은 ``metrics`` 로 부른 :func:`policy.resolve_line` 이 이미 골랐다).
 
