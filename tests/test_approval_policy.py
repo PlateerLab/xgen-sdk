@@ -71,7 +71,8 @@ def db():
 def test_nothing_is_required_by_default(db):
     """**배포하는 날 아무도 막히지 않는다.** 표가 비어 있으면 전부 통과다."""
     for sp in catalog.gated_specs():
-        assert policy.is_required(db, sp.action_type) is False
+        # 요청 자체가 결재인 행위(관리자가 아닌 사람이 「바꿔 달라」 고 올리는 요청)만 늘 결재다.
+        assert policy.is_required(db, sp.action_type) is sp.always_required
 
 
 def test_an_unknown_action_is_not_required(db):

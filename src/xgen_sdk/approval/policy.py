@@ -104,7 +104,12 @@ def is_required(app_db, action_type: str,
     ``metrics`` 를 주면 조건 규칙까지 본다. 규칙이 맞으면 결과와 상관없이 참이다 — 자동 승인(``auto_approve``)도
     원장에 「자동 승인」 으로 남아야 하므로 호출부는 평소처럼 :func:`resolve_line` → ``store.submit`` 으로
     올리고, 거기서 사람 없이 승인된다. 맞는 규칙이 없거나 ``metrics`` 를 안 주면 지금과 같다.
+
+    요청 자체가 결재인 행위(:attr:`catalog.ActionSpec.always_required`)는 켜고 끔과 상관없이 참이다.
     """
+    sp = catalog.spec(action_type)
+    if sp is not None and sp.always_required:
+        return True
     if metrics is not None and evaluate(app_db, action_type, metrics):
         return True
     return bool(get(app_db, action_type)["required"])
@@ -115,6 +120,9 @@ def list_all(app_db) -> List[Dict[str, Any]]:
 
     저장된 것만 돌려주면 아직 켜 본 적 없는 행위가 화면에서 사라진다. 그러면
     관리자는 그 행위를 영영 켤 수 없다 — 목록에 없으니까.
+
+    ``required`` 는 저장된 켜고 끔 그대로다. 요청 자체가 결재인 행위는 ``always_required`` 가 참이다(카탈로그
+    선언 — 화면은 스위치를 켜진 채 잠근다).
     """
     saved = {r["action_type"]: r for r in _q(
         app_db,
@@ -773,7 +781,7 @@ def preview(app_db, action_type: str,
         {"action_type", "rules_supported": True,
          "outcome": "auto_approve" | "line" | "require" | "policy",   # policy = 맞는 규칙 없음, 지금 정책대로
          "auto_approve": bool,      # 사람 없이 승인된다
-         "required": bool,          # 사람의 결재를 받는다
+         "required": bool,          # 사람의 결재를 받는다(요청 자체가 결재인 행위는 맞는 규칙이 없어도 참)
          "rule": int | None, "rule_label": str,
          "line_id": int | None,     # 쓰일(또는 미리 채워질) 결재선
          "line_locked": bool,       # 요청자가 결재선을 바꿀 수 없다
@@ -805,7 +813,9 @@ def preview(app_db, action_type: str,
            "line_id": pol.get("default_line_id"), "line_locked": bool(pol.get("line_locked"))}
     if hit:
         return {**out, "outcome": OUTCOME_REQUIRE, "required": True}
-    return {**out, "outcome": OUTCOME_POLICY, "required": bool(pol.get("required"))}
+    sp = catalog.spec(action_type)
+    always = bool(sp is not None and sp.always_required)
+    return {**out, "outcome": OUTCOME_POLICY, "required": always or bool(pol.get("required"))}
 
 
 def rules_using_line(app_db, line_id: int) -> List[str]:

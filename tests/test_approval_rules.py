@@ -151,6 +151,30 @@ def test_the_screen_gets_rules_and_metrics_with_each_action(db):
     assert rows["agent.deploy"]["rules"] == []
 
 
+def test_requests_that_are_approvals_themselves_are_declared(db):
+    """에이전트 컴퓨터 사양 · 나가는 통신은 주인의 요청 자체가 결재다 — [결재 목록 설정] 의 켜고 끔과 상관없이
+    결재를 받는다. 맞는 규칙이 없을 때 미리 보기가 「결재 없이 실행」 이라고 하지 않게 ``required`` 가 참이다."""
+    always = {sp.action_type for sp in catalog.CATALOG if sp.always_required}
+    assert always == {SPEC, NET}
+    assert catalog.spec(SPEC).to_dict()["always_required"] is True
+    assert catalog.spec("agent.deploy").to_dict()["always_required"] is False
+    policy.set_policy(db, SPEC, actor_id=7, required=False)
+    rows = {r["action_type"]: r for r in policy.list_all(db)}
+    assert rows[SPEC]["always_required"] is True and rows[NET]["always_required"] is True
+    assert rows[SPEC]["required"] is False, "저장된 켜고 끔은 그대로 싣는다"
+    assert rows["agent.deploy"]["always_required"] is False
+    for action in (SPEC, NET):
+        assert policy.is_required(db, action) is True
+        pv = policy.preview(db, action, {"targets": 1, "internal": False} if action == NET else SMALL)
+        assert pv["outcome"] == "policy" and pv["required"] is True and pv["auto_approve"] is False
+    # 자동 승인 규칙은 그대로 듣는다.
+    policy.set_rules(db, SPEC, [{"conditions": [_cond("mem_mib", "<=", 2048)], "outcome": "auto_approve"}], actor_id=7)
+    pv = policy.preview(db, SPEC, SMALL)
+    assert pv["outcome"] == "auto_approve" and pv["required"] is False
+    # 선언이 없는 행위는 지금과 같다.
+    assert policy.preview(db, "agent.deploy")["required"] is False
+
+
 def test_callers_can_tell_the_feature_exists():
     assert getattr(policy, "RULES_SUPPORTED", False) is True
     assert callable(getattr(policy, "preview", None))
@@ -403,7 +427,11 @@ def test_a_line_rule_whose_line_vanished_refuses_instead_of_going_lighter(db):
         policy.resolve_line(db, SPEC, metrics={"mem_mib": 9000})
 
 
-def test_require_turns_an_off_action_on_for_that_request(db):
+def test_require_turns_an_off_action_on_for_that_request(db, monkeypatch):
+    # 「결재 필요」 규칙의 일반 성질 — 요청 자체가 결재인 선언을 뗀 행위로 본다(두 행위 모두 그 선언이 있다).
+    import dataclasses
+
+    monkeypatch.setitem(catalog._BY_TYPE, NET, dataclasses.replace(catalog.spec(NET), always_required=False))
     lid = _line(db, 3)
     policy.set_policy(db, NET, actor_id=7, required=False, default_line_id=lid)
     policy.set_rules(db, NET, [{"conditions": [_cond("internal", "==", True)],
@@ -660,3 +688,4 @@ def test_preview_with_unsaved_rules(db):
     # 저장된 규칙이 있어도 rules= 가 이긴다
     policy.set_rules(db, NET, NET_AUTO, actor_id=7)
     assert policy.preview(db, NET, PUBLIC, rules=[])["outcome"] == "policy"
+

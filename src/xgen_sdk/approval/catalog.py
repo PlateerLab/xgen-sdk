@@ -108,6 +108,11 @@ class ActionSpec:
     metrics: Tuple[MetricSpec, ...] = ()
     #: 이 값이면 자동 승인하지 않는다(:class:`NoAutoSpec`) — ``metric`` 은 ``metrics`` 에 선언된 이름이어야 한다.
     no_auto: Tuple[NoAutoSpec, ...] = ()
+    #: **요청 자체가 결재인 행위**(2.30.0) — 관리자가 아닌 사람이 「바꿔 달라」 고 올리는 요청이라, 부르는 쪽이
+    #: [결재 목록 설정] 의 켜고 끔(``required``)을 보지 않고 늘 결재로 올린다(예: 에이전트 컴퓨터 사양 · 나가는 통신).
+    #: 맞는 규칙이 없으면 결재를 받는다 — :func:`policy.preview` 의 ``required`` · :func:`policy.is_required` 가
+    #: 참이다. 조건 규칙으로 자동 승인은 정할 수 있다. 켜고 끔 스위치는 화면이 켜진 채 잠근다(``to_dict`` 에 실린다).
+    always_required: bool = False
 
     def metric(self, name: str) -> Optional[MetricSpec]:
         return next((m for m in self.metrics if m.name == name), None)
@@ -123,6 +128,7 @@ class ActionSpec:
             "user_submittable": self.user_submittable,
             "metrics": [m.to_dict() for m in self.metrics],
             "no_auto": [n.to_dict() for n in self.no_auto],
+            "always_required": self.always_required,
         }
 
 
@@ -353,6 +359,8 @@ CATALOG: Tuple[ActionSpec, ...] = (
             MetricSpec("vm_use", "처음 쓰는 요청", METRIC_BOOL),
             MetricSpec("use_days", "사용 기간", METRIC_NUMBER, "일"),
         ),
+        # 주인의 요청 자체가 결재다 — 켜고 끔과 상관없이 결재를 받는다(규칙으로 자동 승인만 정한다).
+        always_required=True,
     ),
     ActionSpec(
         AGENT_NETWORK, "에이전트 나가는 통신 허용",
@@ -364,6 +372,7 @@ CATALOG: Tuple[ActionSpec, ...] = (
         ),
         # 사설망 · 내부 주소로 나가는 길은 규칙이 자동 승인으로 정해도 사람이 본다.
         no_auto=(NoAutoSpec("internal", True, "내부망 대상이 있는 요청"),),
+        always_required=True,
     ),
 )
 
