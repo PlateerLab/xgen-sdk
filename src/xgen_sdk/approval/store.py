@@ -267,17 +267,25 @@ def delete_line(app_db, line_id: int, actor_id: int, is_superuser: bool,
     if not is_superuser and int(owner[0]["owner_id"] or 0) != int(actor_id):
         raise E.ApprovalError("내가 만든 결재선만 삭제할 수 있습니다.")
 
-    used_by = default_policies_using_line(app_db, line_id)
-    if used_by and not force:
-        from xgen_sdk.approval import catalog
+    from xgen_sdk.approval import catalog, policy
 
-        labels = [(catalog.spec(a).label if catalog.spec(a) else a) for a in used_by]
+    used_by = default_policies_using_line(app_db, line_id)
+    # 조건 규칙(2.30.0)이 결과로 쓰는 줄도 같다 — 내리면 그 규칙이 가리킬 곳이 없다.
+    ruled_by = policy.rules_using_line(app_db, line_id)
+    if (used_by or ruled_by) and not force:
+        names = used_by + [a for a in ruled_by if a not in used_by]
+        labels = [(catalog.spec(a).label if catalog.spec(a) else a) for a in names]
         raise E.ApprovalError(
+            "이 결재선을 기본 결재선이나 조건 규칙으로 쓰는 행위가 있습니다: " + ", ".join(labels)
+            if ruled_by else
             "이 결재선을 기본 결재선으로 쓰는 행위가 있습니다: " + ", ".join(labels))
     if used_by:
         _q(app_db,
            "UPDATE approval_action_policies SET default_line_id = NULL, line_locked = FALSE "
            "WHERE default_line_id = %s", (int(line_id),))
+    if ruled_by:
+        # 그 줄을 쓰던 규칙은 「결재 필요」 로 바꾼다 — 지우면 더 가벼운 규칙(자동 승인)이 대신 맞을 수 있다.
+        policy.release_line_from_rules(app_db, int(line_id), actor_id)
 
     _q(app_db, "UPDATE approval_lines SET is_active = FALSE WHERE id = %s", (line_id,))
 
@@ -291,8 +299,22 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
            steps: Optional[Sequence[Dict[str, Any]]] = None,
            target_ref: Optional[str] = None,
            block_values: Sequence[Dict[str, Any]] = (),
-           via_user_api: bool = False) -> Dict[str, Any]:
+           via_user_api: bool = False,
+           metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """결재를 올린다. 템플릿(``line_id``) 또는 직접 지정(``steps``) 중 하나.
+
+    ``metrics`` (2.30.0)
+        요청이 실어 보낸 값(카탈로그가 행위마다 선언한 이름 → 숫자 · 문자열 · 불리언). 주면 조건 규칙을 본다
+        (:func:`xgen_sdk.approval.policy.evaluate`). 안 주면 규칙을 읽지도 않는다 — 2.29.0 과 같다.
+
+        **자동 승인** 규칙이 맞으면 사람 없이 ``approved`` 로 원장에 남기고(단계 없음 · 결재선 없음,
+        ``rule_decision.outcome == "auto_approve"``), 사람이 마지막으로 승인했을 때와 같은 뒤처리
+        (:func:`_settle_hooks` — 이 서비스가 적용을 가지면 지금, 아니면 소유 서비스의 워커가)를 돌린 뒤
+        기안자에게 「자동 승인」 알림(:data:`notifier.TEMPLATE_AUTO_APPROVED`)을 보낸다. 적용이 실패하면
+        지금처럼 ``apply_error`` 와 「적용 실패」 알림이다. ``line_id`` · ``steps`` · ``block_values`` 는 쓰지 않는다.
+
+        다른 규칙(결재선 · 결재 필요)이 맞으면 평소처럼 올리고 무엇이 맞았는지만 ``rule_decision`` 에 적는다
+        (결재선은 호출부가 같은 ``metrics`` 로 부른 :func:`policy.resolve_line` 이 이미 골랐다).
 
     템플릿을 썼더라도 단계는 **복사**한다 — 나중에 그 템플릿이 바뀌어도 이미
     올라간 결재의 결재선은 그대로여야 한다.
@@ -331,6 +353,19 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
         if dup:
             raise E.ApprovalError(
                 f"이미 진행 중인 결재(#{dup['id']})가 있습니다.")
+
+    decision: Optional[Dict[str, Any]] = None
+    if metrics is not None:
+        from xgen_sdk.approval import policy
+
+        hit = policy.evaluate(app_db, action_type, metrics)
+        if hit:
+            decision = {**hit, "metrics": policy.clean_metrics(action_type, metrics),
+                        "text": policy.describe_rule(action_type, hit)}
+            if hit["outcome"] == policy.OUTCOME_AUTO:
+                return _submit_auto_approved(
+                    app_db, requester_id=requester_id, title=title, reason=reason,
+                    action_type=action_type, payload=payload, target_ref=ref, decision=decision)
 
     if steps:
         specs = list(steps)
@@ -371,6 +406,8 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
          json.dumps(followup_config, ensure_ascii=False, default=str) if followup_config else None),
     )
     request_id = rows[0]["id"]
+    if decision:
+        _write_rule_decision(app_db, request_id, decision)
     for s in planned:
         _q(app_db,
            """INSERT INTO approval_request_steps
@@ -390,6 +427,83 @@ def submit(app_db, *, requester_id: int, title: str, reason: str = "",
     # 없으면 결재는 "아무도 반대해서" 가 아니라 "아무도 몰라서" 멈춘다.
     _notify_turn(app_db, out)
     return out
+
+
+def _write_rule_decision(app_db, request_id: int, decision: Dict[str, Any]) -> None:
+    """규칙이 무엇을 정했는지 적는다. 실패해도 결재는 그대로다(칸이 없는 DB — 규칙이 있을 수 없는 DB 다)."""
+    try:
+        _q(app_db, "UPDATE approval_requests SET rule_decision = %s WHERE id = %s",
+           (json.dumps(decision, ensure_ascii=False, default=str), int(request_id)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("결재 #%s 조건 규칙 기록 실패(결재는 그대로): %s", request_id, exc)
+
+
+def _submit_auto_approved(app_db, *, requester_id: int, title: str, reason: str,
+                          action_type: str, payload: Optional[Dict[str, Any]],
+                          target_ref: Optional[str], decision: Dict[str, Any]) -> Dict[str, Any]:
+    """조건 규칙의 **자동 승인** — 사람 없이 승인된 결재 한 건을 남기고 평소의 뒤처리를 돌린다.
+
+    단계가 없으므로 자기 결재 금지(결재선에 자기를 넣을 수 없다)와 부딪치지 않는다. 슈퍼유저 면제는
+    호출부가 이보다 먼저 본다(면제면 결재를 올리지 않는다 — 지금과 같다).
+    """
+    now = _now()
+    rows = _q(
+        app_db,
+        """
+        INSERT INTO approval_requests
+            (title, reason, action_type, payload, requester_id, line_id,
+             form_id, form_name, status, current_step_order, decided_at, target_ref, rule_decision)
+        VALUES (%s, %s, %s, %s, %s, NULL, NULL, NULL, %s, 1, %s, %s, %s) RETURNING id
+        """,
+        (str(title).strip()[:200], (reason or "").strip() or None, action_type,
+         json.dumps(payload or {}, ensure_ascii=False), requester_id, E.APPROVED, now, target_ref,
+         json.dumps(decision, ensure_ascii=False, default=str)),
+    )
+    request_id = rows[0]["id"]
+    logger.info("결재 자동 승인 #%s '%s' (기안 %s, 규칙 #%s)", request_id, title, requester_id,
+                decision.get("rule"))
+    # 사람이 마지막으로 승인했을 때와 **같은 길**이다 — 적용을 가진 서비스면 지금 돌리고, 아니면 워커가 가져간다.
+    _settle_hooks(app_db, request_id, get(app_db, request_id))
+    out = get(app_db, request_id)
+    try:
+        notifier.notify_auto_approved(app_db, out, rule=int(decision.get("rule") or 0),
+                                      rule_text=str(decision.get("text") or ""))
+        if out.get("apply_error"):
+            notifier.notify_apply_failed(app_db, out, str(out["apply_error"]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("결재 #%s 자동 승인 알림 실패(결재는 그대로): %s", request_id, exc)
+    return out
+
+
+def rule_decision(app_db, request_id: int) -> Optional[Dict[str, Any]]:
+    """조건 규칙이 이 결재를 어떻게 정했나 — ``{"rule", "outcome", "line_id", "label", "conditions",
+    "metrics", "text"}`` 또는 ``None``(규칙과 상관없이 올라갔거나, 칸이 아직 없는 DB)."""
+    try:
+        rows = _q(app_db, "SELECT rule_decision FROM approval_requests WHERE id = %s",
+                  (int(request_id),))
+    except Exception:  # noqa: BLE001 — 칸이 없는 DB = 규칙이 정한 결재가 없다
+        return None
+    if not rows:
+        return None
+    return _decode_decision(rows[0].get("rule_decision"))
+
+
+def _decode_decision(raw: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def is_auto_approved(req: Dict[str, Any]) -> bool:
+    """:func:`get` 이 돌려준 결재가 조건 규칙으로 자동 승인된 것인가."""
+    d = req.get("rule_decision") or {}
+    return isinstance(d, dict) and d.get("outcome") == "auto_approve"
 
 
 def get(app_db, request_id: int) -> Dict[str, Any]:
@@ -433,6 +547,10 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
     # 양식의 칸도 함께 준다. 없으면 빈 목록 — 화면은 그것으로 [기본 결재] 를
     # 판정한다(따로 묻지 않아도 되게).
     req["blocks"] = list_request_blocks(app_db, request_id)
+    # 조건 규칙(2.30.0). **단계가 없는 건만** 여기서 읽는다 — 자동 승인된 건이 그것이고, 그런 건은 칸이
+    # 있는 DB 에만 있다. 단계가 있는 건까지 읽으면 칸이 없는 옛 DB 에서 트랜잭션 안의 get 이 실패한 질의로
+    # 트랜잭션을 망친다. 단계가 있는 건의 규칙 기록은 :func:`rule_decision` 으로 따로 읽는다.
+    req["rule_decision"] = rule_decision(app_db, request_id) if not req["steps"] else None
     return req
 
 

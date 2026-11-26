@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 #: apply 를 실행하는 서비스. 결재 원장은 하나지만 **적용은 행위를 가진 쪽**이
 #: 한다 — core 가 남의 파드 안 함수를 부를 수는 없기 때문이다.
@@ -47,6 +47,30 @@ DOMAIN_AGENT = "에이전트"
 DOMAIN_FREE = "일반"
 
 
+#: 요청이 실어 보내는 값(``metrics``)의 종류 — 조건 규칙(:mod:`xgen_sdk.approval.policy`)이 이 종류로 비교한다.
+METRIC_NUMBER = "number"
+METRIC_STRING = "string"
+METRIC_BOOL = "bool"
+METRIC_KINDS = (METRIC_NUMBER, METRIC_STRING, METRIC_BOOL)
+
+
+@dataclass(frozen=True)
+class MetricSpec:
+    """행위가 요청에 실어 보낼 수 있는 값 하나 — 조건 규칙의 「값 이름」 목록(2.30.0).
+
+    [결재 목록 설정]의 조건 칸은 이 목록으로 만든다. 여기에 없는 이름으로는 규칙을 저장할 수 없다 —
+    요청이 보내지 않는 값에 건 조건은 영영 맞지 않아, 관리자는 규칙이 왜 안 듣는지 알 수 없다.
+    """
+
+    name: str
+    label: str
+    kind: str = METRIC_NUMBER
+    unit: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"name": self.name, "label": self.label, "kind": self.kind, "unit": self.unit}
+
+
 @dataclass(frozen=True)
 class ActionSpec:
     """결재를 태울 수 있는 행위 하나."""
@@ -60,6 +84,11 @@ class ActionSpec:
     gated: bool = True
     #: 사람이 마이페이지에서 **직접** 올릴 수 있는가.
     user_submittable: bool = False
+    #: 요청이 실어 보낼 수 있는 값들 — 조건 규칙은 이 이름에만 걸 수 있다. 비어 있으면 조건 규칙이 없는 행위다.
+    metrics: Tuple[MetricSpec, ...] = ()
+
+    def metric(self, name: str) -> Optional[MetricSpec]:
+        return next((m for m in self.metrics if m.name == name), None)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -70,6 +99,7 @@ class ActionSpec:
             "domain": self.domain,
             "gated": self.gated,
             "user_submittable": self.user_submittable,
+            "metrics": [m.to_dict() for m in self.metrics],
         }
 
 
@@ -292,11 +322,23 @@ CATALOG: Tuple[ActionSpec, ...] = (
         AGENT_COMPUTER_SPEC, "에이전트 컴퓨터 사양 변경",
         "관리자가 아닌 주인이 에이전트 컴퓨터의 템플릿 · vCPU · RAM · 디스크를 바꿔 달라고 요청하는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
+        metrics=(
+            MetricSpec("vcpus", "vCPU", METRIC_NUMBER, "개"),
+            MetricSpec("mem_mib", "메모리", METRIC_NUMBER, "MiB"),
+            MetricSpec("disk_gib", "디스크", METRIC_NUMBER, "GiB"),
+            MetricSpec("template", "템플릿", METRIC_STRING),
+            MetricSpec("vm_use", "처음 쓰는 요청", METRIC_BOOL),
+            MetricSpec("use_days", "사용 기간", METRIC_NUMBER, "일"),
+        ),
     ),
     ActionSpec(
         AGENT_NETWORK, "에이전트 나가는 통신 허용",
         "관리자가 아닌 주인이 에이전트 컴퓨터가 바깥의 특정 대상에 나갈 수 있게 열어 달라고 요청하는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
+        metrics=(
+            MetricSpec("targets", "대상 수", METRIC_NUMBER, "개"),
+            MetricSpec("internal", "내부망 대상 포함", METRIC_BOOL),
+        ),
     ),
 )
 
@@ -331,6 +373,12 @@ def label_of(action_type: str) -> str:
     if sp is not None:
         return sp.label
     return RETIRED.get(key, key)
+
+
+def metrics_of(action_type: str) -> List[Dict[str, object]]:
+    """그 행위가 요청에 실어 보낼 수 있는 값들(화면의 조건 칸) — 모르는 행위면 빈 목록."""
+    sp = _BY_TYPE.get(str(action_type or ""))
+    return [m.to_dict() for m in sp.metrics] if sp else []
 
 
 def gated_specs() -> Tuple[ActionSpec, ...]:
