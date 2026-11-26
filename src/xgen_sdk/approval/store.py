@@ -480,7 +480,9 @@ def _submit_auto_approved(app_db, *, requester_id: int, title: str, reason: str,
 
 def rule_decision(app_db, request_id: int) -> Optional[Dict[str, Any]]:
     """조건 규칙이 이 결재를 어떻게 정했나 — ``{"rule", "outcome", "line_id", "label", "conditions",
-    "metrics", "text"}`` 또는 ``None``(규칙과 상관없이 올라갔거나, 칸이 아직 없는 DB)."""
+    "metrics", "text"}`` 또는 ``None``(규칙과 상관없이 올라갔거나, 칸이 아직 없는 DB).
+
+    :func:`get` · 목록(:func:`outbox` · :func:`involved` · :func:`search`)도 같은 꼴을 ``rule_decision`` 에 싣는다."""
     try:
         rows = _q(app_db, "SELECT rule_decision FROM approval_requests WHERE id = %s",
                   (int(request_id),))
@@ -550,11 +552,34 @@ def get(app_db, request_id: int) -> Dict[str, Any]:
     # 양식의 칸도 함께 준다. 없으면 빈 목록 — 화면은 그것으로 [기본 결재] 를
     # 판정한다(따로 묻지 않아도 되게).
     req["blocks"] = list_request_blocks(app_db, request_id)
-    # 조건 규칙(2.30.0). **단계가 없는 건만** 여기서 읽는다 — 자동 승인된 건이 그것이고, 그런 건은 칸이
-    # 있는 DB 에만 있다. 단계가 있는 건까지 읽으면 칸이 없는 옛 DB 에서 트랜잭션 안의 get 이 실패한 질의로
-    # 트랜잭션을 망친다. 단계가 있는 건의 규칙 기록은 :func:`rule_decision` 으로 따로 읽는다.
-    req["rule_decision"] = rule_decision(app_db, request_id) if not req["steps"] else None
+    # 조건 규칙(2.30.0). 단계가 없는 건(자동 승인)은 늘 읽는다 — 그런 건은 칸이 있는 DB 에만 있다. 단계가 있는 건
+    # (규칙이 결재선 · 결재 필요를 정한 건)은 **트랜잭션 밖에서만** 읽는다 — 칸이 없는 옛 DB 에서 트랜잭션 안의 get 이
+    # 실패한 질의로 트랜잭션을 망치지 않게. 트랜잭션 밖의 실패는 그 질의 하나로 끝나고 None 이다.
+    if not req["steps"] or not isinstance(app_db, TransactionDB):
+        req["rule_decision"] = rule_decision(app_db, request_id)
+    else:
+        req["rule_decision"] = None
     return req
+
+
+def _attach_rule_decisions(app_db, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """목록의 행마다 조건 규칙 기록(``rule_decision`` — :func:`rule_decision` 과 같은 꼴, 없으면 None)을 싣는다(2.30.0).
+
+    목록 화면이 자동 승인된 건을 「자동 승인」 으로 보이게. 한 번의 질의로 읽는다. 칸이 없는 옛 DB 면(질의 실패) 아무
+    칸도 더하지 않는다 — 화면은 지금 그대로다. 트랜잭션 안에서는 읽지 않는다(:func:`get` 과 같은 까닭).
+    """
+    ids = [int(r["id"]) for r in rows if r.get("id") is not None]
+    if not ids or isinstance(app_db, TransactionDB):
+        return rows
+    marks = ", ".join(["%s"] * len(ids))
+    try:
+        found = _q(app_db, f"SELECT id, rule_decision FROM approval_requests WHERE id IN ({marks}) "
+                           "AND rule_decision IS NOT NULL", ids)
+    except Exception:  # noqa: BLE001 — 칸이 없는 DB = 규칙이 정한 결재가 없다
+        return rows
+    by_id = {int(f["id"]): _decode_decision(f.get("rule_decision")) for f in found}
+    return [{**row, "rule_decision": by_id.get(int(row["id"])) if row.get("id") is not None else None}
+            for row in rows]
 
 
 def decide(app_db, request_id: int, actor_id: int, action: str, note: str = "", *,
@@ -965,8 +990,8 @@ def inbox(app_db, user_id: int, *, only_pending: bool = True, limit: int = 100) 
 
 
 def outbox(app_db, user_id: int, *, limit: int = 100) -> List[Dict[str, Any]]:
-    """내가 올린 결재."""
-    return _q(
+    """내가 올린 결재. 행마다 ``rule_decision`` 이 실린다(:func:`_attach_rule_decisions`)."""
+    return _attach_rule_decisions(app_db, _q(
         app_db,
         """
         SELECT r.id, r.title, r.action_type, r.status, r.created_at,
@@ -977,7 +1002,7 @@ def outbox(app_db, user_id: int, *, limit: int = 100) -> List[Dict[str, Any]]:
          LIMIT %s
         """,
         (user_id, max(1, min(int(limit), 500))),
-    )
+    ))
 
 
 #: 진행 중 / 끝난 것. 화면의 두 탭이 이 두 묶음이다.
@@ -996,7 +1021,7 @@ def involved(app_db, user_id: int, states: Sequence[str], *, limit: int = 200) -
     if not states:
         return []
     marks = ", ".join(["%s"] * len(states))
-    return _q(
+    return _attach_rule_decisions(app_db, _q(
         app_db,
         f"""
         SELECT r.id, r.title, r.action_type, r.status, r.created_at, r.decided_at,
@@ -1024,7 +1049,7 @@ def involved(app_db, user_id: int, states: Sequence[str], *, limit: int = 200) -
         """,
         (user_id, user_id, user_id, *states, user_id, user_id,
          max(1, min(int(limit), 500))),
-    )
+    ))
 
 
 def can_read(req: Dict[str, Any], user_id: int, is_admin: bool) -> bool:
@@ -1136,7 +1161,7 @@ def search(app_db, *, statuses: Optional[Sequence[str]] = None,
     )
     for row in rows:
         row["current_step_title"] = _current_step_title(row)
-    return {"rows": rows, "total": total}
+    return {"rows": _attach_rule_decisions(app_db, rows), "total": total}
 
 
 def _current_step_title(row: Dict[str, Any]) -> Optional[str]:

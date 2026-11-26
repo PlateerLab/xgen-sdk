@@ -92,6 +92,9 @@ class RulesDB(PolicyDB):
                 if r["id"] == p[1]:
                     r["rule_decision"] = p[0]
             return []
+        if s.startswith("SELECT id, rule_decision FROM approval_requests WHERE id IN"):
+            return [{"id": r["id"], "rule_decision": r.get("rule_decision")}
+                    for r in self.t["approval_requests"] if r["id"] in p and r.get("rule_decision")]
         if s.startswith("SELECT rule_decision FROM approval_requests"):
             return [{"rule_decision": r.get("rule_decision")}
                     for r in self.t["approval_requests"] if r["id"] == p[0]]
@@ -689,3 +692,67 @@ def test_preview_with_unsaved_rules(db):
     policy.set_rules(db, NET, NET_AUTO, actor_id=7)
     assert policy.preview(db, NET, PUBLIC, rules=[])["outcome"] == "policy"
 
+
+# ── 결재 문서 · 목록이 규칙 기록을 싣는다(자동 승인 · 결재선 · 결재 필요) ──────────────
+
+
+def test_a_stepped_request_carries_the_rule_that_picked_its_line(db):
+    """규칙이 결재선을 정한 건도 문서가 「관리자 정책 규칙 #n 에 따라 이 결재선으로」 를 보이게 ``rule_decision`` 을 준다."""
+    light = _line(db, 3, name="팀장")
+    heavy = _line(db, 3, 5, name="팀장+인프라")
+    policy.set_policy(db, SPEC, actor_id=7, required=True, default_line_id=light)
+    policy.set_rules(db, SPEC, [{"conditions": [_cond("mem_mib", ">=", 8193)], "outcome": "line",
+                                 "line_id": heavy, "label": "큰 사양"}], actor_id=7)
+    big = {**SMALL, "mem_mib": 16384}
+    out = store.submit(db, requester_id=1, title="큰 사양", action_type=SPEC, line_id=heavy, metrics=big)
+    d = out["rule_decision"]
+    assert d["outcome"] == "line" and d["rule"] == 1 and d["label"] == "큰 사양" and d["text"]
+    assert store.get(db, out["id"])["rule_decision"] == d
+    # 규칙과 상관없이 올라간 건은 None 그대로
+    plain = store.submit(db, requester_id=1, title="작은 사양", action_type=SPEC, line_id=light, metrics=SMALL)
+    assert plain["rule_decision"] is None
+
+
+def test_inside_a_transaction_a_stepped_request_does_not_read_the_rule_column(db, monkeypatch):
+    """칸이 없는 옛 DB 에서 트랜잭션 안의 get 이 실패한 질의로 트랜잭션을 망치지 않게 — 트랜잭션 안에서는 읽지 않는다."""
+    from xgen_sdk.approval import sql
+
+    lid = _line(db, 3)
+    out = store.submit(db, requester_id=1, title="사양", action_type=SPEC, line_id=lid)
+    db.old_schema = True
+    asked = []
+    real = store.rule_decision
+    monkeypatch.setattr(store, "rule_decision", lambda app_db, rid: asked.append(rid) or real(app_db, rid))
+    with sql.transaction(db) as tx:
+        assert store.get(tx, out["id"])["rule_decision"] is None
+    assert asked == []
+    # 트랜잭션 밖이면 읽고, 칸이 없으면 None 으로 끝난다.
+    assert store.get(db, out["id"])["rule_decision"] is None and asked == [out["id"]]
+
+
+def test_lists_carry_the_rule_decision_so_auto_approvals_can_be_told(db, auto):
+    registry.register_action(SPEC, lambda p, r: None, label="사양")
+    done = store.submit(db, requester_id=1, title="작은 것", action_type=SPEC, metrics=SMALL)
+    assert store.is_auto_approved(done)
+    people = store.submit(db, requester_id=1, title="큰 것", action_type=SPEC, line_id=auto,
+                          metrics={**SMALL, "mem_mib": 9000}, target_ref="wf:2")
+    mine = {r["id"]: r for r in store.outbox(db, 1)}
+    assert mine[done["id"]]["rule_decision"]["outcome"] == "auto_approve"
+    assert mine[done["id"]]["rule_decision"]["label"] == "작은 사양"
+    assert mine[people["id"]]["rule_decision"] is None
+    rows = {r["id"]: r for r in store.involved(db, 1, store.DONE)}
+    assert rows[done["id"]]["rule_decision"]["outcome"] == "auto_approve"
+    # 칸이 없는 옛 DB — 규칙 기록 질의가 실패해도 목록은 그대로 나온다(칸을 더하지 않는다)
+    db.old_schema = True
+    plain = [{"id": done["id"], "title": "작은 것"}]
+    assert store._attach_rule_decisions(db, plain) is plain
+    assert len(store.outbox(db, 1)) == 2
+
+
+def test_lists_in_a_transaction_or_empty_stay_as_they_are(db):
+    from xgen_sdk.approval import sql
+
+    assert store._attach_rule_decisions(db, []) == []
+    with sql.transaction(db) as tx:
+        rows = [{"id": 1}]
+        assert store._attach_rule_decisions(tx, rows) == [{"id": 1}]
