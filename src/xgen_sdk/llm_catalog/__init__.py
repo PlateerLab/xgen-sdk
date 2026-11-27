@@ -21,6 +21,10 @@ Fallback 체인:
     'openai' / 'anthropic' / 'gemini'
     (vLLM / AWS Bedrock / SGL 은 list API 가 없어 대상 외 — 호출 시 fallback 만 반환)
 
+이미지 전용 모델 제외 (2.31.0):
+    gpt-image-* · chatgpt-image-* · gemini-*-image* · imagen* · dall-e* 는 채팅/비전 목록에 넣지 않는다
+    (판별 = xgen_sdk.image_generation.is_image_model). 이미지 모델은 이미지 생성 카탈로그가 다룬다.
+
 NULL/예외 안전:
     어떤 경우에도 빈 리스트 대신 fallback 을 반환 (UI dropdown 빈 채로 떨어지는 회귀 방지).
 """
@@ -33,6 +37,8 @@ import time
 from typing import Dict, List, Optional
 
 import httpx
+
+from xgen_sdk.image_generation.models import is_image_model
 
 logger = logging.getLogger("xgen-sdk.llm_catalog")
 
@@ -399,6 +405,9 @@ def _fetch_gemini(api_key: str) -> List[Dict[str, str]]:
         mid = name[len("models/"):]
         if not mid.startswith("gemini-"):
             continue
+        # 이미지 전용(gemini-2.5-flash-image 등)은 채팅 모델이 아니다 — 이미지 생성 카탈로그로
+        if is_image_model(mid):
+            continue
         # generateContent 지원 모델만 (chat-capable)
         methods = m.get("supportedGenerationMethods") or []
         if "generateContent" not in methods:
@@ -417,7 +426,7 @@ def _filter_chat(provider: str, models: List[Dict[str, str]]) -> List[Dict[str, 
         out: List[Dict[str, str]] = []
         for m in models:
             mid = m.get("value", "")
-            if _OPENAI_CHAT_EXCLUDE.search(mid):
+            if _OPENAI_CHAT_EXCLUDE.search(mid) or is_image_model(mid):
                 continue
             if not _OPENAI_CHAT_INCLUDE.search(mid):
                 continue
@@ -434,6 +443,8 @@ def _filter_vision(provider: str, models: List[Dict[str, str]]) -> List[Dict[str
     out: List[Dict[str, str]] = []
     for m in models:
         mid = m.get("value", "")
+        if is_image_model(mid):
+            continue
         if any(p.search(mid) for p in patterns):
             out.append(m)
     return out

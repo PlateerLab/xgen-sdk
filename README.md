@@ -53,6 +53,7 @@ infrastructure code lives here.**
 | `xgen_sdk.notification` | Generic per-user persistent in-app notifications with read tracking |
 | `xgen_sdk.llm_catalog` | Dynamic model list for OpenAI / Anthropic / Gemini with TTL cache and fallback |
 | `xgen_sdk.comfyui` | ComfyUI API-workflow rules (parameter mapping, validation, tool schema) and an async client |
+| `xgen_sdk.image_generation` | Image generation providers (OpenAI gpt-image, Gemini image, ComfyUI): generate/edit adapters, model list with capabilities, credential resolution |
 | `xgen_sdk.control_policy` | PII and forbidden-word policies: scope switches, masking rules, file byte masking, policy event log |
 | `xgen_sdk.XgenApp` | One-call bootstrap that wires DB + Config + Storage together |
 
@@ -396,6 +397,32 @@ prompt = apply_arguments(graph, mapping, {"prompt": "a red fox"})
 async with ComfyUIClient("http://comfy:8188") as client:
     result = await run_workflow(client, prompt, output_node_ids=mapping["outputs"], timeout_s=300)
     # {"prompt_id": ..., "duration_ms": ..., "files": [{"node_id", "filename", "content_type", "data"}]}
+```
+
+### Image generation — `xgen_sdk.image_generation`
+
+One layer over the image providers used by the admin catalog (xgen-core) and the
+`tools/image_generation` node (xgen-workflow). Adapters: OpenAI
+`images/generations` + `images/edits` (gpt-image models), Gemini
+`generateContent` with image output (reference images as input parts), and
+ComfyUI (wraps `comfyui.run_workflow`; mapping v1 has no image inputs, so no
+edit). Errors carry one of seven codes (`connection`, `auth`, `invalid_input`,
+`safety_blocked`, `timeout`, `no_output`, `quota`) with a Korean,
+provider-neutral user message.
+
+```python
+from xgen_sdk.image_generation import (
+    ImageRequest, resolve_credentials, list_models, generate_image, ImageGenerationError,
+)
+
+creds = resolve_credentials("gemini", app_db)        # custom key -> LLM settings key; .source = custom|llm|none
+models = await list_models("gemini", creds)         # [ModelInfo(model_id, capabilities, source=sync|fallback, recommended)]
+result = await generate_image(
+    "gemini",
+    ImageRequest(prompt="make it blue", size="16:9", reference_images=[{"data": png, "mime": "image/png"}]),
+    model="gemini-2.5-flash-image", credentials=creds,
+)
+result.images[0].data, result.usage, result.latency_ms
 ```
 
 ### Control policy: `xgen_sdk.control_policy`
