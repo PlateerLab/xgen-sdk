@@ -99,20 +99,20 @@ def output_kind(filename: str, list_key: str = "") -> str:
 
 def _check_base_url(base_url: Any) -> str:
     if not isinstance(base_url, str) or not base_url.strip():
-        raise ComfyUIConnectionError("ComfyUI 주소를 입력해 주세요.")
+        raise ComfyUIConnectionError("서버 주소를 입력해 주세요.")
     text = base_url.strip()
     try:
         parts = urlsplit(text)
         hostname = parts.hostname
         has_credentials = bool(parts.username or parts.password)
     except ValueError:
-        raise ComfyUIConnectionError("ComfyUI 주소 형식이 올바르지 않습니다.") from None
+        raise ComfyUIConnectionError("서버 주소 형식이 올바르지 않습니다.") from None
     if parts.scheme.lower() not in ("http", "https") or not hostname:
-        raise ComfyUIConnectionError("ComfyUI 주소는 http 또는 https로 시작해야 합니다.")
+        raise ComfyUIConnectionError("서버 주소는 http 또는 https로 시작해야 합니다.")
     if has_credentials:
-        raise ComfyUIConnectionError("ComfyUI 주소에는 계정 정보를 넣을 수 없습니다.")
+        raise ComfyUIConnectionError("서버 주소에는 계정 정보를 넣을 수 없습니다.")
     if parts.query or parts.fragment:
-        raise ComfyUIConnectionError("ComfyUI 주소에는 경로까지만 적어야 합니다.")
+        raise ComfyUIConnectionError("서버 주소에는 경로까지만 적어야 합니다.")
     return text.rstrip("/")
 
 
@@ -175,13 +175,13 @@ def _prompt_error_from_body(body: Any, status_code: int) -> ComfyUIPromptError:
         extra = error.get("extra_info") if isinstance(error, dict) and isinstance(error.get("extra_info"), dict) else {}
         class_type = extra.get("class_type")
         if isinstance(class_type, str) and class_type:
-            message = f"ComfyUI 서버에 {class_type} 노드가 설치되어 있지 않습니다."
+            message = f"이미지 생성 서버에 {class_type} 노드가 설치되어 있지 않습니다."
         else:
-            message = "ComfyUI 서버에 워크플로우가 쓰는 노드가 설치되어 있지 않습니다."
+            message = "이미지 생성 서버에 워크플로우가 쓰는 노드가 설치되어 있지 않습니다."
     elif error_type == "prompt_no_outputs":
         message = "워크플로우에 결과를 저장하는 노드가 없습니다."
     else:
-        message = "ComfyUI가 워크플로우 입력값을 받아들이지 않았습니다."
+        message = "이미지 생성 서버가 워크플로우 입력값을 받아들이지 않았습니다."
     detail = body if isinstance(body, (dict, list)) else f"HTTP {status_code}"
     return ComfyUIPromptError(message, node_errors=summary, error_type=error_type, detail=detail)
 
@@ -207,25 +207,25 @@ def _execution_error_from_status(prompt_id: str, status: Dict[str, Any]) -> Comf
     where = f"{node_type} (node {node_id})" if node_type or node_id else "the workflow"
     if interrupted:
         return ComfyUIExecutionError(
-            "ComfyUI에서 작업이 중단되었습니다.",
+            "이미지 생성 서버에서 작업이 중단되었습니다.",
             node_id=node_id, node_type=node_type, interrupted=True,
             detail=f"Execution was interrupted at {where}.",
         )
     if exc_message is not None or exc_type is not None:
         text = str(exc_message or "").strip()
         return ComfyUIExecutionError(
-            f"ComfyUI 실행 중 {node_type or '어느'} 노드에서 오류가 났습니다.",
+            f"이미지 생성 중 {node_type or '어느'} 노드에서 오류가 났습니다.",
             node_id=node_id, node_type=node_type,
             detail=_clip(f"{where} failed: {exc_type or 'Error'}: {text}".rstrip(": ")),
         )
     return ComfyUIExecutionError(
-        "ComfyUI 실행이 오류로 끝났습니다.",
+        "이미지 생성이 오류로 끝났습니다.",
         detail=f"Prompt {prompt_id} finished with status error.",
     )
 
 
 class ComfyUIClient:
-    """ComfyUI 서버 하나와 말하는 async 클라이언트.
+    """이미지 생성 서버 하나와 말하는 async 클라이언트.
 
     헤더(인증 값 포함)는 요청에만 싣고 속성·repr·오류 어디에도 남기지 않는다.
     """
@@ -243,7 +243,7 @@ class ComfyUIClient:
         clean_headers: Dict[str, str] = {}
         for key, value in (headers or {}).items():
             if not isinstance(key, str) or not key.strip() or not isinstance(value, str):
-                raise ComfyUIConnectionError("ComfyUI 요청 헤더의 이름과 값은 문자열이어야 합니다.")
+                raise ComfyUIConnectionError("이미지 생성 서버 요청 헤더의 이름과 값은 문자열이어야 합니다.")
             clean_headers[key.strip()] = value
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -274,12 +274,12 @@ class ComfyUIClient:
             response = await self._client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:
             raise ComfyUITimeout(
-                "ComfyUI 서버가 제한 시간 안에 응답하지 않았습니다.",
+                "이미지 생성 서버가 제한 시간 안에 응답하지 않았습니다.",
                 detail=f"{method} {path}: {type(exc).__name__}",
             ) from None
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise ComfyUIConnectionError(
-                "ComfyUI 서버에 연결할 수 없습니다.",
+                "이미지 생성 서버에 연결할 수 없습니다.",
                 detail=f"{method} {path}: {type(exc).__name__}: {exc}",
             ) from None
         self._raise_for_access(response, method, path)
@@ -290,11 +290,11 @@ class ComfyUIClient:
         status = response.status_code
         if status in (401, 403):
             raise ComfyUIAuthError(
-                "ComfyUI 서버가 인증을 거부했습니다.", detail=f"{method} {path}: HTTP {status}",
+                "이미지 생성 서버가 인증을 거부했습니다.", detail=f"{method} {path}: HTTP {status}",
             )
         if 300 <= status < 400:
             raise ComfyUIConnectionError(
-                "ComfyUI 서버가 다른 주소로 넘기려 해서 주소를 확인해야 합니다.",
+                "이미지 생성 서버가 다른 주소로 넘기려 해서 주소를 확인해야 합니다.",
                 detail=f"{method} {path}: HTTP {status} redirect not followed",
             )
 
@@ -302,14 +302,14 @@ class ComfyUIClient:
     def _json(response: httpx.Response, method: str, path: str) -> Any:
         if response.status_code >= 400:
             raise ComfyUIConnectionError(
-                "ComfyUI 서버가 요청을 처리하지 못했습니다.",
+                "이미지 생성 서버가 요청을 처리하지 못했습니다.",
                 detail=f"{method} {path}: HTTP {response.status_code}: {_clip(response.text, 500)}",
             )
         try:
             return response.json()
         except ValueError:
             raise ComfyUIConnectionError(
-                "ComfyUI 서버의 응답을 읽을 수 없어 주소가 ComfyUI인지 확인해야 합니다.",
+                "이미지 생성 서버의 응답을 읽을 수 없어 주소가 맞는지 확인해야 합니다.",
                 detail=f"{method} {path}: HTTP {response.status_code}: non-JSON body {_clip(response.text, 200)!r}",
             ) from None
 
@@ -323,7 +323,7 @@ class ComfyUIClient:
         data = await self._get_json("/system_stats")
         if not isinstance(data, dict) or not isinstance(data.get("system"), dict):
             raise ComfyUIConnectionError(
-                "ComfyUI 서버의 응답을 읽을 수 없어 주소가 ComfyUI인지 확인해야 합니다.",
+                "이미지 생성 서버의 응답을 읽을 수 없어 주소가 맞는지 확인해야 합니다.",
                 detail="GET /system_stats: unexpected body shape",
             )
         return data
@@ -338,7 +338,7 @@ class ComfyUIClient:
             data = await self._get_json("/object_info")
             if not isinstance(data, dict):
                 raise ComfyUIConnectionError(
-                    "ComfyUI 서버의 응답을 읽을 수 없어 주소가 ComfyUI인지 확인해야 합니다.",
+                    "이미지 생성 서버의 응답을 읽을 수 없어 주소가 맞는지 확인해야 합니다.",
                     detail="GET /object_info: unexpected body shape",
                 )
             return data
@@ -393,7 +393,7 @@ class ComfyUIClient:
                 parsed = None
             if parsed is None:
                 raise ComfyUIPromptError(
-                    "ComfyUI가 워크플로우 입력값을 받아들이지 않았습니다.",
+                    "이미지 생성 서버가 워크플로우 입력값을 받아들이지 않았습니다.",
                     detail=f"POST /prompt: HTTP 400: {_clip(response.text, 500)}",
                 )
             raise _prompt_error_from_body(parsed, response.status_code)
@@ -401,7 +401,7 @@ class ComfyUIClient:
         new_id = data.get("prompt_id") if isinstance(data, dict) else None
         if not isinstance(new_id, str) or not new_id:
             raise ComfyUIConnectionError(
-                "ComfyUI 서버의 응답을 읽을 수 없어 주소가 ComfyUI인지 확인해야 합니다.",
+                "이미지 생성 서버의 응답을 읽을 수 없어 주소가 맞는지 확인해야 합니다.",
                 detail="POST /prompt: response has no prompt_id",
             )
         return new_id
@@ -444,7 +444,7 @@ class ComfyUIClient:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise ComfyUITimeout(
-                    "정해진 시간 안에 ComfyUI 작업이 끝나지 않았습니다.",
+                    "정해진 시간 안에 이미지 생성 작업이 끝나지 않았습니다.",
                     detail=f"Prompt {prompt_id} did not finish within {timeout_s} seconds.",
                 )
             await asyncio.sleep(min(interval, remaining))
@@ -513,12 +513,12 @@ class ComfyUIClient:
                 self._raise_for_access(response, "GET", "/view")
                 if response.status_code == 404:
                     raise ComfyUIOutputError(
-                        "생성된 파일을 ComfyUI에서 찾을 수 없습니다.",
+                        "생성된 파일을 이미지 생성 서버에서 찾을 수 없습니다.",
                         code="no_output", detail=f"GET /view: HTTP 404 for {filename}",
                     )
                 if response.status_code >= 400:
                     raise ComfyUIConnectionError(
-                        "ComfyUI 서버가 요청을 처리하지 못했습니다.",
+                        "이미지 생성 서버가 요청을 처리하지 못했습니다.",
                         detail=f"GET /view: HTTP {response.status_code} for {filename}",
                     )
                 declared = response.headers.get("content-length")
@@ -540,12 +540,12 @@ class ComfyUIClient:
                 return bytes(buffer)
         except httpx.TimeoutException as exc:
             raise ComfyUITimeout(
-                "ComfyUI 서버가 제한 시간 안에 응답하지 않았습니다.",
+                "이미지 생성 서버가 제한 시간 안에 응답하지 않았습니다.",
                 detail=f"GET /view: {type(exc).__name__}",
             ) from None
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise ComfyUIConnectionError(
-                "ComfyUI 서버에 연결할 수 없습니다.", detail=f"GET /view: {type(exc).__name__}: {exc}",
+                "이미지 생성 서버에 연결할 수 없습니다.", detail=f"GET /view: {type(exc).__name__}: {exc}",
             ) from None
 
     async def interrupt(self, prompt_id: Optional[str] = None) -> None:

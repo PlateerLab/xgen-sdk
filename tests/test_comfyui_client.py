@@ -256,7 +256,7 @@ def test_submit_node_errors_real_shape():
     err = info.value
     assert err.code == "prompt_invalid"
     assert err.error_type == "prompt_outputs_failed_validation"
-    assert err.message == "ComfyUI가 워크플로우 입력값을 받아들이지 않았습니다."
+    assert err.message == "이미지 생성 서버가 워크플로우 입력값을 받아들이지 않았습니다."
     assert err.node_errors == [
         {"node_id": "1", "class_type": "EmptyImage", "input": "width",
          "message": "Failed to convert an input value to a INT value (width, abc, invalid literal for int() with base 10: 'abc')"},
