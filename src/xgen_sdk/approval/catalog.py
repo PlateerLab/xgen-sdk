@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 #: apply 를 실행하는 서비스. 결재 원장은 하나지만 **적용은 행위를 가진 쪽**이
 #: 한다 — core 가 남의 파드 안 함수를 부를 수는 없기 때문이다.
@@ -47,6 +47,50 @@ DOMAIN_AGENT = "에이전트"
 DOMAIN_FREE = "일반"
 
 
+#: 요청이 실어 보내는 값(``metrics``)의 종류 — 조건 규칙(:mod:`xgen_sdk.approval.policy`)이 이 종류로 비교한다.
+METRIC_NUMBER = "number"
+METRIC_STRING = "string"
+METRIC_BOOL = "bool"
+METRIC_KINDS = (METRIC_NUMBER, METRIC_STRING, METRIC_BOOL)
+
+
+@dataclass(frozen=True)
+class MetricSpec:
+    """행위가 요청에 실어 보낼 수 있는 값 하나 — 조건 규칙의 「값 이름」 목록(2.30.0).
+
+    [결재 목록 설정]의 조건 칸은 이 목록으로 만든다. 여기에 없는 이름으로는 규칙을 저장할 수 없다 —
+    요청이 보내지 않는 값에 건 조건은 영영 맞지 않아, 관리자는 규칙이 왜 안 듣는지 알 수 없다.
+    """
+
+    name: str
+    label: str
+    kind: str = METRIC_NUMBER
+    unit: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"name": self.name, "label": self.label, "kind": self.kind, "unit": self.unit}
+
+
+@dataclass(frozen=True)
+class NoAutoSpec:
+    """「이 값이면 조건 규칙이 자동 승인으로 정해도 자동 승인하지 않는다」 — 행위의 성질 하나(2.30.0).
+
+    관리자가 「대상 3개 이하면 자동 승인」 처럼 규칙을 쓸 때 ``internal`` 을 조건에 넣지 않았다는 이유만으로
+    사설망이 결재 없이 열리면 안 된다. 그런 값은 규칙이 아니라 카탈로그가 선언하고, :mod:`xgen_sdk.approval.policy`
+    가 한 곳에서 지킨다(부르는 쪽이 빠뜨릴 수 없게). 요청에 ``metric`` 값이 아예 없으면(부르는 쪽이 싣지 않음)
+    막힌 것으로 본다 — 모르는 채로 자동 승인되지 않게.
+
+    ``label`` 은 「…요청」 꼴의 명사구다 — 화면 문장은 ``{label}은 자동 승인하지 않습니다`` 로 짓는다.
+    """
+
+    metric: str
+    value: object
+    label: str
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"metric": self.metric, "value": self.value, "label": self.label}
+
+
 @dataclass(frozen=True)
 class ActionSpec:
     """결재를 태울 수 있는 행위 하나."""
@@ -60,6 +104,18 @@ class ActionSpec:
     gated: bool = True
     #: 사람이 마이페이지에서 **직접** 올릴 수 있는가.
     user_submittable: bool = False
+    #: 요청이 실어 보낼 수 있는 값들 — 조건 규칙은 이 이름에만 걸 수 있다. 비어 있으면 조건 규칙이 없는 행위다.
+    metrics: Tuple[MetricSpec, ...] = ()
+    #: 이 값이면 자동 승인하지 않는다(:class:`NoAutoSpec`) — ``metric`` 은 ``metrics`` 에 선언된 이름이어야 한다.
+    no_auto: Tuple[NoAutoSpec, ...] = ()
+    #: **요청 자체가 결재인 행위**(2.30.0) — 관리자가 아닌 사람이 「바꿔 달라」 고 올리는 요청이라, 부르는 쪽이
+    #: [결재 목록 설정] 의 켜고 끔(``required``)을 보지 않고 늘 결재로 올린다(예: 에이전트 컴퓨터 사양 · 나가는 통신).
+    #: 맞는 규칙이 없으면 결재를 받는다 — :func:`policy.preview` 의 ``required`` · :func:`policy.is_required` 가
+    #: 참이다. 조건 규칙으로 자동 승인은 정할 수 있다. 켜고 끔 스위치는 화면이 켜진 채 잠근다(``to_dict`` 에 실린다).
+    always_required: bool = False
+
+    def metric(self, name: str) -> Optional[MetricSpec]:
+        return next((m for m in self.metrics if m.name == name), None)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -70,6 +126,9 @@ class ActionSpec:
             "domain": self.domain,
             "gated": self.gated,
             "user_submittable": self.user_submittable,
+            "metrics": [m.to_dict() for m in self.metrics],
+            "no_auto": [n.to_dict() for n in self.no_auto],
+            "always_required": self.always_required,
         }
 
 
@@ -292,11 +351,28 @@ CATALOG: Tuple[ActionSpec, ...] = (
         AGENT_COMPUTER_SPEC, "에이전트 컴퓨터 사양 변경",
         "관리자가 아닌 주인이 에이전트 컴퓨터의 템플릿 · vCPU · RAM · 디스크를 바꿔 달라고 요청하는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
+        metrics=(
+            MetricSpec("vcpus", "vCPU", METRIC_NUMBER, "개"),
+            MetricSpec("mem_mib", "메모리", METRIC_NUMBER, "MiB"),
+            MetricSpec("disk_gib", "디스크", METRIC_NUMBER, "GiB"),
+            MetricSpec("template", "템플릿", METRIC_STRING),
+            MetricSpec("vm_use", "처음 쓰는 요청", METRIC_BOOL),
+            MetricSpec("use_days", "사용 기간", METRIC_NUMBER, "일"),
+        ),
+        # 주인의 요청 자체가 결재다 — 켜고 끔과 상관없이 결재를 받는다(규칙으로 자동 승인만 정한다).
+        always_required=True,
     ),
     ActionSpec(
         AGENT_NETWORK, "에이전트 나가는 통신 허용",
         "관리자가 아닌 주인이 에이전트 컴퓨터가 바깥의 특정 대상에 나갈 수 있게 열어 달라고 요청하는 것",
         OWNER_WORKFLOW, DOMAIN_AGENT,
+        metrics=(
+            MetricSpec("targets", "대상 수", METRIC_NUMBER, "개"),
+            MetricSpec("internal", "내부망 대상 포함", METRIC_BOOL),
+        ),
+        # 사설망 · 내부 주소로 나가는 길은 규칙이 자동 승인으로 정해도 사람이 본다.
+        no_auto=(NoAutoSpec("internal", True, "내부망 대상이 있는 요청"),),
+        always_required=True,
     ),
 )
 
@@ -331,6 +407,18 @@ def label_of(action_type: str) -> str:
     if sp is not None:
         return sp.label
     return RETIRED.get(key, key)
+
+
+def metrics_of(action_type: str) -> List[Dict[str, object]]:
+    """그 행위가 요청에 실어 보낼 수 있는 값들(화면의 조건 칸) — 모르는 행위면 빈 목록."""
+    sp = _BY_TYPE.get(str(action_type or ""))
+    return [m.to_dict() for m in sp.metrics] if sp else []
+
+
+def no_auto_of(action_type: str) -> List[Dict[str, object]]:
+    """그 행위가 자동 승인하지 않는 값들(:class:`NoAutoSpec`) — 없거나 모르는 행위면 빈 목록."""
+    sp = _BY_TYPE.get(str(action_type or ""))
+    return [n.to_dict() for n in sp.no_auto] if sp else []
 
 
 def gated_specs() -> Tuple[ActionSpec, ...]:

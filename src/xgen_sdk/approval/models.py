@@ -171,6 +171,10 @@ class ApprovalRequest(BaseModel):
         #: 뒤처리를 **맡은** 시각 — 여러 파드의 워커가 같은 건을 동시에 적용하지 않게
         #: 먼저 선점한다(:func:`store.finish`). 맡은 워커가 죽으면 수명이 지나 다른 워커가 잇는다.
         self.apply_claimed_at = kwargs.get('apply_claimed_at')
+        #: 조건 규칙이 이 요청을 어떻게 정했나(2.30.0) — JSON ``{"rule", "outcome", "label", "metrics", ...}``.
+        #: 규칙이 맞았을 때만 적는다. ``outcome`` 이 ``auto_approve`` 면 사람 없이 승인된 건이다(단계가 없다).
+        #: 비어 있으면 규칙과 상관없이 올라간 건이다 — 옛 행이 모두 그렇다.
+        self.rule_decision = kwargs.get('rule_decision')
 
     def get_table_name(self) -> str:
         return "approval_requests"
@@ -202,6 +206,7 @@ class ApprovalRequest(BaseModel):
             'applied_at': 'TIMESTAMP',
             'apply_error': 'VARCHAR(1000)',
             'apply_claimed_at': 'TIMESTAMP',
+            'rule_decision': 'TEXT',
         }
 
     def get_indexes(self) -> List[tuple]:
@@ -320,6 +325,9 @@ class ApprovalActionPolicy(BaseModel):
         #: 미리 채우는 편의일 뿐이고 요청자가 바꾼다. 기본은 고정 안 함 —
         #: 잠그는 것은 관리자의 명시적 선택이어야 한다(무제한 원칙).
         self.line_locked = kwargs.get('line_locked', False)
+        #: 조건 규칙(2.30.0) — 요청이 실어 보낸 값(``metrics``)을 보고 자동 승인 · 결재선 · 결재 필요를 정하는
+        #: 순서 있는 목록(JSON). 비어 있으면 위의 세 값대로다. 옛 판 SDK 는 이 칸을 모른 채 지금 정책대로 돈다.
+        self.rules = kwargs.get('rules', '[]')
         self.updated_by = kwargs.get('updated_by')
         self.updated_at = kwargs.get('updated_at')
 
@@ -335,6 +343,7 @@ class ApprovalActionPolicy(BaseModel):
             'required': 'BOOLEAN NOT NULL DEFAULT FALSE',
             'default_line_id': 'INTEGER REFERENCES approval_lines(id) ON DELETE SET NULL',
             'line_locked': 'BOOLEAN NOT NULL DEFAULT FALSE',
+            'rules': "TEXT NOT NULL DEFAULT '[]'",
             'updated_by': 'INTEGER',
             'updated_at': 'TIMESTAMP',
             'UNIQUE_action': 'UNIQUE(action_type)',

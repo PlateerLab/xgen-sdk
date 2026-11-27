@@ -48,6 +48,7 @@ TEMPLATE_APPROVED = "APV-OK"    # 내가 올린 건이 승인 완료
 TEMPLATE_REJECTED = "APV-NO"    # 내가 올린 건이 거절
 TEMPLATE_APPLY_FAIL = "APV-ERR"  # 승인은 됐는데 적용이 실패
 TEMPLATE_CANCELED = "APV-CXL"    # 전제가 사라져 시스템이 회수했다
+TEMPLATE_AUTO_APPROVED = "APV-AUTO"  # 내가 올린 건이 관리자 정책(조건 규칙)으로 자동 승인(2.30.0)
 
 #: 템플릿이 DB 에 없어도 알림은 나가야 한다 — 시드는 "운영팀이 다듬을 수 있게"
 #: 올려 두는 것이지 동작의 전제가 아니다.
@@ -71,6 +72,10 @@ DEFAULTS: Dict[str, tuple] = {
     TEMPLATE_CANCELED: (
         "결재 회수: {{title}}",
         "'{{title}}' 결재가 회수되었습니다. 사유: {{note}}",
+    ),
+    TEMPLATE_AUTO_APPROVED: (
+        "결재 자동 승인: {{title}}",
+        "'{{title}}' 결재가 관리자 정책(조건 규칙 #{{rule}})에 따라 결재 없이 자동 승인되었습니다.",
     ),
 }
 
@@ -218,6 +223,27 @@ def notify_settled(app_db, req: Dict[str, Any], *, actor_name: str = "", note: s
         _insert(app_db, int(requester), tid, title, message, _link(req.get("id"), base=link))
     except Exception as exc:  # noqa: BLE001
         logger.warning("결재 종결 알림 실패: %s", exc)
+
+
+def notify_auto_approved(app_db, req: Dict[str, Any], *, rule: int, rule_text: str = "") -> None:
+    """조건 규칙으로 **자동 승인**된 것을 기안자에게(2.30.0).
+
+    승인 완료 알림(``APV-OK``)과 템플릿을 나눈다 — 기안자가 "누가 승인했나" 를 찾다가 결재자가 없는 것을
+    보고 놀라지 않게, 알림에서부터 관리자 정책으로 승인됐다고 말한다. 치환값: ``{{rule}}`` (규칙 번호),
+    ``{{rule_text}}`` (규칙 한 줄), 그리고 :func:`_common` 의 것들.
+    """
+    if app_db is None or not req.get("requester_id"):
+        return
+    try:
+        title, message, link = _render(app_db, TEMPLATE_AUTO_APPROVED, {
+            **_common(req),
+            "rule": str(rule),
+            "rule_text": rule_text or "",
+        })
+        _insert(app_db, int(req["requester_id"]), TEMPLATE_AUTO_APPROVED,
+                title, message, _link(req.get("id"), base=link))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("결재 자동 승인 알림 실패: %s", exc)
 
 
 def notify_apply_failed(app_db, req: Dict[str, Any], error: str) -> None:
